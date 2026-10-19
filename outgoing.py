@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import secrets
 import shutil
+import sys
 import time
 import unicodedata
 from pathlib import Path
@@ -27,6 +28,9 @@ BLOCKED = {".exe", ".com", ".bat", ".cmd", ".msi", ".msp", ".scr", ".pif", ".cpl
            ".vhd", ".vhdx", ".appx", ".msix", ".application", ".gadget", ".scf", ".inf", ".chm", ".docm", ".xlsm",
            ".pptm", ".dotm", ".xltm", ".xlam", ".ppam", ".sldm", ".xlsb", ".xll", ".msc", ".jnlp", ".ws", ".vb",
            ".apk", ".sh", ".py", ".html", ".htm", ".svg"}
+if sys.platform == "darwin":  # what runs or installs when opened on a Mac
+    BLOCKED |= {".command", ".tool", ".pkg", ".mpkg", ".dmg", ".scpt", ".scptd", ".applescript", ".terminal",
+                ".workflow", ".zsh", ".bash", ".csh", ".dylib", ".kext", ".webloc", ".inetloc", ".fileloc"}
 IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
                ".webp": "image/webp"}
 ID = re.compile(r"[0-9a-f]{16}")

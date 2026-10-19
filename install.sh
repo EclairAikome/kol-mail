@@ -77,7 +77,7 @@ py_ok() {  # 3.11 以上才行。系统自带的 /usr/bin/python3 是 3.9，而�
 }
 find_python() {
     local c
-    for c in $(command -v python3.13 python3.12 python3.11 python3 2>/dev/null) \
+    for c in $(command -v python3.13 python3.12 python3.14 python3.11 python3 2>/dev/null) \
              /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3.11 \
              /usr/local/bin/python3.13 /usr/local/bin/python3.12 /usr/local/bin/python3.11 \
              /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 \
