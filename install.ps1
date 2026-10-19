@@ -279,9 +279,12 @@ $policy = (Run-Native { & $Mcp config policy }).Out
 $rev = [regex]::Match($policy, "(?m)^revision=(\d+)").Groups[1].Value
 $needSend = $policy -notmatch "(?m)^allowed_mutations=.*\bsend\b"
 $needAtt = $policy -notmatch "(?m)^enable_attachment_download=true"
-if ($rev -and ($needSend -or $needAtt)) {
+# 收件人白名单为空时，回信会报 Recipient(s) not in allowlist
+$needRecipients = $policy -match "(?m)^allowed_recipients=none\b"
+if ($rev -and ($needSend -or $needAtt -or $needRecipients)) {
+    # '*' 必须和参数名连写：分开传的话，mcp-email-server 在 Windows 上会把它展开成当前目录的文件名
     $r = Run-Native { & $Mcp config update-policy --expected-revision $rev --enable-attachment-download --enable-attachment-content `
-        --allowed-mutations "draft,organize,send,append" --allowed-recipients "*" }
+        --allowed-mutations "draft,organize,send,append" '--allowed-recipients=*' }
     if ($r.Code -ne 0) { Warn "  没能打开回信和附件权限：$($r.Out)" }
 }
 
