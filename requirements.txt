@@ -1,0 +1,10 @@
+# Tested together; the installer and the updater install exactly these.
+mcp-email-server==1.13.1
+mcp==1.30.0
+starlette==1.8.0
+uvicorn==0.54.0
+anyio==4.15.1
+httpx==0.28.1
+pywin32==312
+openpyxl==3.1.5
+cryptography==50.0.2

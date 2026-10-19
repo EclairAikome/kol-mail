@@ -1,0 +1,27 @@
+{
+  "email_enabled": true,
+  "telegram_enabled": true,
+  "holidays": [
+    "2026-11-08", "2026-11-09", "2026-12-25",
+    "2027-01-01", "2027-02-06", "2027-02-07", "2027-02-08", "2027-03-10", "2027-03-26",
+    "2027-05-01", "2027-05-17", "2027-05-20", "2027-08-09", "2027-10-28", "2027-12-25"
+  ],
+  "templates": {
+    "email": {
+      "en": "(Automatic reply)\n\nHi there,\n\nThanks for your email. It's outside my working hours right now (Monday to Friday, 10:00 to 18:00, GMT+8), so I can't reply straight away. I'll get back to you as soon as I'm back at work.\n\nBest,",
+      "es": "(Respuesta automática)\n\nHola:\n\nGracias por tu correo. Ahora mismo estoy fuera de mi horario laboral (de lunes a viernes, de 10:00 a 18:00, GMT+8), así que no puedo responderte enseguida. Te contestaré en cuanto vuelva al trabajo.\n\nUn saludo,",
+      "fr": "(Réponse automatique)\n\nBonjour,\n\nMerci pour votre e-mail. Je suis actuellement en dehors de mes heures de travail (du lundi au vendredi, de 10h00 à 18h00, GMT+8), je ne peux donc pas vous répondre tout de suite. Je reviendrai vers vous dès mon retour.\n\nBien cordialement,",
+      "it": "(Risposta automatica)\n\nCiao,\n\ngrazie per la tua email. In questo momento sono fuori dall'orario di lavoro (dal lunedì al venerdì, dalle 10:00 alle 18:00, GMT+8), quindi non posso risponderti subito. Ti risponderò appena torno al lavoro.\n\nUn saluto,",
+      "ru": "(Автоматический ответ)\n\nЗдравствуйте!\n\nСпасибо за письмо. Сейчас у меня нерабочее время (с понедельника по пятницу, с 10:00 до 18:00 по GMT+8), поэтому я не могу ответить сразу. Отвечу, как только вернусь к работе.\n\nС уважением,",
+      "pt": "(Resposta automática)\n\nOlá,\n\nAgradeço o seu e-mail. No momento estou fora do meu horário de trabalho (de segunda a sexta, das 10:00 às 18:00, GMT+8), por isso não consigo responder agora. Respondo assim que voltar ao trabalho.\n\nAbraços,"
+    },
+    "telegram": {
+      "en": "(Automatic reply) Hi! Thanks for your message. I'm outside my working hours right now (Monday to Friday, 10:00 to 18:00, GMT+8). I'll reply as soon as I'm back at work.",
+      "es": "(Respuesta automática) ¡Hola! Gracias por tu mensaje. Ahora estoy fuera de mi horario laboral (de lunes a viernes, de 10:00 a 18:00, GMT+8). Te respondo en cuanto vuelva al trabajo.",
+      "fr": "(Réponse automatique) Bonjour ! Merci pour votre message. Je suis en dehors de mes heures de travail (du lundi au vendredi, de 10h00 à 18h00, GMT+8). Je vous réponds dès mon retour.",
+      "it": "(Risposta automatica) Ciao! Grazie per il messaggio. Ora sono fuori dall'orario di lavoro (dal lunedì al venerdì, dalle 10:00 alle 18:00, GMT+8). Ti rispondo appena torno al lavoro.",
+      "ru": "(Автоматический ответ) Здравствуйте! Спасибо за сообщение. Сейчас у меня нерабочее время (с понедельника по пятницу, с 10:00 до 18:00 по GMT+8). Отвечу, как только вернусь к работе.",
+      "pt": "(Resposta automática) Olá! Agradeço a mensagem. Agora estou fora do horário de trabalho (de segunda a sexta, das 10:00 às 18:00, GMT+8). Respondo assim que voltar ao trabalho."
+    }
+  }
+}

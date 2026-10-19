@@ -1,0 +1,1122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KOL Mail</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --line: #e3e6ea; --text: #1d2228; --muted: #6b7380;
+    --accent: #2f6fde; --accent-soft: #e8f0fd; --warn: #b4540a; --ok: #1f8a4c; --bad: #c0392b;
+    --zh: #fbfaf4; --unread: #f2f7ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #15181c; --panel: #1d2126; --line: #2e343b; --text: #e6e9ed; --muted: #8d96a3;
+      --accent: #6c9cf0; --accent-soft: #24324a; --warn: #e39a52; --ok: #5cc48a; --bad: #e57368;
+      --zh: #22251f; --unread: #1f2a3a;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+  header { height: 44px; display: flex; align-items: center; gap: 16px; padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 15px; margin: 0; white-space: nowrap; }
+  #status { color: var(--muted); font-size: 12px; margin-left: auto; }
+  #searchForm { display: flex; gap: 6px; flex: 0 1 420px; min-width: 200px; }
+  #searchForm input { flex: 1; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; }
+  .badge.box { background: var(--line); color: var(--muted); }
+  .channels { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 12px; font-size: 13px; }
+  .channels .label { color: var(--muted); font-size: 12px; }
+  .channels a { border: 1px solid var(--line); border-radius: 14px; padding: 2px 10px; color: var(--accent); background: var(--panel); text-decoration: none; }
+  .channels a:hover { background: var(--accent-soft); }
+  .channels a.search { color: var(--muted); }
+  .channels[hidden] { display: none; }
+  .channels a.saved { border-color: var(--accent); }
+  .channels .unsave { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0 4px 0 0; margin-left: -4px; font: inherit; }
+  .channels .unsave:hover { color: var(--bad); }
+  .channels .savelink { display: inline-flex; gap: 6px; align-items: center; }
+  .channels .savelink button.act { padding: 1px 10px; font-size: 12px; }
+  .channels .savelink input { width: 340px; padding: 2px 8px; font-size: 13px; }
+  .channels .savelink input[hidden], .channels .savelink button[hidden] { display: none; }
+  #status.err { color: var(--bad); }
+  main { display: grid; grid-template-columns: 170px 380px 1fr; height: calc(100% - 44px); }
+  nav, #list, #reader { overflow: auto; }
+  nav { border-right: 1px solid var(--line); background: var(--panel); padding: 8px 0; }
+  nav button { display: block; width: 100%; text-align: left; border: 0; background: none; color: var(--text); padding: 7px 14px; cursor: pointer; font: inherit; }
+  nav button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  #list { border-right: 1px solid var(--line); }
+  .listbar { position: sticky; top: 0; background: var(--bg); padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); display: flex; gap: 10px; align-items: center; }
+  .row { padding: 9px 12px; border-bottom: 1px solid var(--line); cursor: pointer; background: var(--panel); }
+  .row:hover { background: var(--accent-soft); }
+  .row.on { box-shadow: inset 3px 0 0 var(--accent); }
+  .row .top { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--muted); }
+  .row .from { font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .subj, .row .zh { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .zh { color: var(--muted); font-size: 13px; }
+  .row.unread { background: var(--unread); }
+  .row.unread .from, .row.unread .subj { font-weight: 700; }
+  .row.unread .from::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-right: 6px; vertical-align: 1px; }
+  nav button .n { float: right; font-size: 12px; font-weight: 600; color: #fff; background: var(--accent); border-radius: 9px; padding: 0 7px; line-height: 18px; margin-top: 2px; }
+  .badge { font-size: 11px; padding: 0 6px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); margin-left: 4px; }
+  .badge.pending { color: var(--warn); background: transparent; border: 1px solid var(--warn); }
+  .badge.failed { color: var(--bad); background: transparent; border: 1px solid var(--bad); }
+  #more { margin: 10px auto; display: block; }
+  #more[hidden] { display: none; }
+  #reader { padding: 16px 20px 40px; }
+  .empty { color: var(--muted); margin-top: 40px; text-align: center; }
+  .meta { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+  .meta b { color: var(--text); font-weight: 600; }
+  h2 { font-size: 17px; margin: 0 0 6px; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .pane { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; min-width: 0; }
+  .pane.zhpane { background: var(--zh); }
+  .pane h3 { font-size: 12px; color: var(--muted); margin: 0 0 8px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+  .body { white-space: pre-wrap; word-break: break-word; }
+  .note { color: var(--muted); font-size: 13px; }
+  .note.err { color: var(--bad); }
+  .reply { margin-top: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  textarea { width: 100%; min-height: 90px; resize: vertical; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+  .btns { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; align-items: center; }
+  button.act { border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 6px; padding: 5px 12px; cursor: pointer; font: inherit; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .draft { display: none; margin-top: 10px; }
+  .draft label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
+  input[type=text] { width: 100%; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+  .hint { background: var(--accent-soft); border-radius: 6px; padding: 8px 10px; font-size: 13px; white-space: pre-wrap; }
+  .hint.warn { background: transparent; border: 1px solid var(--warn); color: var(--warn); }
+  .badge.count { background: var(--line); color: var(--text); }
+  details.msg { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); margin-bottom: 10px; }
+  details.msg > summary { list-style: none; cursor: pointer; padding: 9px 14px; display: flex; gap: 10px; align-items: baseline; }
+  details.msg > summary::-webkit-details-marker { display: none; }
+  details.msg > summary .who { font-weight: 600; white-space: nowrap; }
+  details.msg > summary .when { color: var(--muted); font-size: 12px; white-space: nowrap; margin-left: auto; }
+  details.msg > summary .preview { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
+  details.msg[open] > summary .preview { display: none; }
+  details.msg.own > summary .who { color: var(--accent); }
+  details.msg .inner { padding: 0 14px 12px; }
+  details.msg .cols .pane { border: 0; padding: 0; background: none; }
+  details.msg .cols .pane.zhpane { background: var(--zh); padding: 8px 10px; border-radius: 6px; }
+  .atts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .atts img { max-height: 160px; max-width: 240px; border: 1px solid var(--line); border-radius: 6px; cursor: zoom-in; background: #fff; }
+  .atts .file { border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer; background: var(--bg); color: var(--text); }
+  .atts .note { font-size: 12px; }
+  .atts .file.blocked { cursor: help; color: var(--bad); border-color: var(--bad); background: transparent; }
+  .badge.koc-waiting { color: var(--warn); background: transparent; border: 1px dashed var(--warn); }
+  .badge.koc-sent { color: var(--accent); background: transparent; border: 1px solid var(--accent); }
+  .badge.koc-human, .badge.koc-uncertain { color: #fff; background: var(--bad); }
+  #kocBtn.human { border-color: var(--bad); color: var(--bad); }
+  #kocDlg:not([open]) { display: none; }
+  #kocDlg { width: min(900px, 92vw); max-height: 80vh; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); }
+  #kocDlg .kochead { display: flex; gap: 10px; align-items: center; }
+  #kocDlg .kochead b { flex: 1; }
+  #kocJobs .job { border-top: 1px solid var(--line); padding: 8px 0; font-size: 13px; }
+  #kocJobs .job .why { color: var(--bad); }
+  #kocJobs .job pre { white-space: pre-wrap; font: inherit; margin: 6px 0 0; padding: 6px 8px; background: var(--zh); border-radius: 6px; }
+  .strategies { display: none; margin-top: 10px; }
+  .situation { margin-bottom: 10px; }
+  .opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
+  .opt { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--bg); display: flex; flex-direction: column; gap: 6px; }
+  .opt.rec { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .opt.chosen { background: var(--accent-soft); }
+  .opt h4 { margin: 0; font-size: 14px; display: flex; gap: 6px; align-items: center; }
+  .opt .lbl { font-size: 11px; color: var(--muted); }
+  .opt .txt { font-size: 13px; white-space: pre-wrap; }
+  .opt .risk { color: var(--warn); }
+  .opt button { align-self: flex-start; margin-top: auto; }
+  table.pairs { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+  table.pairs td { vertical-align: top; padding: 6px 8px; border-top: 1px solid var(--line); white-space: pre-wrap; word-break: break-word; }
+  table.pairs td.zh { background: var(--zh); }
+  table.pairs td.failed { color: var(--bad); }
+  table.pairs tr.same td { color: var(--muted); }
+  .pairsbar { display: flex; gap: 8px; align-items: center; margin: 8px 0 4px; }
+  .pairsbar label { margin: 0 !important; }
+  .stale { color: var(--warn); font-size: 13px; }
+  #fbBtn { position: fixed; right: 18px; bottom: 18px; z-index: 5; border-radius: 18px; padding: 7px 16px; box-shadow: 0 2px 8px rgba(0,0,0,.18); }
+  dialog.small:not([open]) { display: none; }
+  dialog.small { width: min(560px, 92vw); border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); }
+  dialog.small h3 { margin: 0 0 8px; font-size: 15px; }
+  dialog.small .row2 { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+  dialog.small input[type=password] { flex: 1; font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; min-width: 200px; }
+  .code { font: 600 20px/1.2 Consolas, monospace; letter-spacing: 3px; color: var(--accent); }
+  #mobileCases .job { border-top: 1px solid var(--line); padding: 6px 0; font-size: 13px; }
+  .phonebar { display: none; margin: 0 0 10px; padding: 8px 10px; border-radius: 6px; background: var(--accent-soft); font-size: 13px; }
+  .phonebar button { margin-left: 8px; }
+  @media (max-width: 1100px) { .cols { grid-template-columns: 1fr; } main { grid-template-columns: 140px 300px 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>KOL Mail</h1>
+  <span class="note" id="selfAddr"></span>
+  <form id="searchForm" role="search">
+    <input type="search" id="q" placeholder="搜索发件人、邮箱、主题、正文或中文译文" maxlength="200">
+    <button class="act" type="submit">搜索</button>
+  </form>
+  <button class="act" id="kocBtn" type="button">KOC 机器人</button>
+  <button class="act" id="mobileBtn" type="button">手机审稿</button>
+  <span id="status">连接中…</span>
+  <span class="note" id="version"></span>
+</header>
+<dialog id="kocDlg">
+  <div class="kochead">
+    <b>KOC 机器人（工作时间自动回复）</b>
+    <span id="kocState" class="note"></span>
+    <button class="act" id="kocToggle" type="button"></button>
+    <button class="act" id="kocClose" type="button">关闭</button>
+  </div>
+  <p class="note">只回复 KOL 总表里、不在重点名单上、只问流量联盟标准问题的人，收信后 15 到 30 分钟发出。机器人能说的话只来自 KOC 知识卡（settings.json 的 paths.koc_knowledge）。</p>
+  <div id="kocJobs"></div>
+</dialog>
+<dialog id="mobileDlg" class="small">
+  <h3>下班时间：AI 起草，手机审批</h3>
+  <p class="note">下班时间来的 KOL 邮件和 Telegram 私聊，不再发固定模板。AI 先给 2 到 3 个方案推到你的 Telegram，你选一个、看中文对照、打字提修改意见，点“发送”并再确认一次才会发出。没批的什么都不发，第二天在这里接着处理。</p>
+  <div class="row2"><b>下班回复方式</b>
+    <label><input type="radio" name="ohmode" value="ai"> AI 起草，手机审批</label>
+    <label><input type="radio" name="ohmode" value="template"> 固定模板自动回复</label></div>
+  <div class="row2"><b>Telegram 机器人</b><span id="botState" class="note"></span></div>
+  <div class="row2"><input type="password" id="botToken" placeholder="在 Telegram 找 @BotFather，/newbot 建一个机器人，把它给的令牌粘贴到这里" autocomplete="off">
+    <button class="act" id="botSave" type="button">保存</button></div>
+  <div class="row2" id="pairRow" hidden>配对码 <span class="code" id="pairCode"></span>
+    <span class="note">10 分钟内在 Telegram 打开 <b id="botName"></b>，发送 <b>/start 配对码</b></span>
+    <button class="act" id="pairNew" type="button">换一个</button></div>
+  <div class="note" id="mobileNote"></div>
+  <div id="mobileCases"></div>
+  <div class="row2"><button class="act" id="mobileClose" type="button">关闭</button></div>
+</dialog>
+<dialog id="fbDlg" class="small">
+  <h3>匿名反馈</h3>
+  <p class="note">直接发到维护者的 POPO，不带你的名字、邮箱和电脑信息。一小时最多 5 条。</p>
+  <div class="row2">
+    <label><input type="radio" name="fbkind" value="bug" checked> 问题</label>
+    <label><input type="radio" name="fbkind" value="idea"> 建议</label>
+    <label><input type="radio" name="fbkind" value="other"> 其他</label></div>
+  <textarea id="fbText" maxlength="2000" placeholder="哪里不好用、想要什么功能，都可以写"></textarea>
+  <div class="row2"><button class="act primary" id="fbSend" type="button">发送</button>
+    <button class="act" id="fbClose" type="button">关闭</button><span class="note" id="fbNote"></span></div>
+</dialog>
+<button class="act" id="fbBtn" type="button">反馈</button>
+<main>
+  <nav id="folders"></nav>
+  <section id="list">
+    <div class="listbar">
+      <span id="count"></span>
+      <label><input type="checkbox" id="hideSelf" checked> 隐藏群发副本和退信</label>
+      <button class="act" id="refresh">刷新</button>
+    </div>
+    <div id="rows"></div>
+    <button class="act" id="more" hidden>加载更多</button>
+    <div class="empty" id="moreNote"></div>
+  </section>
+  <section id="reader"><div class="empty">选择一封邮件</div></section>
+</main>
+
+<template id="msgTpl">
+  <details class="msg">
+    <summary><span class="who" data-f="who"></span><span class="preview" data-f="preview"></span><span class="when" data-f="when"></span></summary>
+    <div class="inner">
+      <div class="meta">发件人 <b data-f="from"></b> · 收件人 <span data-f="to"></span></div>
+      <div class="cols">
+        <div class="pane"><h3>原文 <span data-f="lang"></span></h3><div class="body" data-f="body"></div></div>
+        <div class="pane zhpane" data-f="zhpane"><h3>中文译文 <button class="act" data-f="retranslate">重新翻译</button></h3>
+          <div data-f="zhsubject" class="note"></div><div class="body" data-f="zh"></div></div>
+      </div>
+      <div class="atts" data-f="atts"></div>
+    </div>
+  </details>
+</template>
+
+<template id="readerTpl">
+  <h2 data-f="subject"></h2>
+  <div class="meta" data-f="threadmeta"></div>
+  <div class="channels" data-f="channels"></div>
+  <div data-f="msgs"></div>
+  <div class="reply" data-f="replybox">
+    <h3 style="margin:0 0 8px;font-size:14px">回复</h3>
+    <div class="phonebar" data-f="phonebar"><span data-f="phoneText"></span><button class="act" data-f="phoneLoad">载入这版草稿</button></div>
+    <textarea data-f="notes" placeholder="可以留空直接点“按手册起草”，AI 会先给出 2 到 3 种回复策略让你选；也可以先写几句要点（如“接受 120 美元一条，要求两条打包”）。写好完整的中文回复的话，点“翻译我写的中文”。"></textarea>
+    <div class="btns">
+      <button class="act primary" data-f="draftBtn">按手册起草</button>
+      <button class="act" data-f="transBtn">翻译我写的中文</button>
+      <span class="note" data-f="draftNote"></span>
+    </div>
+    <div class="strategies" data-f="strategies">
+      <label class="note">局面分析</label><div class="hint situation" data-f="situation"></div>
+      <div class="opts" data-f="opts"></div>
+    </div>
+    <div class="draft" data-f="draft">
+      <label>收件人</label><input type="text" data-f="to2" disabled>
+      <label>主题</label><input type="text" data-f="rsubject">
+      <label>回复正文（<span data-f="rlang"></span>，可直接修改）</label><textarea data-f="rbody" style="min-height:200px"></textarea>
+      <div class="pairsbar"><label>中文对照（逐段回译实际要发出的正文）</label>
+        <button class="act" data-f="pairsBtn">更新对照</button><span data-f="pairsNote" class="note"></span></div>
+      <table class="pairs" data-f="pairs"></table>
+      <label>这一版做了什么</label><div class="hint" data-f="rstrategy"></div>
+      <label>发送前需要你确认</label><div class="hint warn" data-f="rapproval"></div>
+      <label>修改意见（写给 AI，比如“语气再热情点”“去掉第二段”“价格改成 150 美元两条”）</label>
+      <textarea data-f="feedback" style="min-height:60px"></textarea>
+      <div class="btns"><button class="act" data-f="reviseBtn">按意见修改</button><span class="note" data-f="reviseNote"></span></div>
+      <div class="btns"><button class="act primary" data-f="sendBtn">确认无误，发送</button><span class="note" data-f="sendNote"></span></div>
+    </div>
+  </div>
+</template>
+
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+const st = { mailbox: "INBOX", page: 1, total: 0, current: null, listSeq: 0, loadingMore: false, threads: new Map(), search: null };
+
+async function api(path, opts = {}) {
+  const init = { ...opts, headers: { "X-KOL-Mail": "1", ...(opts.body ? { "Content-Type": "application/json" } : {}) } };
+  const r = await fetch(path, init);
+  const data = await r.json().catch(() => ({ error: "响应无法解析" }));
+  if (!r.ok) { const err = new Error(data.error || r.statusText); err.data = data; throw err; }
+  return data;
+}
+const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body) });
+function showError(e) { const el = $("#status"); el.className = "err"; el.textContent = "操作失败：" + (e && e.message || e); }
+const safe = fn => (...args) => Promise.resolve().then(() => fn(...args)).catch(showError);
+
+function fmtDate(s) {
+  const d = new Date(s); if (isNaN(d)) return s || "";
+  const now = new Date();
+  return d.toDateString() === now.toDateString()
+    ? d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
+    : d.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" }) + " " + d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+}
+function senderName(s) { const m = /^"?([^"<]*?)"?\s*<.*>$/.exec(s || ""); return (m && m[1].trim()) || s || ""; }
+const STATUS = { pending: "翻译中", done: null, skipped: null, failed: "翻译失败" };
+
+async function loadStatus() {
+  try {
+    const s = await api("/api/status");
+    showUnreadCounts(s.unread_counts || {});
+    if (st.unreadRev !== undefined && s.unread_rev !== st.unreadRev && !st.loadingMore) {
+      // Unread state changed (new mail, read elsewhere, or marked read here): repaint from the server cache.
+      if (!st.search && st.page === 1) loadList(false, "cached", true).catch(() => {});  // search rows keep their flags
+    }
+    if (!st.loadingMore) st.unreadRev = s.unread_rev;  // otherwise repaint on the next poll, not never
+    if (s.self_address) $("#selfAddr").textContent = s.self_address;
+    const el = $("#status");
+    const parts = [];
+    if (!s.claude_bin) parts.push("找不到 " + (s.ai_backend || "AI") + " 命令行");
+    if (s.claude_error) parts.push("翻译出错：" + s.claude_error);
+    if (s.mail_error) parts.push(s.mail_error);
+    else if (s.scan_error) parts.push("收信出错：" + s.scan_error);
+    if (s.autoreply_error) parts.push(s.autoreply_error);
+    if (s.sheet_error) parts.push("KOL总表：" + s.sheet_error);
+    if (s.notify_error) parts.push(s.notify_error);
+    if (s.telegram_error) parts.push("Telegram：" + s.telegram_error);
+    if (s.autoreply_alert) parts.push("自动回复出过问题：" + s.autoreply_alert + "（详见 KOL邮件汇总\\自动回复记录.md）");
+    const kb = $("#kocBtn"), kc = s.koc;
+    if (kc) {
+      kb.textContent = "KOC 机器人 " + (kc.enabled ? "开" : "关") + (kc.waiting ? ` · 排队 ${kc.waiting}` : "") + (kc.human ? ` · 待你处理 ${kc.human}` : "");
+      kb.classList.toggle("human", !!kc.human);
+    }
+    const a = s.autoreply;
+    if (a && a.mode === "ai" && (a.email || a.telegram) && !a.phone_paired) parts.push("下班 AI 回复已开启，但手机审稿还没配对，点上方“手机审稿”设置");
+    if (s.mobile_error) parts.push(s.mobile_error);
+    const auto = !a ? "" : ` · 下班${a.mode === "ai" ? "AI起草手机审批" : "自动回复"} 邮件${a.email ? "开" : "关"} Telegram${a.telegram ? (a.telegram_login ? "开" : "开（未登录）") : "关"}`
+      + (a.off_hours ? " · 现在是非工作时间" : "");
+    el.className = parts.length ? "err" : "";
+    el.textContent = parts.length ? parts.join("；") :
+      `上次检查新邮件 ${s.last_scan || "--"} · 待翻译 ${s.queue}${s.translating ? " · 正在翻译" : ""}${auto}`;
+  } catch (e) { $("#status").className = "err"; $("#status").textContent = "后端未连接：" + e.message; }
+}
+
+const FOLDER_NAMES = { INBOX: "收件箱", "Sent Items": "已发送", Drafts: "草稿", "Junk E-mail": "垃圾邮件", "Deleted Items": "已删除" };
+// Empty leftovers that some mail client created next to WorkMail's own "Deleted Items" and "Drafts".
+const HIDDEN_FOLDERS = new Set(["Outbox", "Trash"]);
+
+function showUnreadCounts(counts) {
+  document.querySelectorAll("#folders button").forEach(b => {
+    let n = b.querySelector(".n");
+    const c = counts[b.dataset.box] || 0;
+    if (!c) { if (n) n.remove(); return; }
+    if (!n) { n = document.createElement("span"); n.className = "n"; b.append(n); }
+    n.textContent = c > 99 ? "99+" : String(c);
+    n.title = `${c} 封未读`;
+  });
+}
+
+async function loadFolders() {
+  const { folders } = await api("/api/folders");
+  const order = ["INBOX", "纯固薪", "CPS+固薪", "纯CPS", "Sent Items", "Drafts"];
+  const shown = folders.filter(f => !HIDDEN_FOLDERS.has(f));
+  shown.sort((a, b) => ((order.indexOf(a) + 1) || 99) - ((order.indexOf(b) + 1) || 99));
+  const nav = $("#folders"); nav.textContent = "";
+  for (const f of shown) {
+    const b = document.createElement("button");
+    b.textContent = FOLDER_NAMES[f] || f; b.dataset.box = f; b.className = f === st.mailbox && !st.search ? "on" : "";
+    b.onclick = safe(() => showFolder(f));
+    nav.append(b);
+  }
+}
+
+// Highlight at once, paint the server's cached list, then refresh it quietly in the background.
+async function showFolder(f) {
+  if (st.search) { st.search = null; $("#q").value = ""; }
+  st.mailbox = f; st.page = 1;
+  $("#moreNote").textContent = ""; $("#more").disabled = false; $("#more").textContent = "加载更多";
+  document.querySelectorAll("#folders button").forEach(b => b.classList.toggle("on", b.dataset.box === f));
+  if (await loadList(false, "cached")) return st.mailbox === f && loadList(false, "revalidate");
+  if (st.mailbox !== f || st.search) return;  // another folder or a search took over meanwhile
+  const box = $("#rows"); box.textContent = "";
+  const wait = document.createElement("div"); wait.className = "empty"; wait.textContent = "载入中…";
+  box.append(wait); $("#count").textContent = ""; $("#more").hidden = true;
+  return loadList();
+}
+
+// mode: "live" fetches now, "cached" answers from the server cache only, "revalidate" refreshes a stale cache.
+// Returns false only when "cached" had nothing to show.
+// quiet: a background repaint that must not cancel a list load already in flight (it yields to it instead).
+async function loadList(append = false, mode = "live", quiet = false) {
+  if (append && st.loadingMore) return true;
+  const mailbox = st.mailbox, page = append ? st.page + 1 : 1, seq = quiet ? st.listSeq : ++st.listSeq;
+  if (append) st.loadingMore = true;
+  let data;
+  try { data = await api(`/api/messages?mailbox=${encodeURIComponent(mailbox)}&page=${page}&mode=${mode}`); }
+  finally { if (append) st.loadingMore = false; }
+  if (data.miss) return false;
+  // A newer list request, a folder switch or a search won meanwhile.
+  if (seq !== st.listSeq || mailbox !== st.mailbox || st.search) return true;
+  st.page = page; st.total = data.total;
+  renderRows(data.emails, append, false);
+  if (!append) $("#moreNote").textContent = "";
+  const shown = st.page * 30;
+  $("#count").textContent = `共 ${st.total} 封 · ${st.threads.size} 个会话`; $("#count").style.color = "";
+  $("#more").hidden = shown >= st.total;
+  return true;
+}
+
+// Older pages are mostly earlier mails of conversations already listed (they only raise a row's counter) or hidden
+// self copies and bounces, so one page can add no visible row. Keep going until something new shows up.
+async function loadMore() {
+  const btn = $("#more"), note = $("#moreNote");
+  if (st.loadingMore || st.search) return;
+  btn.disabled = true; btn.textContent = "加载中…"; note.textContent = "";
+  const before = document.querySelectorAll("#rows .row").length, mailbox = st.mailbox;
+  try {
+    for (let i = 0; i < 6 && !btn.hidden; i++) {
+      await loadList(true);
+      if (st.mailbox !== mailbox || st.search) return;
+      if (document.querySelectorAll("#rows .row").length > before) break;
+    }
+    if (document.querySelectorAll("#rows .row").length === before) {
+      note.textContent = btn.hidden ? "没有更多会话了。更早的邮件都是上面这些会话里的往来，或者是隐藏的群发副本和退信。"
+                                    : "这几页都是上面会话里的往来邮件，可以继续加载。";
+    }
+  } finally { btn.disabled = false; btn.textContent = "加载更多"; }
+}
+
+const KOC_TEXT = { sent: "机器人已回", human: "需你处理", uncertain: "机器人发送不确定" };
+function kocBadge(k) {
+  if (!k) return null;
+  let text = KOC_TEXT[k.status];
+  if (k.status === "waiting" || k.status === "working") {
+    const d = new Date(k.due_at);
+    text = isNaN(d) ? "机器人排队中" : "机器人 " + d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) + " 回";
+  }
+  if (!text) return null;
+  const b = document.createElement("span");
+  b.className = "badge koc-" + (k.status === "working" ? "waiting" : k.status);
+  b.textContent = text; if (k.reason) b.title = k.reason;
+  return b;
+}
+
+async function openKoc() {
+  const d = await api("/api/koc");
+  $("#kocState").textContent = (d.enabled ? "已开启" : "已关闭") + (d.sheet_read ? "" : " · 总表还没读到，机器人暂不回复");
+  const t = $("#kocToggle"); t.textContent = d.enabled ? "关闭机器人" : "开启机器人"; t.dataset.on = d.enabled ? "1" : "";
+  const box = $("#kocJobs"); box.textContent = "";
+  if (!d.jobs.length) box.textContent = "还没有处理过的来信。";
+  for (const j of d.jobs) {
+    const div = document.createElement("div"); div.className = "job";
+    const head = document.createElement("div");
+    head.textContent = `${fmtDate(j.received_at)} · ${j.address} · ${j.status_zh}` + (j.status === "waiting" ? `（${fmtDate(j.due_at)} 发出）` : "");
+    div.append(head);
+    if (j.summary) { const s = document.createElement("div"); s.textContent = "对方：" + j.summary; div.append(s); }
+    if (j.reason && j.status !== "sent") { const r = document.createElement("div"); r.className = "why"; r.textContent = j.reason; div.append(r); }
+    if (j.reply) { const p = document.createElement("pre"); p.textContent = j.reply; div.append(p); }
+    box.append(div);
+  }
+  if (!$("#kocDlg").open) $("#kocDlg").showModal();
+}
+$("#kocBtn").onclick = safe(openKoc);
+$("#kocClose").onclick = () => $("#kocDlg").close();
+$("#kocToggle").onclick = safe(async () => {
+  const on = !$("#kocToggle").dataset.on;
+  if (on && !confirm("开启后，机器人会在工作时间自动回复符合条件的 KOC 来信，确定开启？")) return;
+  await post("/api/koc/switch", { enabled: on });
+  await openKoc(); await loadStatus();
+});
+
+// One row per conversation: rows come newest first, so the first message seen is the row's face and later
+// (older) ones only bump its counter. Search results span folders, so each row carries its own mailbox.
+function renderRows(emails, append, search) {
+  const box = $("#rows"); if (!append) { box.textContent = ""; st.threads = new Map(); }
+  const hideOn = $("#hideSelf").checked;
+  for (const e of emails) {
+    const mailbox = e.mailbox || st.mailbox;
+    const hide = hideOn && (search ? mailbox !== "Sent Items" : mailbox === "INBOX");
+    if (hide && e.skippable) continue;
+    const group = st.threads.get(e.thread_key);
+    if (group) {
+      group.count += 1;
+      group.badge.textContent = group.count; group.badge.hidden = false;
+      if (e.unread && !e.skippable) group.row.classList.add("unread");  // an older unread mail in the conversation
+      continue;
+    }
+    const row = document.createElement("div"); row.className = "row"; row.dataset.id = e.email_id;
+    if (e.unread && !e.skippable) row.classList.add("unread");
+    const countBadge = document.createElement("span"); countBadge.className = "badge count"; countBadge.hidden = true;
+    st.threads.set(e.thread_key, { count: 1, badge: countBadge, row });
+    if (st.current && st.current.opened.mailbox === mailbox && st.current.opened.id === String(e.email_id)) row.classList.add("on");
+    const top = document.createElement("div"); top.className = "top";
+    const from = document.createElement("span"); from.className = "from";
+    from.textContent = mailbox === "Sent Items" ? "致 " + (e.recipients || []).join(", ") : senderName(e.sender);
+    from.append(countBadge);
+    const right = document.createElement("span"); right.textContent = fmtDate(e.date);
+    if (search) { const b = document.createElement("span"); b.className = "badge box"; b.textContent = FOLDER_NAMES[mailbox] || mailbox; right.append(b); }
+    if (e.language && e.status === "done") { const b = document.createElement("span"); b.className = "badge"; b.textContent = e.language; right.append(b); }
+    if (STATUS[e.status]) { const b = document.createElement("span"); b.className = "badge " + e.status; b.textContent = STATUS[e.status]; right.append(b); }
+    const k = kocBadge(e.koc); if (k) right.append(k);
+    top.append(from, right);
+    const subj = document.createElement("div"); subj.className = "subj"; subj.textContent = e.subject || "(无主题)";
+    row.append(top, subj);
+    if (e.subject_zh) { const zh = document.createElement("div"); zh.className = "zh"; zh.textContent = e.subject_zh; row.append(zh); }
+    row.onclick = () => openMessage(e.email_id, row, mailbox);
+    box.append(row);
+  }
+}
+
+// Two passes: the local caches answer at once, then the server searches every message in the KOL folders,
+// Sent Items and Junk. A newer search or a folder click makes the older one drop its results.
+async function runSearch(q) {
+  q = q.trim();
+  if (!q) { if (st.search) await showFolder(st.mailbox); return; }
+  const search = { q, results: [], done: false };
+  st.search = search; st.listSeq++;
+  document.querySelectorAll("#folders button").forEach(b => b.classList.remove("on"));
+  $("#more").hidden = true; $("#moreNote").textContent = "";
+  const box = $("#rows"); box.textContent = "";
+  const wait = document.createElement("div"); wait.className = "empty"; wait.textContent = "搜索中…"; box.append(wait);
+  $("#count").textContent = `搜索“${q}”…`;
+  const url = scope => `/api/search?q=${encodeURIComponent(q)}&scope=${scope}`;
+  try {
+    const local = await api(url("local"));
+    if (st.search !== search) return;
+    search.results = local.emails; showSearch();
+  } catch (e) {  // e.g. a query of invisible characters only: say so instead of hanging on "搜索中…"
+    if (st.search === search) { search.done = true; search.note = "搜索失败：" + e.message; showSearch(); }
+    return;
+  }
+  let all;
+  try { all = await api(url("all")); }
+  catch (e) { if (st.search === search) { search.done = true; search.note = "服务器搜索失败：" + e.message + "，下面只是最近邮件里的结果"; showSearch(); } return; }
+  if (st.search !== search) return;
+  search.results = all.emails; search.done = true;
+  const name = f => FOLDER_NAMES[f] || f;
+  const notes = [];
+  if ((all.failed || []).length) notes.push(`${all.failed.map(name).join("、")} 没搜成功`);
+  if ((all.capped || []).length) notes.push(`${all.capped.map(name).join("、")} 命中太多，只列出最新 50 封，可以换个更具体的关键词`);
+  search.note = notes.join("；");
+  showSearch();
+}
+
+function showSearch() {
+  const s = st.search; if (!s) return;
+  renderRows(s.results, false, true);
+  const shown = st.threads.size;
+  let text = `搜索“${s.q}”：${s.results.length} 封，${shown} 个会话`;
+  if (!s.done) text += " · 正在搜索服务器上的全部邮件…";
+  if (s.note) text += " · " + s.note;
+  $("#count").textContent = text;
+  // A failed server pass means only recently cached mails were searched: make that impossible to miss.
+  $("#count").style.color = /失败|没搜成功/.test(s.note || "") ? "var(--bad)" : "";
+  if (!shown) {
+    const empty = document.createElement("div"); empty.className = "empty";
+    empty.textContent = s.results.length ? `${s.results.length} 封都是群发副本或退信，取消勾选“隐藏群发副本和退信”就能看到`
+      : s.done ? (s.note ? "没有结果" : "没有找到匹配的邮件") : "最近的邮件里没有，正在搜索服务器…";
+    $("#rows").append(empty);
+  }
+}
+
+// Links come from the server already rebuilt as plain https URLs on these sites; check again before linking.
+const LINK_HOSTS = /^https:\/\/(www\.youtube\.com|youtu\.be|www\.twitch\.tv|www\.tiktok\.com|t\.me)\//;
+
+const CHANNEL_SOURCE = { saved: "你手动保存的", sheet: "来自 KOL总表", mail: "对方邮件里写的" };
+
+// address is the KOL's email: links saved for it show on every conversation with that address.
+function renderChannels(el, channels, name, address) {
+  el.textContent = "";
+  const label = document.createElement("span"); label.className = "label";
+  const link = (text, href, cls, tip) => {
+    const a = document.createElement("a"); a.textContent = text; a.href = href;
+    a.target = "_blank"; a.rel = "noopener noreferrer"; if (cls) a.className = cls; a.title = tip ? `${tip}\n${href}` : href;
+    return a;
+  };
+  const good = (channels || []).filter(c => LINK_HOSTS.test(c.url));
+  if (good.length) {
+    label.textContent = "对方的频道";
+    el.append(label);
+    for (const c of good) {
+      el.append(link(`${c.platform} ${c.kind}`, c.url, c.source === "saved" ? "saved" : "", CHANNEL_SOURCE[c.source]));
+      if (c.source === "saved") {
+        const x = document.createElement("button"); x.className = "unsave"; x.textContent = "×"; x.title = "删除这条手动保存的链接";
+        x.onclick = safe(async () => {
+          if (!confirm(`删除手动保存的链接？\n${c.url}`)) return;
+          await post("/api/channels", { address, url: c.url, remove: true });
+          renderChannels(el, channels.filter(o => o !== c), name, address);
+        });
+        el.append(x);
+      }
+    }
+  } else if (name) {
+    const q = encodeURIComponent(name);
+    label.textContent = `还没有频道链接，按“${name}”搜索`;
+    el.append(label,
+      link("YouTube", `https://www.youtube.com/results?search_query=${q}`, "search"),
+      link("Twitch", `https://www.twitch.tv/search?term=${q}`, "search"),
+      link("TikTok", `https://www.tiktok.com/search/user?q=${q}`, "search"));
+  }
+  if (address) el.append(saveLinkControl(el, channels || [], name, address));
+  el.hidden = !el.childElementCount;
+}
+
+function saveLinkControl(el, channels, name, address) {
+  const wrap = document.createElement("span"); wrap.className = "savelink";
+  const open = document.createElement("button"); open.className = "act"; open.textContent = "+ 记链接";
+  open.title = `粘贴 ${address} 的频道链接，以后打开这个人的任何邮件都会显示`;
+  const input = document.createElement("input"); input.type = "text"; input.hidden = true;
+  input.placeholder = "粘贴 YouTube / Twitch / TikTok / Telegram 链接，可一次贴多条";
+  const save = document.createElement("button"); save.className = "act primary"; save.textContent = "保存"; save.hidden = true;
+  const note = document.createElement("span"); note.className = "note";
+  open.onclick = () => { open.hidden = true; input.hidden = save.hidden = false; input.focus(); };
+  const submit = safe(async () => {
+    if (save.disabled || !input.value.trim()) return;  // Enter while a save is still in flight
+    save.disabled = true; note.className = "note"; note.textContent = "";
+    try {
+      const r = await post("/api/channels", { address, text: input.value });
+      const fresh = r.saved.map(l => ({ ...l, source: "saved" }));
+      const urls = new Set(fresh.map(l => l.url.toLowerCase()));
+      renderChannels(el, [...fresh, ...channels.filter(c => !urls.has(c.url.toLowerCase()))], name, address);
+      const done = el.querySelector(".savelink .note");
+      if (done) done.textContent = r.sheet ? "已保存。总表里这个人的频道链接原来是空的，已顺手填上，在这里删除不会改总表" : "已保存";
+    } catch (e) { note.className = "note err"; note.textContent = e.message; save.disabled = false; }
+  });
+  save.onclick = submit;
+  input.addEventListener("keydown", ev => {
+    if (ev.key === "Enter" && !ev.isComposing) submit();
+    if (ev.key === "Escape" && !ev.isComposing) { input.value = ""; input.hidden = save.hidden = true; open.hidden = false; note.textContent = ""; }
+  });
+  wrap.append(open, input, save, note);
+  return wrap;
+}
+
+function field(root, name) { return root.querySelector(`[data-f="${name}"]`); }
+
+function renderTranslation(root, t, own) {
+  const zh = field(root, "zh"), zs = field(root, "zhsubject"), lang = field(root, "lang");
+  zh.className = "body"; zs.textContent = "";
+  if (!t) {
+    zh.className = "note";
+    zh.textContent = own ? "这是我们发出的邮件，需要的话点“重新翻译”。" : "这封邮件不自动翻译（退信或群发副本），需要的话点“重新翻译”。";
+    return false;
+  }
+  lang.textContent = t.language || "";
+  if (t.status === "pending") { zh.className = "note"; zh.textContent = "Claude Code 正在翻译，通常十几秒到一分钟…"; return true; }
+  if (t.status === "failed") { zh.className = "note err"; zh.textContent = "翻译失败：" + (t.error || "未知原因"); return false; }
+  if (t.status === "skipped") { zh.className = "note"; zh.textContent = "原文是中文，无需翻译。"; return false; }
+  zs.textContent = t.subject_zh || ""; zh.textContent = t.body_zh || ""; return false;
+}
+
+function previewText(m) {
+  const t = m.translation, text = (t && t.status === "done" && t.body_zh) || m.body || "";
+  return text.replace(/\s+/g, " ").slice(0, 140);
+}
+
+// Attachments are fetched with the API header (a plain <img src> could not send it), then shown from a blob URL.
+function attachmentUrl(m, name) {
+  return `/api/attachment?mailbox=${encodeURIComponent(m.mailbox)}&id=${m.email_id}&name=${encodeURIComponent(name)}`;
+}
+
+async function fetchAttachment(ctx, m, name) {
+  const r = await fetch(attachmentUrl(m, name), { headers: { "X-KOL-Mail": "1" } });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); const err = new Error(d.error || r.statusText); err.blocked = !!d.blocked; throw err; }
+  const blob = await r.blob();
+  const url = URL.createObjectURL(blob);
+  if (st.current !== ctx) { URL.revokeObjectURL(url); throw new Error("已切换到别的会话"); }
+  ctx.urls.push(url);
+  return { url, image: blob.type.startsWith("image/") };
+}
+
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i;
+// Only these types are accepted; the server enforces the same list, checks the real bytes and contents, and runs a
+// Windows Defender scan. This copy only lets the page say "refused" without fetching anything.
+const ALLOWED_EXT = /\.(pdf|png|jpe?g|gif|webp|txt|docx|xlsx|pptx|zip|mp4|mov|m4v)$/i;
+const AUTO_IMAGES = 6;
+
+// The sender chooses the file name: drop bidi/control characters (which can disguise "fdp.exe" as ".pdf").
+function safeName(name) {
+  return (name || "附件").replace(/[\u0000-\u001f\u007f​-‏‪-‮⁦-⁩﻿]/g, "").trim() || "附件";
+}
+function attachmentAllowed(shown) {
+  return ALLOWED_EXT.test(shown.split(":")[0].replace(/[.\s　 ]+$/, ""));
+}
+
+function blockedChip(shown, why) {
+  const n = document.createElement("span"); n.className = "file blocked";
+  n.textContent = `已拦截 ${shown}`; n.title = why;
+  return n;
+}
+
+function renderAttachments(ctx, m, box) {
+  if (!m.attachments.length || box.dataset.loaded) return;
+  box.dataset.loaded = "1";
+  const counts = {};
+  m.attachments.forEach(n => { counts[n] = (counts[n] || 0) + 1; });
+  let autoLeft = AUTO_IMAGES;
+  const done = new Set();
+  for (const name of m.attachments) {
+    if (done.has(name)) continue;  // the mail backend can only fetch the first of several same-named files
+    done.add(name);
+    const shown = safeName(name);
+    if (counts[name] > 1) {
+      const n = document.createElement("span"); n.className = "note";
+      n.textContent = `有 ${counts[name]} 个同名附件“${shown}”，这里只能显示第一个，其余请到邮箱客户端查看。`;
+      box.append(n);
+    }
+    if (!attachmentAllowed(shown)) {
+      box.append(blockedChip(shown, "只收 PDF、图片、文本、Word/Excel/PowerPoint、zip 和视频。其他类型（程序、脚本、快捷方式、带宏的 Office、网页、rar/7z 等）常被用来传病毒，不提供下载。确实需要请让对方换成 PDF 或图片。"));
+    } else if (IMAGE_EXT.test(shown) && autoLeft-- > 0) {
+      const slot = document.createElement("span"); slot.className = "note"; slot.textContent = "检查并载入图片 " + shown + "…";
+      box.append(slot);
+      fetchAttachment(ctx, m, name).then(({ url, image }) => {
+        if (image) {
+          const img = document.createElement("img"); img.src = url; img.alt = shown; img.title = shown + "（点击查看原图）";
+          img.onclick = () => window.open(url, "_blank", "noopener");
+          slot.replaceWith(img, saveButton(ctx, m, name, shown));
+        } else {
+          URL.revokeObjectURL(url);
+          slot.replaceWith(saveButton(ctx, m, name, shown));
+        }
+      }).catch(e => {
+        if (e.blocked) { slot.replaceWith(blockedChip(shown, e.message)); return; }
+        slot.className = "note err"; slot.textContent = shown + " 载入失败：" + e.message;
+      });
+    } else {
+      box.append(saveButton(ctx, m, name, shown));
+    }
+  }
+}
+
+// Nothing is downloaded until clicked. The server checks the file (type, contents, Defender scan) and says what to
+// watch out for; after the user confirms, it copies the file into Downloads itself and marks it as coming from the
+// internet, so Office opens it in Protected View and Windows SmartScreen applies (a browser download from this local
+// page might not get that mark).
+function saveButton(ctx, m, name, shown) {
+  const b = document.createElement("button"); b.className = "file"; b.textContent = "保存 " + shown;
+  const reset = () => { if (b.isConnected) { b.disabled = false; b.textContent = "保存 " + shown; } };
+  b.onclick = safe(async () => {
+    b.disabled = true; b.textContent = "正在做安全检查 " + shown + "…";
+    let check;
+    try { check = await api(attachmentUrl(m, name) + "&check=1"); }
+    catch (e) {
+      if (e.data && e.data.blocked) { b.replaceWith(blockedChip(shown, e.message)); return; }
+      reset(); throw e;
+    }
+    reset();
+    if (st.current !== ctx || !confirm(`${shown}\n\n${check.caution}\n\n保存到“下载”文件夹？`)) return;
+    b.disabled = true; b.textContent = "保存中 " + shown + "…";
+    try {
+      const r = await post("/api/attachment/save", { mailbox: m.mailbox, email_id: m.email_id, name });
+      const done = document.createElement("span"); done.className = "note";
+      done.textContent = `已保存到“下载”文件夹：${r.file}`; done.title = r.path;
+      b.replaceWith(done);
+    } catch (e) {
+      if (e.data && e.data.blocked) { b.replaceWith(blockedChip(shown, e.message)); return; }
+      reset(); throw e;
+    }
+  });
+  return b;
+}
+
+async function openMessage(id, rowEl, mailbox) {
+  document.querySelectorAll(".row.on").forEach(r => r.classList.remove("on"));
+  if (rowEl) { rowEl.classList.add("on"); rowEl.classList.remove("unread"); }  // opening reads the whole conversation
+  if (st.current) { clearInterval(st.current.poll); st.current.urls.forEach(u => URL.revokeObjectURL(u)); }
+  st.current = null;
+  const reader = $("#reader"); reader.textContent = "";
+  const view = document.createElement("div");
+  const loading = document.createElement("div"); loading.className = "empty"; loading.textContent = "载入中…";
+  reader.append(loading);
+  const path = `/api/thread?mailbox=${encodeURIComponent(mailbox)}&id=${id}`;
+  let data;
+  // Right after a restart the server answers with the opened mail alone ("partial"), and the rest follows.
+  try { data = await api(path + "&quick=1"); }
+  catch (e) { loading.textContent = e.message; return; }
+  if (!loading.isConnected) return;  // another conversation was opened meanwhile
+  // Everything below is bound to this conversation; replies always go to its latest KOL message.
+  const ctx = { view, cards: new Map(), urls: [], opened: { mailbox, id: String(id) } };
+  st.current = ctx;
+  view.append($("#readerTpl").content.cloneNode(true));
+  field(view, "subject").textContent = data.subject || "(无主题)";
+  reader.textContent = ""; reader.append(view);
+  renderThread(ctx, data);
+  field(view, "draftBtn").onclick = () => strategies(ctx);
+  field(view, "transBtn").onclick = () => draft(ctx, { mode: "translate" });
+  field(view, "reviseBtn").onclick = () => revise(ctx);
+  field(view, "pairsBtn").onclick = () => refreshPairs(ctx);
+  field(view, "rbody").oninput = () => markStale(ctx);
+  field(view, "sendBtn").onclick = () => send(ctx);
+  phoneDraft(ctx).catch(() => {});
+  if (!data.partial) return;
+  let full;
+  try { full = await api(path); }
+  catch (e) {
+    if (st.current === ctx) field(view, "threadmeta").textContent = "本会话其他邮件载入失败：" + e.message + "。重新打开可再试。";
+    return;
+  }
+  if (st.current === ctx) renderThread(ctx, full);
+}
+
+// Fills the message cards; called again when a partial answer is followed by the whole conversation.
+function renderThread(ctx, data) {
+  const view = ctx.view, target = data.reply_target;
+  if (!ctx.drafted) {  // a draft that was already started stays bound to the message it was written for
+    ctx.email_id = target && target.email_id; ctx.mailbox = target && target.mailbox;
+    ctx.message_id = target && target.message_id;
+    field(view, "replybox").hidden = !target;
+  }
+  clearInterval(ctx.poll); ctx.cards = new Map();
+  const msgs = data.messages;
+  const kols = msgs.filter(m => !m.own).length, ours = msgs.length - kols;
+  field(view, "threadmeta").textContent = data.partial ? "正在载入本会话的其他邮件…"
+    : msgs.length > 1 ? `本会话共 ${msgs.length} 封：对方 ${kols} 封，我方 ${ours} 封` : "";
+  renderChannels(field(view, "channels"), data.channels, data.kol_name, data.kol_address);
+  const list = field(view, "msgs"); list.textContent = "";
+  msgs.forEach((m, i) => {
+    const card = $("#msgTpl").content.firstElementChild.cloneNode(true);
+    if (m.own) card.classList.add("own");
+    field(card, "who").textContent = m.own ? "我方" : senderName(m.sender);
+    field(card, "when").textContent = fmtDate(m.date) + (m.attachments.length ? ` · 附件 ${m.attachments.length}` : "");
+    field(card, "preview").textContent = previewText(m);
+    field(card, "from").textContent = m.sender || "";
+    field(card, "to").textContent = (m.recipients || []).join(", ");
+    field(card, "body").textContent = m.body || "";
+    const atts = field(card, "atts");
+    card.addEventListener("toggle", () => { if (card.open) renderAttachments(ctx, m, atts); });
+    if (i === msgs.length - 1 || (target && m.email_id === target.email_id && m.mailbox === target.mailbox)) card.open = true;
+    card.msg = m;
+    if (renderTranslation(card, m.translation, m.own)) ctx.cards.set(m.message_id, card);
+    field(card, "retranslate").onclick = safe(async (ev) => {
+      ev.preventDefault();
+      await post("/api/retranslate", { mailbox: m.mailbox, email_id: m.email_id, message_id: m.message_id });
+      renderTranslation(card, { status: "pending" }); ctx.cards.set(m.message_id, card); startPoll(ctx);
+    });
+    list.append(card);
+    if (card.open) renderAttachments(ctx, m, atts);
+  });
+  const last = list.lastElementChild; if (last) last.scrollIntoView({ block: "nearest" });
+  if (ctx.cards.size) startPoll(ctx);
+}
+
+function startPoll(ctx) {
+  // Each opened conversation owns its own timer, so a late callback for one never cancels another's.
+  if (st.current !== ctx) return;
+  clearInterval(ctx.poll);
+  ctx.poll = setInterval(safe(async () => {
+    if (st.current !== ctx) return clearInterval(ctx.poll);
+    const cards = ctx.cards;  // renderThread swaps in new cards and a new timer; a tick from before must not touch them
+    for (const [mid, card] of [...cards]) {
+      const { translation } = await api(`/api/translation?message_id=${encodeURIComponent(mid)}`);
+      if (st.current !== ctx) return clearInterval(ctx.poll);
+      if (ctx.cards !== cards) return;
+      if (!translation) {  // the row was dropped (message moved by the triage job meanwhile)
+        const zh = field(card, "zh"); zh.className = "note"; zh.textContent = "这封邮件刚被移动过，请点“重新翻译”或重新打开会话。";
+        cards.delete(mid); continue;
+      }
+      if (!renderTranslation(card, translation)) {
+        cards.delete(mid);
+        card.msg.translation = translation; field(card, "preview").textContent = previewText(card.msg);
+      }
+    }
+    if (!cards.size) {
+      clearInterval(ctx.poll);
+      if (st.page === 1 && !st.search) await loadList(false, "cached");  // badges come from the local DB; never collapse "加载更多" pages
+    }
+  }), 3000);
+}
+
+function busy(ctx, on) {
+  ["draftBtn", "transBtn", "reviseBtn", "pairsBtn"].forEach(f => field(ctx.view, f).disabled = on);
+  ctx.view.querySelectorAll(".opt button").forEach(b => b.disabled = on);
+  ctx.busy = on;
+  updateSend(ctx);
+}
+
+// Step 1: two or three ways to answer, best first. Nothing is written yet.
+async function strategies(ctx) {
+  ctx.drafted = true;
+  const v = ctx.view, note = field(v, "draftNote");
+  busy(ctx, true); note.className = "note";
+  note.textContent = "AI 正在读这封信和之前的往来，按谈判手册想 2 到 3 种回法，约半分钟到一分钟…";
+  try {
+    const r = await post("/api/reply/strategies", { mailbox: ctx.mailbox, email_id: ctx.email_id, ctx: ctx.token, notes: field(v, "notes").value });
+    if (st.current !== ctx) return;
+    ctx.token = r.ctx;
+    field(v, "situation").textContent = r.situation_zh || "";
+    const box = field(v, "opts"); box.textContent = "";
+    r.options.forEach((o, i) => {
+      const el = document.createElement("div"); el.className = "opt" + (i === r.recommended ? " rec" : "");
+      const h = document.createElement("h4"); h.textContent = `方案 ${i + 1} · ${o.title_zh}`;
+      if (i === r.recommended) { const b = document.createElement("span"); b.className = "badge"; b.textContent = "推荐"; h.append(b); }
+      el.append(h);
+      for (const [lbl, key, cls] of [["怎么回", "approach_zh", ""], ["为什么", "why_zh", ""], ["风险", "risk_zh", " risk"]]) {
+        const l = document.createElement("div"); l.className = "lbl"; l.textContent = lbl;
+        const t = document.createElement("div"); t.className = "txt" + cls; t.textContent = o[key] || "";
+        el.append(l, t);
+      }
+      const btn = document.createElement("button"); btn.className = "act" + (i === r.recommended ? " primary" : "");
+      btn.textContent = "用这个方案起草";
+      btn.onclick = () => {
+        box.querySelectorAll(".opt").forEach(x => x.classList.remove("chosen")); el.classList.add("chosen");
+        draft(ctx, { strategy: o });
+      };
+      el.append(btn); box.append(el);
+    });
+    field(v, "strategies").style.display = "block";
+    note.textContent = "选一个方案，AI 按它起草。都不满意，就改改上面的要点再点“按手册起草”。";
+  } catch (e) { note.className = "note err"; note.textContent = "出策略失败：" + e.message; }
+  finally { busy(ctx, false); }
+}
+
+// Step 2 and every revision: a draft plus its verified paragraph-by-paragraph Chinese.
+async function draft(ctx, opts) {
+  ctx.drafted = true;
+  const v = ctx.view, translate = opts.mode === "translate";
+  const note = opts.feedback ? field(v, "reviseNote") : field(v, "draftNote");
+  busy(ctx, true); note.className = "note";
+  note.textContent = translate ? "正在把你的中文译成对方的语言，再逐段回译核对…" :
+    opts.feedback ? "AI 正在按你的意见修改，改完再逐段回译核对…" : "AI 正在按选定方案起草，写完再逐段回译核对，约一分钟…";
+  try {
+    const r = await post("/api/reply/draft", { mailbox: ctx.mailbox, email_id: ctx.email_id, ctx: ctx.token,
+      mode: translate ? "translate" : "draft", notes: field(v, "notes").value,
+      strategy: translate ? null : (opts.strategy || ctx.strategy || null),
+      previous_body: opts.previous || "", feedback: opts.feedback || "" });
+    if (st.current !== ctx) return;  // the user moved on; drop this draft rather than attach it to another email
+    ctx.token = r.ctx; if (opts.strategy) ctx.strategy = opts.strategy;
+    ctx.sent = false;
+    field(v, "draft").style.display = "block";
+    field(v, "to2").value = r.to || "";
+    if (!field(v, "rsubject").value) field(v, "rsubject").value = r.reply_subject || "";
+    field(v, "rlang").textContent = r.reply_language || "";
+    field(v, "rbody").value = r.reply_body || "";
+    field(v, "rstrategy").textContent = r.notes_zh || "";
+    field(v, "rapproval").textContent = [...(r.warnings || []), r.needs_approval_zh || "无"].join("\n");
+    field(v, "sendNote").textContent = "";
+    showPairs(ctx, r.pairs);
+    if (opts.feedback) field(v, "feedback").value = "";
+    note.textContent = r.pairs && r.pairs.ok ? "草稿好了。对照的每一段都是单独回译的，核对无误再发送。"
+      : "草稿好了，但中文对照没生成完整，先点“更新对照”。";
+  } catch (e) { note.className = "note err"; note.textContent = (opts.feedback ? "修改失败：" : "起草失败：") + e.message; }
+  finally { busy(ctx, false); }
+}
+
+function revise(ctx) {
+  const v = ctx.view, fb = field(v, "feedback").value.trim();
+  if (!fb) { field(v, "reviseNote").textContent = "先写下修改意见"; return; }
+  if (!field(v, "rbody").value.trim()) { field(v, "reviseNote").textContent = "还没有草稿可改"; return; }
+  return draft(ctx, { previous: field(v, "rbody").value, feedback: fb });
+}
+
+function showPairs(ctx, p) {
+  const v = ctx.view, table = field(v, "pairs"), note = field(v, "pairsNote");
+  table.textContent = "";
+  ctx.pairs = p && p.ok ? { text: field(v, "rbody").value, zh: p.rows.map(r => r.zh).join("\n\n") } : null;
+  for (const row of (p && p.rows) || []) {
+    const tr = document.createElement("tr"); if (row.same) tr.className = "same";
+    const a = document.createElement("td"); a.textContent = row.orig;
+    const b = document.createElement("td"); b.className = "zh" + (row.failed ? " failed" : "");
+    b.textContent = row.failed ? "（这一段没能生成可信的中文对照）" : row.same ? "（不用翻译）" : row.zh;
+    tr.append(a, b); table.append(tr);
+  }
+  note.className = p && p.ok ? "note" : "note err";
+  note.textContent = p && p.ok ? "" : (p && p.error) || "";
+  updateSend(ctx);
+}
+
+function markStale(ctx) {
+  const note = field(ctx.view, "pairsNote");
+  if (ctx.pairs && field(ctx.view, "rbody").value !== ctx.pairs.text) {
+    note.className = "stale"; note.textContent = "正文改过了，对照已过期。点“更新对照”重新核对后才能发送";
+  } else if (ctx.pairs) { note.className = "note"; note.textContent = ""; }
+  updateSend(ctx);
+}
+
+function updateSend(ctx) {
+  const btn = field(ctx.view, "sendBtn"), body = field(ctx.view, "rbody").value;
+  btn.disabled = !!(ctx.busy || ctx.sent || !ctx.pairs || ctx.pairs.text !== body || !body.trim());
+}
+
+async function refreshPairs(ctx) {
+  const v = ctx.view, note = field(v, "pairsNote"), text = field(v, "rbody").value;
+  if (!text.trim()) return;
+  busy(ctx, true); note.className = "note"; note.textContent = "正在逐段回译…";
+  try {
+    const p = await post("/api/reply/pairs", { text });
+    if (st.current !== ctx) return;
+    if (field(v, "rbody").value !== text) { markStale(ctx); return; }  // edited again while it ran
+    showPairs(ctx, p);
+  } catch (e) { note.className = "note err"; note.textContent = "回译失败：" + e.message; }
+  finally { busy(ctx, false); }
+}
+
+async function send(ctx) {
+  const v = ctx.view, to = field(v, "to2").value, subject = field(v, "rsubject").value, body = field(v, "rbody").value;
+  if (!body.trim() || st.current !== ctx || !ctx.pairs || ctx.pairs.text !== body) return;
+  const preview = body.length > 300 ? body.slice(0, 300) + "…" : body;
+  if (!confirm(`确认发送？发出后无法撤回。\n\n收件人：${to}\n主题：${subject}\n\n${preview}`)) return;
+  const note = field(v, "sendNote");
+  ctx.sent = true; updateSend(ctx);  // locked from here on: a second click must never send twice
+  note.className = "note"; note.textContent = "发送中…";
+  try {
+    const r = await post("/api/send", { mailbox: ctx.mailbox, email_id: ctx.email_id, to, subject, body, body_zh: ctx.pairs.zh });
+    note.textContent = `已发送给 ${r.to}，副本在“已发送”里。`;
+  } catch (e) {
+    note.className = "note err";
+    if (e.data && e.data.uncertain) {
+      // Possibly delivered: keep the button locked so the KOL never gets the same email twice by accident.
+      note.textContent = e.message + "。邮件可能已经发出，请先到“已发送”里确认，确实没有再重新起草发送。";
+    } else {
+      note.textContent = "发送失败：" + e.message; ctx.sent = false; updateSend(ctx);
+    }
+  }
+}
+
+$("#refresh").onclick = safe(() => st.search ? runSearch(st.search.q) : loadList());
+$("#hideSelf").onchange = safe(async () => {
+  if (st.search) return showSearch();
+  if (!await loadList(false, "cached") && !st.search) await loadList();
+});
+$("#more").onclick = safe(loadMore);
+$("#searchForm").onsubmit = ev => { ev.preventDefault(); safe(runSearch)($("#q").value); };
+$("#q").addEventListener("search", () => { if (!$("#q").value && st.search) safe(showFolder)(st.mailbox); });  // the input's clear button
+$("#q").addEventListener("keydown", ev => { if (ev.key === "Escape" && !ev.isComposing && st.search) { $("#q").value = ""; safe(showFolder)(st.mailbox); } });
+
+// A desktop notification opens "#open=<mailbox>/<id>": show that folder and open the mail.
+function hashTarget() {
+  const m = /^#open=([^/]+)\/(\d+)$/.exec(location.hash);
+  if (!m) return null;
+  history.replaceState(null, "", location.pathname);  // so a reload doesn't reopen it
+  try { return { mailbox: decodeURIComponent(m[1]), id: m[2] }; } catch { return null; }
+}
+async function openFromHash() {
+  const t = hashTarget(); if (!t) return;
+  if (st.mailbox !== t.mailbox || st.search) await showFolder(t.mailbox);
+  await openMessage(t.id, document.querySelector(`#rows .row[data-id="${t.id}"]`), t.mailbox);
+}
+window.addEventListener("hashchange", safe(openFromHash));
+
+(async () => {
+  await loadStatus(); setInterval(loadStatus, 5000);
+  const target = hashTarget();
+  if (target) st.mailbox = target.mailbox;
+  try { await loadFolders(); await showFolder(st.mailbox); }
+  catch (e) { $("#rows").textContent = "载入失败：" + e.message; }
+  if (target) safe(openMessage)(target.id, document.querySelector(`#rows .row[data-id="${target.id}"]`), target.mailbox);
+  setInterval(safe(() => { if (st.mailbox === "INBOX" && st.page === 1 && !st.search && !st.loadingMore) return loadList(false, "revalidate"); }), 60000);
+})();
+
+// ---------------------------------------------------------------- self-update: checked on the first open of the day
+async function checkUpdate() {
+  let u;
+  try { u = await post("/api/update", {}); } catch (e) { return; }
+  const el = $("#version");
+  el.textContent = "v" + (u.current || "?");
+  if (u.state === "restarting") {
+    el.textContent = `已更新到 v${u.latest}，正在重启…`;
+    const until = Date.now() + 120000;
+    const wait = async () => {
+      try { const s = await api("/api/status"); if (s.version === u.latest) { location.reload(); return; } } catch (e) {}
+      if (Date.now() < until) setTimeout(wait, 3000); else el.textContent = "更新后没能自动重启，请双击 KOL Mail 图标";
+    };
+    setTimeout(wait, 8000);
+  } else if (u.state === "error") {
+    el.title = "检查更新失败（明天再试）：" + u.error;
+  } else if (u.latest) {
+    el.title = u.state === "current" ? "已是最新版" : "";
+  }
+}
+checkUpdate();
+
+// ---------------------------------------------------------------- phone drafts, phone-review settings, feedback
+async function phoneDraft(ctx) {
+  if (!ctx.message_id) return;
+  const { case: c } = await api("/api/mobile/case?message_id=" + encodeURIComponent(ctx.message_id));
+  if (!c || st.current !== ctx) return;
+  const v = ctx.view, bar = field(v, "phonebar");
+  field(v, "phoneText").textContent = `手机审稿 #${c.id}：${c.status_zh}` + (c.strategy ? `（方案：${c.strategy.title_zh}）` : "");
+  field(v, "phoneLoad").hidden = !c.body || c.status === "sent";
+  field(v, "phoneLoad").onclick = () => {
+    ctx.drafted = true; if (c.strategy) ctx.strategy = c.strategy;
+    field(v, "draft").style.display = "block";
+    field(v, "rbody").value = c.body;
+    if (!field(v, "rsubject").value) field(v, "rsubject").value = (/^re:/i.test(c.subject || "") ? "" : "Re: ") + (c.subject || "");
+    field(v, "to2").value = c.channel === "email" ? (c.who.match(/<([^>]+)>/) || [])[1] || "" : "";
+    field(v, "rstrategy").textContent = "手机上起草的版本";
+    field(v, "rapproval").textContent = "无";
+    showPairs(ctx, null); refreshPairs(ctx);
+  };
+  bar.style.display = "block";
+}
+
+async function loadMobile() {
+  const m = await api("/api/mobile");
+  document.querySelectorAll("input[name=ohmode]").forEach(r => r.checked = r.value === m.mode);
+  $("#botState").textContent = !m.configured ? "还没设置" : m.paired ? `已配对 @${m.bot_username || "?"}` : `@${m.bot_username || "?"} 还没配对`;
+  $("#pairRow").hidden = !m.configured || m.paired;
+  if (m.pairing_code) $("#pairCode").textContent = m.pairing_code;
+  $("#botName").textContent = "@" + (m.bot_username || "你的机器人");
+  $("#mobileNote").className = m.error ? "note err" : "note";
+  $("#mobileNote").textContent = m.error || "";
+  const box = $("#mobileCases"); box.textContent = "";
+  for (const c of m.cases) {
+    const d = document.createElement("div"); d.className = "job";
+    d.textContent = `#${c.id} ${c.channel === "email" ? "邮件" : "Telegram"} · ${c.who || ""} · ${c.status_zh} · ${(c.updated_at || "").slice(5, 16).replace("T", " ")}` + (c.error ? ` · ${c.error}` : "");
+    box.append(d);
+  }
+}
+
+$("#mobileBtn").onclick = safe(async () => { $("#mobileDlg").showModal(); await loadMobile(); });
+$("#mobileClose").onclick = () => $("#mobileDlg").close();
+document.querySelectorAll("input[name=ohmode]").forEach(r => r.onchange = safe(async () => {
+  await post("/api/mobile/mode", { mode: r.value }); await loadMobile();
+}));
+$("#botSave").onclick = safe(async () => {
+  const token = $("#botToken").value.trim(); if (!token) return;
+  $("#mobileNote").className = "note"; $("#mobileNote").textContent = "正在验证…";
+  try {
+    const r = await post("/api/mobile/token", { token });
+    $("#botToken").value = "";
+    await loadMobile();
+    $("#pairCode").textContent = r.pairing_code; $("#pairRow").hidden = false;
+  } catch (e) { $("#mobileNote").className = "note err"; $("#mobileNote").textContent = e.message; }
+});
+$("#pairNew").onclick = safe(async () => { const r = await post("/api/mobile/pair", {}); $("#pairCode").textContent = r.pairing_code; });
+
+$("#fbBtn").onclick = () => { $("#fbNote").textContent = ""; $("#fbDlg").showModal(); $("#fbText").focus(); };
+$("#fbClose").onclick = () => $("#fbDlg").close();
+$("#fbSend").onclick = safe(async () => {
+  const text = $("#fbText").value.trim(), note = $("#fbNote");
+  if (!text) { note.textContent = "先写点内容"; return; }
+  const kind = (document.querySelector("input[name=fbkind]:checked") || {}).value || "other";
+  $("#fbSend").disabled = true; note.className = "note"; note.textContent = "发送中…";
+  try { await post("/api/feedback", { text, kind }); $("#fbText").value = ""; note.textContent = "已发送，谢谢！"; }
+  catch (e) { note.className = "note err"; note.textContent = e.message; }
+  finally { $("#fbSend").disabled = false; }
+});
+</script>
+</body>
+</html>

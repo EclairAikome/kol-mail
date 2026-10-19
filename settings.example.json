@@ -1,0 +1,61 @@
+{
+  "port": 8765,
+  "utc_offset_hours": 8,
+  "mail": {
+    "account_name": "alex",
+    "address": "alex@example.com",
+    "company_domain": "@example.com",
+    "mcp_exe": "C:\\Users\\alex\\AppData\\Local\\kol-mail\\venv\\Scripts\\mcp-email-server.exe"
+  },
+  "identity": {
+    "name": "Alex",
+    "title": "Marketing Manager",
+    "company": "Example",
+    "signature": "Alex\nMarketing Manager | Example\nhttps://example.com/"
+  },
+  "paths": {
+    "playbook": "",
+    "koc_knowledge": "",
+    "sheet_tool": "",
+    "sheet_python": "",
+    "sheet_workbook": "",
+    "autoreply_record": "",
+    "telegram_mcp": ""
+  },
+  "llm": {
+    "backend": "claude",
+    "models": {},
+    "claude_bin": "",
+    "codemaker_bin": ""
+  },
+  "koc": {
+    "allowed_numbers": [
+      "1",
+      "5",
+      "7",
+      "20",
+      "24",
+      "50"
+    ],
+    "commission_percents": [
+      "5",
+      "1"
+    ],
+    "profit_share_percent": "20",
+    "withdraw_minimum": "50",
+    "site_domain": "",
+    "fallback_subject": "Collaboration"
+  },
+  "mobile": {
+    "telegram_bot_token": "",
+    "owner_chat_id": 0
+  },
+  "feedback": {
+    "popo_webhook": "",
+    "body_key": "message"
+  },
+  "update": {
+    "repo": "",
+    "enabled": true
+  }
+}
