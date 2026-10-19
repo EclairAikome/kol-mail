@@ -1337,7 +1337,7 @@ def may_send_now(cfg, channel: str, period: datetime) -> bool:
 
 async def offhours_email(emails: list[dict]):
     cfg = load_autoreply_config()
-    if not cfg or not cfg.email_enabled:
+    if not cfg or not cfg.email_enabled or cfg.offhours_mode == "off":
         return
     now = datetime.now(autoreply.TZ)
     if cfg.schedule.off_period_start(now) is None:
@@ -1426,7 +1426,7 @@ async def offhours_telegram(burst: dict, who: str):
     if not isinstance(chat_id, int) or chat_id <= 0 or chat_id in TG_SERVICE_CHATS:
         return  # private user chats only (telegram-mcp already drops bots and our own messages)
     cfg = load_autoreply_config()
-    if not cfg or not cfg.telegram_enabled:
+    if not cfg or not cfg.telegram_enabled or cfg.offhours_mode == "off":
         return
     now = datetime.now(autoreply.TZ)
     if cfg.schedule.off_period_start(now) is None:
@@ -2319,7 +2319,7 @@ def status_text() -> str:
     if not cfg:
         return "autoreply.json 有误，自动回复全部停了，请到电脑上看。"
     now = datetime.now(autoreply.TZ)
-    mode = "AI 起草、手机审批" if cfg.offhours_mode == "ai" else "固定模板自动回复"
+    mode = {"ai": "AI 起草、手机审批", "template": "固定模板自动回复"}.get(cfg.offhours_mode, "关（不自动回复）")
     waiting = cases.all_open()
     upcoming = sorted(d for d in cfg.schedule.holidays if d >= now.date())[:6]
     lines = [f"下班回复方式：{mode}",
@@ -2542,8 +2542,10 @@ async def api_setup(request: Request):
             preferences, problem = onboarding.get_preferences(read_playbook()), None
         except PlaybookUnreadable as e:
             preferences, problem = "", str(e)
+        cfg = load_autoreply_config()
         return JSONResponse({"signature": SIGNATURE, "name": IDENTITY["name"] or "", "preferences": preferences,
-                             "playbook_error": problem, "setup_needed": not SETUP_DONE})
+                             "playbook_error": problem, "setup_needed": not SETUP_DONE,
+                             "offhours_mode": cfg.offhours_mode if cfg else None})
     body = await request.json()
     raw_signature = strip_hidden(str(body.get("signature") or ""))
     if len(raw_signature) > onboarding.MAX_SIGNATURE:
@@ -2572,6 +2574,13 @@ async def api_setup(request: Request):
         return bad(f"签名保存失败：{err_text(e)}", 500)
     SIGNATURE, SETUP_DONE = signature, True
     log("setup saved", f"signature {len(signature)} chars")
+    if "offhours_template" in body:  # sent only when the box was changed, so an "ai" choice is never undone here
+        mode = "template" if body.get("offhours_template") is True else "off"
+        try:
+            autoreply.set_switch(AUTOREPLY_CONFIG, "offhours_mode", mode)
+        except (OSError, ValueError) as e:
+            return bad(f"签名和谈判方式已保存，但下班自动回复的开关没改成：{err_text(e)}", 500)
+        log("setup: offhours_mode", mode)
     return JSONResponse({"ok": True})
 
 

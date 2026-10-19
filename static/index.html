@@ -186,7 +186,8 @@
   <p class="note">下班时间来的 KOL 邮件和 Telegram 私聊，不再发固定模板。AI 先给 2 到 3 个方案推到你的 Telegram，你选一个、看中文对照、打字提修改意见，点“发送”并再确认一次才会发出。没批的什么都不发，第二天在这里接着处理。</p>
   <div class="row2"><b>下班回复方式</b>
     <label><input type="radio" name="ohmode" value="ai"> AI 起草，手机审批</label>
-    <label><input type="radio" name="ohmode" value="template"> 固定模板自动回复</label></div>
+    <label><input type="radio" name="ohmode" value="template"> 固定模板自动回复</label>
+    <label><input type="radio" name="ohmode" value="off"> 不自动回复</label></div>
   <div class="row2"><b>Telegram 机器人</b><span id="botState" class="note"></span></div>
   <div class="row2"><input type="password" id="botToken" placeholder="在 Telegram 找 @BotFather，/newbot 建一个机器人，把它给的令牌粘贴到这里" autocomplete="off">
     <button class="act" id="botSave" type="button">保存</button></div>
@@ -200,7 +201,7 @@
   <div class="row2"><button class="act" id="mobileClose" type="button">关闭</button></div>
 </dialog>
 <dialog id="setupDlg" class="small">
-  <h3>设置：签名和我的谈判方式</h3>
+  <h3>设置：签名、我的谈判方式和下班自动回复</h3>
   <p class="note">第一次使用先填这两项，以后随时在上方“设置”里改，保存后立刻生效。</p>
   <label class="blk" for="setupSig">签名</label>
   <textarea id="setupSig" maxlength="500" style="min-height:100px" placeholder="每封回信末尾原样附上，按你自己的格式写，比如名字、职位、公司、Discord、网址"></textarea>
@@ -210,6 +211,8 @@
 - 固定费一般给到多少，什么情况下可以加
 - 砍价时你习惯怎么说，语气偏正式还是轻松
 - 哪些事绝对不能答应（比如预付、声称官方授权）"></textarea>
+  <label class="blk"><input type="checkbox" id="setupOffhours"> 下班时间自动回复固定模板</label>
+  <p class="note" id="setupOffhoursNote" style="margin:0">不在工作时间（周一到周五 10:00 到 18:00，GMT+8）收到的 KOL 邮件和 Telegram 私聊，自动回一段固定的“我现在下班了，回来再回复你”。默认关，需要时（比如休长假）再打开。</p>
   <div class="row2"><button class="act primary" id="setupSave" type="button">保存</button>
     <button class="act" id="setupClose" type="button">稍后再说</button><span class="note" id="setupNote"></span></div>
 </dialog>
@@ -356,7 +359,7 @@ async function loadStatus() {
     const a = s.autoreply;
     if (a && a.mode === "ai" && (a.email || a.telegram) && !a.phone_paired) parts.push("下班 AI 回复已开启，但手机审稿还没配对，点上方“手机审稿”设置");
     if (s.mobile_error) parts.push(s.mobile_error);
-    const auto = !a ? "" : ` · 下班${a.mode === "ai" ? "AI起草手机审批" : "自动回复"} 邮件${a.email ? "开" : "关"} Telegram${a.telegram ? (a.telegram_login ? "开" : "开（未登录）") : "关"}`
+    const auto = !a ? "" : a.mode === "off" ? " · 下班自动回复关" : ` · 下班${a.mode === "ai" ? "AI起草手机审批" : "自动回复"} 邮件${a.email ? "开" : "关"} Telegram${a.telegram ? (a.telegram_login ? "开" : "开（未登录）") : "关"}`
       + (a.off_hours ? " · 现在是非工作时间" : "");
     el.className = parts.length ? "err" : "";
     el.textContent = parts.length ? parts.join("；") :
@@ -1258,6 +1261,11 @@ function setupSnoozed() { try { return Number(localStorage.getItem(SETUP_SNOOZE)
 async function openSetup() {
   const d = await api("/api/setup");
   $("#setupSig").value = d.signature || ""; $("#setupPrefs").value = d.preferences || "";
+  st.setupOffhours = d.offhours_mode === "template";
+  $("#setupOffhours").checked = st.setupOffhours;
+  $("#setupOffhoursNote").dataset.base = $("#setupOffhoursNote").dataset.base || $("#setupOffhoursNote").textContent;
+  $("#setupOffhoursNote").textContent = $("#setupOffhoursNote").dataset.base + (d.offhours_mode === "ai"
+    ? "现在下班是 AI 起草、手机审批（在“手机审稿”里改），勾上会改成固定模板。" : "");
   const note = $("#setupNote"); note.className = d.playbook_error ? "note err" : "note";
   note.textContent = d.playbook_error || (d.setup_needed && (d.signature || "") === (d.name || "") ? "签名现在只有名字，按你平时的格式补全" : "");
   if (!$("#setupDlg").open) $("#setupDlg").showModal();
@@ -1271,7 +1279,9 @@ $("#setupSave").onclick = safe(async () => {
   const note = $("#setupNote"), signature = $("#setupSig").value.trim(), preferences = $("#setupPrefs").value.trim();
   if (!signature) { note.className = "note err"; note.textContent = "签名不能是空的"; return; }
   $("#setupSave").disabled = true; note.className = "note"; note.textContent = "保存中…";
-  try { await post("/api/setup", { signature, preferences }); note.textContent = "已保存"; $("#setupDlg").close(); await loadStatus(); }
+  const body = { signature, preferences };
+  if ($("#setupOffhours").checked !== st.setupOffhours) body.offhours_template = $("#setupOffhours").checked;
+  try { await post("/api/setup", body); note.textContent = "已保存"; $("#setupDlg").close(); await loadStatus(); }
   catch (e) { note.className = "note err"; note.textContent = e.message; }
   finally { $("#setupSave").disabled = false; }
 });

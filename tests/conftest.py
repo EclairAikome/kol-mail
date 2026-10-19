@@ -12,3 +12,4 @@ _settings.write_text(json.dumps({
     "koc": {"site_domain": "example.com"},
 }), encoding="utf-8")
 os.environ["KOL_MAIL_SETTINGS"] = str(_settings)
+os.environ["KOL_MAIL_DATA"] = str(_settings.parent / "data")  # app.py writes its files here, never in the checkout
