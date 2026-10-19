@@ -61,6 +61,9 @@ DEFAULTS = {
         "popo_webhook": "",          # anonymous feedback goes here (set by the installer, never in git)
         "body_key": "message",       # JSON field the robot reads the text from
     },
+    "onboarding": {
+        "done": False,               # the signature and own negotiation style were saved once in the page
+    },
     "update": {
         "repo": "",                  # owner/name on GitHub
         "enabled": True,

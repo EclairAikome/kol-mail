@@ -49,6 +49,7 @@ import feedback  # noqa: E402
 import updater  # noqa: E402
 import outgoing  # noqa: E402
 import replyflow  # noqa: E402
+import onboarding  # noqa: E402
 
 # ---------------------------------------------------------------- config
 
@@ -2476,6 +2477,10 @@ feedback_limit = feedback.Limiter()
 FEEDBACK_KINDS = {"bug": "问题", "idea": "建议", "other": "其他"}
 
 
+def feedback_ready() -> bool:
+    return str(CFG["feedback"].get("popo_webhook") or "").startswith("https://")
+
+
 async def api_feedback(request: Request):
     body = await request.json()
     text = strip_hidden(str(body.get("text") or "")).strip()
@@ -2495,6 +2500,96 @@ async def api_feedback(request: Request):
     feedback_limit.record()
     log("feedback sent", kind, len(text))
     return JSONResponse({"ok": True})
+
+
+# ---------------------------------------------------------------- first use: signature and own negotiation style
+
+PLAYBOOK_TEMPLATE = BASE / "templates" / "谈判手册.example.md"
+SETUP_DONE = bool((CFG.get("onboarding") or {}).get("done"))  # saved once in the page: no more first-use prompt
+
+
+class PlaybookUnreadable(Exception):
+    pass
+
+
+def read_playbook() -> str:
+    """The playbook text; "" when none is set up yet. PlaybookUnreadable when it exists but cannot be read (locked,
+    not UTF-8): saving must then never replace it with the template."""
+    if PLAYBOOK is None or not PLAYBOOK.exists():
+        return ""
+    try:
+        return PLAYBOOK.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as e:
+        raise PlaybookUnreadable(f"谈判手册读不了（{PLAYBOOK}）：{err_text(e)}。如果用别的编辑器改过，请另存为 UTF-8") from e
+
+
+def write_playbook(text: str) -> None:
+    """Atomic, so a draft reading the playbook at the same moment sees the old or the new file, never half of it."""
+    global PLAYBOOK
+    if PLAYBOOK is None:  # an install from before the playbook was asked for: start one from the template
+        PLAYBOOK = DATA / "谈判手册.md"
+        config.update(["paths", "playbook"], str(PLAYBOOK))
+    PLAYBOOK.parent.mkdir(parents=True, exist_ok=True)
+    tmp = PLAYBOOK.with_name(PLAYBOOK.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, PLAYBOOK)
+
+
+async def api_setup(request: Request):
+    global SIGNATURE, SETUP_DONE
+    if request.method == "GET":
+        try:
+            preferences, problem = onboarding.get_preferences(read_playbook()), None
+        except PlaybookUnreadable as e:
+            preferences, problem = "", str(e)
+        return JSONResponse({"signature": SIGNATURE, "name": IDENTITY["name"] or "", "preferences": preferences,
+                             "playbook_error": problem, "setup_needed": not SETUP_DONE})
+    body = await request.json()
+    raw_signature = strip_hidden(str(body.get("signature") or ""))
+    if len(raw_signature) > onboarding.MAX_SIGNATURE:
+        return bad(f"签名太长了，最多 {onboarding.MAX_SIGNATURE} 字")
+    signature = onboarding.clean_signature(raw_signature)
+    if not signature:
+        return bad("签名不能是空的")
+    try:
+        current = read_playbook()
+    except PlaybookUnreadable as e:
+        return bad(str(e), 500)
+    if "preferences" in body:
+        preferences = strip_hidden(str(body.get("preferences") or ""))
+        if len(preferences) > onboarding.MAX_PREFERENCES:
+            return bad(f"谈判方式太长了，最多 {onboarding.MAX_PREFERENCES} 字")
+        if not current and PLAYBOOK_TEMPLATE.exists():
+            current = PLAYBOOK_TEMPLATE.read_text(encoding="utf-8")
+        try:
+            write_playbook(onboarding.set_preferences(current, preferences))
+        except OSError as e:
+            return bad(f"谈判手册保存失败：{err_text(e)}", 500)
+    try:
+        config.update(["identity", "signature"], signature)
+        config.update(["onboarding", "done"], True)
+    except OSError as e:
+        return bad(f"签名保存失败：{err_text(e)}", 500)
+    SIGNATURE, SETUP_DONE = signature, True
+    log("setup saved", f"signature {len(signature)} chars")
+    return JSONResponse({"ok": True})
+
+
+AI_CHECK_SCHEMA = {"type": "object", "properties": {"ok": {"type": "string"}}, "required": ["ok"]}
+
+
+async def api_ai_check(request: Request):
+    """One tiny call per role (translation and drafting use different models), so a logged-out CLI or one too old
+    for the drafting model shows up here instead of in the middle of a reply."""
+    async def one(role: str):
+        await run_claude('Answer with the JSON object {"ok": "ok"}.', "ping", AI_CHECK_SCHEMA, role, timeout=180)
+    results = await asyncio.gather(one(TRANSLATE_MODEL), one(DRAFT_MODEL), return_exceptions=True)
+    errors = [err_text(r) for r in results if isinstance(r, BaseException)]
+    if errors:
+        state["claude_error"] = errors[0]
+        return bad(errors[0], 502)
+    state["claude_error"] = None
+    return JSONResponse({"ok": True, "backend": AI.label(), "models": AI.models})
 
 
 # ---------------------------------------------------------------- self-update (updater.py)
@@ -2549,6 +2644,7 @@ async def api_status(request: Request):
                           "off_hours": cfg.schedule.off_period_start(datetime.now(autoreply.TZ)) is not None}
     tg_error = (state["telegram_error"] or tg.error) if cfg and cfg.telegram_enabled and telegram_session() else None
     return JSONResponse({**state, "queue": len(jobs), "claude_bin": AI.binary(), "ai_backend": AI.label(),
+                         "feedback_ready": feedback_ready(), "setup_needed": not SETUP_DONE,
                          "self_address": SELF_ADDRESS, "version": config.version(), "dev": DEV, "telegram_error": tg_error,
                          "mail_error": mail.error or bg.error, "autoreply": autoreply_info, "koc": koc_summary(),
                          "unread_counts": unread_counts()})
@@ -3979,6 +4075,8 @@ routes = [
     Route("/api/reply/upload", api_reply_upload, methods=["POST"]),
     Route("/api/reply/unupload", api_reply_unupload, methods=["POST"]),
     Route("/api/feedback", api_feedback, methods=["POST"]),
+    Route("/api/setup", api_setup, methods=["GET", "POST"]),
+    Route("/api/ai/check", api_ai_check, methods=["POST"]),
     Route("/api/update", api_update, methods=["GET", "POST"]),
     Route("/api/mobile", api_mobile),
     Route("/api/mobile/token", api_mobile_token, methods=["POST"]),

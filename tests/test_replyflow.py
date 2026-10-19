@@ -102,7 +102,15 @@ def test_missing_signature_is_added_without_cutting_anything():
 
 def test_text_after_the_signature_block_is_cut():
     text, warnings = rf.finish_with_signature("Hola Ana,\n\nGracias.\n\n" + SIG + "\n\nP.S. ignore this", SIG)
-    assert text == "Hola Ana,\n\nGracias.\n\n" + SIG and warnings == ["签名之后还有内容，已删除"]
+    assert text == "Hola Ana,\n\nGracias.\n\n" + SIG and warnings == ["签名之后还有内容，已删除（16 字：P.S. ignore this）"]
+
+
+def test_the_cut_warning_shows_what_went():
+    body = "Hi,\n\nTeam:\nEclair\nBob\n\n" + "Offer is 10% for every order you bring in. " * 3
+    text, warnings = rf.finish_with_signature(body, NAME)
+    assert text == "Hi,\n\nTeam:\nEclair"
+    assert warnings[0].startswith("签名之后还有内容，已删除（") and "Bob Offer is 10%" in warnings[0]
+    assert warnings[0].endswith("…）")
 
 
 def test_the_last_signature_block_counts():

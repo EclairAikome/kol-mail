@@ -1,7 +1,11 @@
 ﻿# KOL Mail 一键安装（Windows 10/11，PowerShell 5.1 即可）
 #
 # 用法（维护者会在 POPO 群里发带参数的完整命令）：
-#   powershell -ExecutionPolicy Bypass -File install.ps1 -Repo owner/kol-mail -Feedback <反馈地址> -ImapHost <收信服务器> -SmtpHost <发信服务器>
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -Repo owner/kol-mail -Feedback <反馈地址>
+#
+# 公司邮箱固定是 @lootbar.com（Amazon WorkMail），收发信服务器已经是默认值，不用再问；换公司时用 -Domain、
+# -ImapHost、-SmtpHost、-Company 改。维护者在本机试装时加 -Source <源码目录> -Dir <别的目录> -NoService，
+# 这样不注册开机任务、不放桌面图标、不启动服务（真服务会在下班时间自动回信）。
 #
 # 做的事：找到或安装 Python，下载最新版 KOL Mail，装依赖，配置你的邮箱和 AI（Claude Code 或 CodeMaker），
 # 写好你的签名，注册开机自动启动的后台任务，在桌面放一个“KOL Mail”图标。重复运行是安全的，已有的设置会保留。
@@ -11,12 +15,15 @@
 param(
     [string]$Repo = "",
     [string]$Feedback = "",
-    [string]$ImapHost = "",
-    [string]$SmtpHost = "",
+    [string]$Domain = "lootbar.com",
+    [string]$Company = "LootBar",
+    [string]$ImapHost = "imap.mail.us-east-1.awsapps.com",
+    [string]$SmtpHost = "smtp.mail.us-east-1.awsapps.com",
     [string]$PipIndex = "",
     [string]$Mirror = "",  # GitHub 连不上时用的 https 代理前缀
     [string]$Dir = (Join-Path $env:LOCALAPPDATA "kol-mail"),
-    [string]$Source = ""   # 本地源码目录（维护者测试用）；留空则从 GitHub 下载最新版
+    [string]$Source = "",  # 本地源码目录（维护者测试用）；留空则从 GitHub 下载最新版
+    [switch]$NoService     # 维护者测试用：不注册开机任务、不放桌面图标、不启动
 )
 
 $ErrorActionPreference = "Stop"
@@ -159,7 +166,7 @@ $Data = Join-Path $App "data"
 New-Item -ItemType Directory -Force $Dir | Out-Null
 
 # 重复安装时先停掉正在运行的旧版本，不然 pip 换不了被占用的文件
-if (Get-ScheduledTask -TaskName "kol-mail" -ErrorAction SilentlyContinue) {
+if (-not $NoService -and (Get-ScheduledTask -TaskName "kol-mail" -ErrorAction SilentlyContinue)) {
     Stop-ScheduledTask -TaskName "kol-mail" -ErrorAction SilentlyContinue
     Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object { $_.CommandLine -like "*app.py*" -and $_.ExecutablePath -like "$Venv*" } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
@@ -237,11 +244,17 @@ $settingsPath = Join-Path $Data "settings.json"
 $old = $null
 if (Test-Path $settingsPath) { $old = Get-Content -Raw -Encoding UTF8 $settingsPath | ConvertFrom-Json }
 $email = if ((Has $old "mail") -and (Has $old.mail "address")) { $old.mail.address } else { "" }
-while ($email -notmatch "^[^@\s]+@[^@\s]+\.[^@\s]+$") { $email = Ask "你的工作邮箱" }
+while ($email -notmatch "^[^@\s]+@[^@\s]+\.[^@\s]+$") {
+    $email = Ask $(if ($Domain) { "你的工作邮箱（只填 @$Domain 前面的部分就行）" } else { "你的工作邮箱" })
+    if ($email -and $Domain -and $email -notmatch "@") { $email = "$email@$Domain" }
+}
 $email = $email.ToLower()
 $account = if ((Has $old "mail") -and (Has $old.mail "account_name")) { $old.mail.account_name } else { ($email.Split("@")[0] -replace "[^A-Za-z0-9_-]", "") }
 $fullName = if ((Has $old "identity") -and (Has $old.identity "name")) { $old.identity.name } else { "" }
-while (-not $fullName) { $fullName = Ask "对外署名（英文名，会出现在签名里）" }
+# 默认用邮箱前缀当名字：eclair -> Eclair，john.doe -> John Doe
+$guess = (($email.Split("@")[0] -split "[._-]+") | Where-Object { $_ } |
+    ForEach-Object { $_.Substring(0, 1).ToUpper() + $_.Substring(1) }) -join " "
+while (-not $fullName) { $fullName = Ask "对外署名（英文名）" $guess }
 $accounts = (Run-Native { & $Mcp account list }).Out
 if ($accounts -notmatch "(?m)\b$([regex]::Escape($account))\b") {
     if (-not $ImapHost) { $ImapHost = Ask "收信服务器（IMAP）" }
@@ -273,20 +286,172 @@ if ($rev -and ($needSend -or $needAtt)) {
 }
 
 # ---------------------------------------------------------------- 5. AI
-Say "[5/8] 选择 AI…"
+Say "[5/8] 连接 AI…"
 $cm = Join-Path $env:USERPROFILE ".codemaker\bin\codemaker.exe"
 $claude = (Get-Command claude -ErrorAction SilentlyContinue).Source
-$haveCm = Test-Path $cm
+$haveCm = (Test-Path $cm) -or [bool](Get-Command codemaker -ErrorAction SilentlyContinue)
 $default = if ((Has $old "llm") -and (Has $old.llm "backend")) { $old.llm.backend } elseif ($haveCm) { "codemaker" } else { "claude" }
 Say ("  检测到：" + ($(if ($haveCm) { "CodeMaker " } else { "" }) + $(if ($claude) { "Claude Code" } else { "" })))
 $backend = ""
 while ($backend -ne "codemaker" -and $backend -ne "claude") { $backend = (Ask "用哪个 AI？输入 codemaker 或 claude" $default).ToLower() }
-if ($backend -eq "codemaker") {
-    if (-not $haveCm) { Warn "  没找到 CodeMaker 命令行。请先按公司指引安装 CodeMaker CLI，装好后 KOL Mail 就能用。" }
-    elseif ((Run-Native { & $cm quota }).Code -ne 0) { Warn "  CodeMaker 还没登录：请在新窗口运行 codemaker auth login，登录后 KOL Mail 就能用。" }
-} elseif (-not $claude) {
-    Warn "  没找到 Claude Code 命令行（claude）。装好并登录一次后 KOL Mail 就能用。"
+
+# 用刚装好的这版 KOL Mail 自己的 llm.py 来检测：找命令行、看版本、用翻译和起草两个模型各真调一次。
+# 新旧版本的 llm.py 都能这样用，所以这个脚本（总是从 main 下载）也能装旧版程序。
+$ClaudeMin = [version]"2.1.280"  # 起草默认用的 Opus 5.5 要求的最低 Claude Code 版本
+$script:ClaudeBin = ""           # 这次装的原生 Claude Code，或者验证通过的那个；写进设置，后台服务就用同一个
+$script:CodemakerBin = ""
+$script:LoginOpened = $false
+# CodeMaker 没有 Claude 模型。旧版程序（v0.1.1 及以前）给 CodeMaker 的默认还是 Claude 模型，这里替它定下来
+$CmModels = [ordered]@{ translate = "gpt-5.6-terra"; draft = "gpt-6.1-sol" }
+$appDefaultsCm = [bool](Select-String -Quiet -SimpleMatch -Pattern 'gpt-6.1-sol' -LiteralPath (Join-Path $App "llm.py"))
+$oldModels = (Has $old "llm") -and (Has $old.llm "models") -and @($old.llm.models.PSObject.Properties).Count
+$pinCmModels = ($backend -eq "codemaker") -and -not $appDefaultsCm -and -not $oldModels
+$AiCheck = Join-Path $env:TEMP ("kolmail-aicheck-" + [guid]::NewGuid().ToString("N") + ".py")
+$aiCheckCode = @'
+import asyncio, json, subprocess, sys, tempfile
+from pathlib import Path
+
+app, backend, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+claude_bin = sys.argv[4] if len(sys.argv) > 4 else ""
+sys.path.insert(0, app)
+import llm
+
+llm_cfg = {}
+try:
+    llm_cfg = json.loads((Path(app) / "data" / "settings.json").read_text(encoding="utf-8-sig")).get("llm") or {}
+except (OSError, ValueError):
+    pass
+s = llm.Settings(backend=backend, models=llm_cfg.get("models") or {},
+                 claude_bin=claude_bin or llm_cfg.get("claude_bin") or "",
+                 codemaker_bin=llm_cfg.get("codemaker_bin") or "",
+                 workdir=Path(tempfile.gettempdir()) / "kol-mail-install-check")
+out = {"binary": s.binary(), "models": s.models, "errors": []}
+if mode == "version":
+    if out["binary"]:
+        try:
+            r = subprocess.run([out["binary"], "--version"], capture_output=True, text=True, timeout=60)
+            out["version"] = (r.stdout or r.stderr).strip()[:200]
+        except (OSError, subprocess.SubprocessError):
+            out["version"] = ""
+    print(json.dumps(out))
+    sys.exit(0)
+schema = {"type": "object", "properties": {"ok": {"type": "string"}}, "required": ["ok"]}
+for role in llm.ROLES:
+    try:
+        asyncio.run(llm.complete(s, 'Answer with the JSON object {"ok": "ok"}.', "ping", schema, role, 180))
+    except llm.LLMUnavailable as e:
+        out["errors"].append(["unavailable", f"{s.models[role]}: {e}"])
+    except Exception as e:
+        out["errors"].append(["error", f"{s.models[role]}: {e}"])
+print(json.dumps(out))
+sys.exit(0 if not out["errors"] else 2 if any(k == "unavailable" for k, _ in out["errors"]) else 1)
+'@
+
+function Invoke-AiCheck($mode) {
+    $saved = $env:KOL_TRANSLATE_MODEL, $env:KOL_DRAFT_MODEL
+    if ($pinCmModels) { $env:KOL_TRANSLATE_MODEL, $env:KOL_DRAFT_MODEL = $CmModels.translate, $CmModels.draft }
+    try { $r = Run-Native { & $Py -I $AiCheck $App $backend $mode $script:ClaudeBin } }
+    finally { $env:KOL_TRANSLATE_MODEL, $env:KOL_DRAFT_MODEL = $saved }
+    $line = @($r.Out -split "`n" | Where-Object { $_.TrimStart().StartsWith("{") }) | Select-Object -Last 1
+    $data = $null
+    if ($line) { try { $data = $line | ConvertFrom-Json } catch { } }
+    return @{ Code = $r.Code; Data = $data; Out = $r.Out }
 }
+
+# 回车 = 重新检测，s = 跳过
+function Wait-Retry($what) {
+    $a = Ask "${what}按回车重新检测（输入 s 跳过，以后在页面上点“重新检测 AI”）"
+    return ($a -notmatch "^[sS]$")
+}
+
+function Install-ClaudeCode {
+    Say "  正在用官方安装器安装最新版 Claude Code（装在你自己的用户目录）…"
+    $r = Run-Native { powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://claude.ai/install.ps1 | iex" }
+    $exe = Join-Path $env:USERPROFILE ".local\bin\claude.exe"
+    if ($r.Code -eq 0 -and (Test-Path $exe)) {
+        $script:ClaudeBin = $exe
+        $env:Path = (Split-Path $exe) + ";" + $env:Path
+        Say "  装好了：$exe"
+    } else {
+        Warn "  安装没成功：$(($r.Out -split "`n" | Select-Object -Last 3) -join ' ')"
+    }
+}
+
+# 在新窗口里登录：登录要开浏览器，可能还要粘贴验证码，安装窗口不适合
+# 每次运行最多自动弹一次，之后只提示（网络不通等别的原因也会走到这里，不能一直弹窗）
+function Open-AiLogin($bin) {
+    if ($script:LoginOpened) { return }
+    $script:LoginOpened = $true
+    $quoted = "'" + ($bin -replace "'", "''") + "'"  # 用户名里可能有撇号
+    if ($backend -eq "codemaker") {
+        Start-Process powershell.exe -ArgumentList @("-NoExit", "-Command", "& $quoted auth login")
+    } else {
+        Start-Process powershell.exe -ArgumentList @("-NoExit", "-Command",
+            "Write-Host '输入 /login 回车，在浏览器里登录；登录好后输入 /exit，再回到安装窗口' -ForegroundColor Yellow; & $quoted")
+    }
+}
+
+function Connect-AI {
+    $label = if ($backend -eq "codemaker") { "CodeMaker" } else { "Claude Code" }
+    while ($true) {
+        $v = Invoke-AiCheck "version"
+        if (-not $v.Data) {  # 检测脚本自己出错了，不是没装
+            Warn "  检测 $label 时出错："
+            ($v.Out -split "`n" | Select-Object -Last 3) | ForEach-Object { Warn "    $_" }
+            if (-not (Wait-Retry "  ")) { return $false }
+            continue
+        }
+        $bin = $v.Data.binary
+        if (-not $bin) {
+            if ($backend -eq "claude") {
+                if ((Ask "  没找到 Claude Code。现在用官方安装器装上吗？(Y/n)" "Y") -match "^[Yy]") { Install-ClaudeCode; continue }
+            } else {
+                Warn "  没找到 CodeMaker 命令行。请先按公司指引安装 CodeMaker CLI。"
+            }
+            if (-not (Wait-Retry "  装好后")) { return $false }
+            continue
+        }
+        if ($backend -eq "claude") {
+            $m = [regex]::Match("$($v.Data.version)", "\d+\.\d+\.\d+")
+            if ($m.Success -and [version]$m.Value -lt $ClaudeMin) {
+                Warn "  Claude Code 是 $($m.Value)，太旧了：起草用的模型要 $ClaudeMin 以上。"
+                if ((Ask "  现在用官方安装器装最新版吗？(Y/n)" "Y") -match "^[Yy]") { Install-ClaudeCode; continue }
+                if (-not (Wait-Retry "  自己升级好后")) { return $false }
+                continue
+            }
+        } elseif ((Run-Native { & $bin quota }).Code -ne 0) {
+            Warn "  CodeMaker 好像还没登录（也可能是网络不通，比如没连公司 VPN）。"
+            if (-not $script:LoginOpened) { Say "  马上打开一个新窗口运行 codemaker auth login，登录好后回到这个窗口。" }
+            else { Say "  需要登录的话，在 PowerShell 里运行 codemaker auth login。" }
+            Open-AiLogin $bin
+            if (-not (Wait-Retry "  登录好后")) { return $false }
+            continue
+        }
+        Say "  用 $($v.Data.models.translate)（翻译）和 $($v.Data.models.draft)（起草）各试一次，要半分钟到一分钟…"
+        $t = Invoke-AiCheck "smoke"
+        if ($t.Code -eq 0 -and $t.Data) {
+            Say "  AI 连接测试通过"
+            # 后台服务的环境（PATH）和这个窗口可能不一样：把验证过的这个命令行写进设置，跑的就是验过的
+            if ($backend -eq "claude") { $script:ClaudeBin = $bin } else { $script:CodemakerBin = $bin }
+            return $true
+        }
+        $errs = if ($t.Data -and $t.Data.errors) { @($t.Data.errors | ForEach-Object { $_[1] }) } else { @(($t.Out -split "`n") | Select-Object -Last 3) }
+        Warn "  $label 还不能用："
+        $errs | ForEach-Object { Warn "    $_" }
+        if (($errs -join "`n") -match "没登录|登录已过期|authenticat|\b401\b|not logged") {
+            if (-not $script:LoginOpened) { Say "  马上打开一个新窗口让你登录 $label，登录好后回到这个窗口。" }
+            else { Say "  需要登录的话，在 PowerShell 里运行 $(if ($backend -eq 'codemaker') { 'codemaker auth login' } else { 'claude，再输入 /login' })。" }
+            Open-AiLogin $bin
+        }
+        if (-not (Wait-Retry "  处理好后")) { return $false }
+    }
+}
+
+try {
+    [IO.File]::WriteAllText($AiCheck, $aiCheckCode, (New-Object Text.UTF8Encoding $false))
+    $aiOk = Connect-AI
+} finally { Remove-Item $AiCheck -ErrorAction SilentlyContinue }
+if (-not $aiOk) { Warn "  AI 还没连上：翻译和起草暂时用不了。处理好后在页面上方点“重新检测 AI”，或者重新运行本脚本。" }
 
 # ---------------------------------------------------------------- 6. 你的设置（只写安装器负责的键，其余保持原样）
 Say "[6/8] 写设置…"
@@ -298,18 +463,27 @@ $answers = [ordered]@{
     update = [ordered]@{}
     feedback = [ordered]@{}
 }
+if ($script:ClaudeBin) { $answers.llm.claude_bin = $script:ClaudeBin }
+if ($script:CodemakerBin) { $answers.llm.codemaker_bin = $script:CodemakerBin }
+if ($pinCmModels) { $answers.llm.models = $CmModels }
+# 新版程序第一次打开页面时，会请同事自己写签名和“我的谈判方式”（每人签名格式和打法都不一样）；
+# 旧版程序（v0.1.1 及以前）没有这一步，还是在这里把签名问全，否则签名只有名字。
+$setupInApp = [bool](Select-String -Quiet -SimpleMatch -Pattern 'id="setupDlg"' -LiteralPath (Join-Path $App "static\index.html"))
+if (-not ((Has $old "identity") -and (Has $old.identity "company"))) { $answers.identity.company = $Company }
 if (-not ((Has $old "identity") -and (Has $old.identity "signature"))) {
-    $title = Ask "职位（英文）" "Marketing Manager"
-    $company = ""
-    while (-not $company) { $company = Ask "公司名（英文）" }
-    $extra = Ask "签名里额外的一行（比如 Discord: xxx，没有就回车）"
-    $site = Ask "签名里的网址（没有就回车）"
-    $answers.identity.title = $title
-    $answers.identity.company = $company
-    $answers.identity.signature = (@($fullName, "$title | $company", $extra, $site) | Where-Object { $_ }) -join "`n"
+    if ($setupInApp) {
+        $answers.identity.signature = $fullName
+    } else {
+        $title = Ask "职位（英文）" "Marketing Manager"
+        $extra = Ask "签名里额外的一行（比如 Discord: xxx，没有就回车）"
+        $site = Ask "签名里的网址（没有就回车）" $(if ($Domain) { "https://$Domain/" } else { "" })
+        $answers.identity.title = $title
+        $answers.identity.signature = (@($fullName, "$title | $Company", $extra, $site) | Where-Object { $_ }) -join "`n"
+    }
 }
 if (-not ((Has $old "paths") -and (Has $old.paths "playbook"))) {
-    $playbook = Ask "谈判手册（Markdown 文件）的完整路径，没有就回车用模板" (Join-Path $Data "谈判手册.md")
+    $playbook = Join-Path $Data "谈判手册.md"
+    if (-not $setupInApp) { $playbook = Ask "谈判手册（Markdown 文件）的完整路径，没有就回车用模板" $playbook }
     if (-not (Test-Path $playbook)) { Copy-Item (Join-Path $App "templates\谈判手册.example.md") $playbook }
     $answers.paths.playbook = $playbook
 }
@@ -335,6 +509,9 @@ if (-not ((Has $old "paths") -and (Has $old.paths "autoreply_record"))) { $answe
 if ($Repo) { $answers.update.repo = $Repo }
 if ($Mirror) { $answers.update.mirror = $Mirror }
 if ($Feedback) { $answers.feedback.popo_webhook = $Feedback }
+elseif (-not ((Has $old "feedback") -and (Has $old.feedback "popo_webhook"))) {
+    Warn "  安装命令里没有反馈地址（-Feedback），页面右下角的“反馈”按钮会是灰的。需要的话问维护者要完整的安装命令。"
+}
 $answersFile = Join-Path $env:TEMP ("kolmail-answers-" + [guid]::NewGuid().ToString("N") + ".json")
 try {
     [IO.File]::WriteAllText($answersFile, ($answers | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
@@ -343,6 +520,11 @@ try {
 } finally { Remove-Item $answersFile -ErrorAction SilentlyContinue }
 $autoreply = Join-Path $Data "autoreply.json"
 if (-not (Test-Path $autoreply)) { Copy-Item (Join-Path $App "autoreply.example.json") $autoreply }
+
+if ($NoService) {
+    Say "[7/8] [8/8] -NoService：不注册开机任务、不放桌面图标、不启动。程序装在 $App"
+    return
+}
 
 # ---------------------------------------------------------------- 7. 后台服务
 Say "[7/8] 注册开机自动启动…"
@@ -363,4 +545,5 @@ $s.Save()
 Start-ScheduledTask -TaskName "kol-mail"
 Start-Process (Join-Path $App "start-kol-mail.cmd")
 Say "装好了。以后双击桌面上的“KOL Mail”就能打开；每天第一次打开会自动检查更新。"
+if ($setupInApp) { Say "第一次打开页面时，会请你写自己的签名和“我的谈判方式”，AI 出策略和起草都照它来。" }
 Say "下班 AI 回复需要在页面上方“手机审稿”里绑定你自己的 Telegram 机器人。"

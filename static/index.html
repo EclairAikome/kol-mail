@@ -106,7 +106,9 @@
   .badge.koc-waiting { color: var(--warn); background: transparent; border: 1px dashed var(--warn); }
   .badge.koc-sent { color: var(--accent); background: transparent; border: 1px solid var(--accent); }
   .badge.koc-human, .badge.koc-uncertain { color: #fff; background: var(--bad); }
-  #kocBtn.human { border-color: var(--bad); color: var(--bad); }
+  #kocBtn.human, #setupBtn.human { border-color: var(--bad); color: var(--bad); }
+  #aiCheckBtn { white-space: nowrap; }
+  dialog.small label.blk { display: block; font-weight: 600; margin: 10px 0 4px; }
   #kocDlg:not([open]) { display: none; }
   #kocDlg { width: min(900px, 92vw); max-height: 80vh; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); }
   #kocDlg .kochead { display: flex; gap: 10px; align-items: center; }
@@ -164,7 +166,9 @@
   </form>
   <button class="act" id="kocBtn" type="button">KOC 机器人</button>
   <button class="act" id="mobileBtn" type="button">手机审稿</button>
+  <button class="act" id="setupBtn" type="button" title="签名和我的谈判方式">设置</button>
   <span id="status">连接中…</span>
+  <button class="act" id="aiCheckBtn" type="button" hidden>重新检测 AI</button>
   <span class="note" id="version"></span>
 </header>
 <dialog id="kocDlg">
@@ -194,6 +198,20 @@
   <div class="note" id="mobileNote"></div>
   <div id="mobileCases"></div>
   <div class="row2"><button class="act" id="mobileClose" type="button">关闭</button></div>
+</dialog>
+<dialog id="setupDlg" class="small">
+  <h3>设置：签名和我的谈判方式</h3>
+  <p class="note">第一次使用先填这两项，以后随时在上方“设置”里改，保存后立刻生效。</p>
+  <label class="blk" for="setupSig">签名</label>
+  <textarea id="setupSig" maxlength="500" style="min-height:100px" placeholder="每封回信末尾原样附上，按你自己的格式写，比如名字、职位、公司、Discord、网址"></textarea>
+  <label class="blk" for="setupPrefs">我的谈判方式</label>
+  <textarea id="setupPrefs" maxlength="4000" style="min-height:180px" placeholder="用你自己的话说个大概，AI 出策略和起草都会照着来。可以写写：
+- 默认先推什么合作方式，佣金怎么给
+- 固定费一般给到多少，什么情况下可以加
+- 砍价时你习惯怎么说，语气偏正式还是轻松
+- 哪些事绝对不能答应（比如预付、声称官方授权）"></textarea>
+  <div class="row2"><button class="act primary" id="setupSave" type="button">保存</button>
+    <button class="act" id="setupClose" type="button">稍后再说</button><span class="note" id="setupNote"></span></div>
 </dialog>
 <dialog id="fbDlg" class="small">
   <h3>匿名反馈</h3>
@@ -314,7 +332,15 @@ async function loadStatus() {
     const el = $("#status");
     const parts = [];
     if (!s.claude_bin) parts.push("找不到 " + (s.ai_backend || "AI") + " 命令行");
-    if (s.claude_error) parts.push("翻译出错：" + s.claude_error);
+    if (s.claude_error) parts.push("AI 出错：" + s.claude_error);
+    $("#aiCheckBtn").hidden = !(s.claude_error || !s.claude_bin);
+    const sb = $("#setupBtn");
+    sb.classList.toggle("human", !!s.setup_needed);
+    sb.title = s.setup_needed ? "签名和谈判方式还没填完，点这里填" : "签名和我的谈判方式";
+    if (s.setup_needed && !st.setupOffered && !setupSnoozed()) { st.setupOffered = true; openSetup().catch(showError); }
+    const fb = $("#fbBtn");
+    fb.disabled = !s.feedback_ready;
+    fb.title = s.feedback_ready ? "" : "反馈地址还没配置（安装命令里缺 -Feedback），请直接联系维护者";
     if (s.mail_error) parts.push(s.mail_error);
     else if (s.scan_error) parts.push("收信出错：" + s.scan_error);
     if (s.autoreply_error) parts.push(s.autoreply_error);
@@ -376,7 +402,7 @@ async function showFolder(f) {
   if (await loadList(false, "cached")) return st.mailbox === f && loadList(false, "revalidate");
   if (st.mailbox !== f || st.search) return;  // another folder or a search took over meanwhile
   const box = $("#rows"); box.textContent = "";
-  const wait = document.createElement("div"); wait.className = "empty"; wait.textContent = "载入中…";
+  const wait = document.createElement("div"); wait.className = "empty"; wait.textContent = "正在连接邮箱…（刚启动时要等十几秒）";
   box.append(wait); $("#count").textContent = ""; $("#more").hidden = true;
   return loadList();
 }
@@ -1225,6 +1251,35 @@ function showPairing(code) {
   const url = `https://t.me/${encodeURIComponent(st.botName)}?start=${encodeURIComponent(code)}`;
   $("#pairCode").textContent = code; $("#pairUrl").textContent = url; $("#pairLink").href = url;
 }
+
+// "稍后再说" keeps the first-use prompt away for a day on this computer (storage may be unavailable: then it just asks)
+const SETUP_SNOOZE = "kolmail.setupSnoozedUntil";
+function setupSnoozed() { try { return Number(localStorage.getItem(SETUP_SNOOZE) || 0) > Date.now(); } catch { return false; } }
+async function openSetup() {
+  const d = await api("/api/setup");
+  $("#setupSig").value = d.signature || ""; $("#setupPrefs").value = d.preferences || "";
+  const note = $("#setupNote"); note.className = d.playbook_error ? "note err" : "note";
+  note.textContent = d.playbook_error || (d.setup_needed && (d.signature || "") === (d.name || "") ? "签名现在只有名字，按你平时的格式补全" : "");
+  if (!$("#setupDlg").open) $("#setupDlg").showModal();
+}
+$("#setupBtn").onclick = safe(openSetup);
+$("#setupClose").onclick = () => {
+  try { localStorage.setItem(SETUP_SNOOZE, String(Date.now() + 24 * 3600 * 1000)); } catch { /* ask again next time */ }
+  $("#setupDlg").close();
+};
+$("#setupSave").onclick = safe(async () => {
+  const note = $("#setupNote"), signature = $("#setupSig").value.trim(), preferences = $("#setupPrefs").value.trim();
+  if (!signature) { note.className = "note err"; note.textContent = "签名不能是空的"; return; }
+  $("#setupSave").disabled = true; note.className = "note"; note.textContent = "保存中…";
+  try { await post("/api/setup", { signature, preferences }); note.textContent = "已保存"; $("#setupDlg").close(); await loadStatus(); }
+  catch (e) { note.className = "note err"; note.textContent = e.message; }
+  finally { $("#setupSave").disabled = false; }
+});
+$("#aiCheckBtn").onclick = safe(async () => {
+  const b = $("#aiCheckBtn"); b.disabled = true; b.textContent = "检测中，约半分钟…";
+  try { await post("/api/ai/check", {}); } catch (e) { /* the status line shows what is wrong */ }
+  finally { b.disabled = false; b.textContent = "重新检测 AI"; await loadStatus(); }
+});
 
 $("#fbBtn").onclick = () => { $("#fbNote").textContent = ""; $("#fbDlg").showModal(); $("#fbText").focus(); };
 $("#fbClose").onclick = () => $("#fbDlg").close();

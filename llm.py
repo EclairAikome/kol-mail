@@ -26,11 +26,24 @@ from pathlib import Path
 ROLES = ("translate", "draft")
 MODELS = {
     "claude": {"translate": "claude-sonnet-5-5", "draft": "claude-opus-5-5"},
-    "codemaker": {"translate": "claude-sonnet-5-5", "draft": "claude-opus-5-5"},
+    "codemaker": {"translate": "gpt-5.6-terra", "draft": "gpt-6.1-sol"},  # CodeMaker offers no Claude models
 }
 _codemaker_ids: dict[str, str] = {}  # bare model name -> provider/model, from `codemaker models`
 UNAVAILABLE_MARKERS = ("log in", "login", "/login", "limit", "credit", "overloaded", "authenticat", "quota",
-                       "登录", "额度")
+                       "登录", "额度", "版本太旧")
+# What a colleague should do about the errors the CLIs commonly give; the raw message stays in brackets.
+LOGIN_HINT = {
+    "claude": "Claude Code 没登录或登录已过期：打开 PowerShell 运行 claude，输入 /login 登录，然后在页面上点“重新检测 AI”",
+    "codemaker": "CodeMaker 没登录或登录已过期：打开 PowerShell 运行 codemaker auth login，然后在页面上点“重新检测 AI”",
+}
+OLD_CLI = re.compile(r"or newer is required", re.IGNORECASE)
+LOGGED_OUT = re.compile(r"authenticat|API Error: 401|oauth (access )?token|not logged in|\blog ?in\b|/login\b|"
+                        r"unauthori[sz]ed", re.IGNORECASE)
+OLD_CLI_HINT = {
+    "claude": "Claude Code 版本太旧，不支持现在用的模型：打开 PowerShell 运行 claude update（不行就重新运行 KOL Mail 安装命令）",
+    "codemaker": "CodeMaker 版本太旧，不支持现在用的模型：按公司指引更新 CodeMaker",
+}
+QUOTA = re.compile(r"quota|credit|rate limit|usage limit|overloaded|额度", re.IGNORECASE)
 # Context the CLIs inject into the user turn. A model that copies its input (a lazy "translation") copies these too.
 INJECTED_TAG = re.compile(r"<(system-reminder|ip_reminder|user-prompt-submit-hook|env|context)\b[^>]*>.*?</\1>\s*",
                           re.DOTALL | re.IGNORECASE)
@@ -162,7 +175,45 @@ def unavailable(message: str) -> bool:
     return any(m in low for m in UNAVAILABLE_MARKERS)
 
 
+def explain(message: str, backend: str) -> str:
+    """The CLI's error with what to do about it in front, for the errors a colleague can fix themselves."""
+    if not message:
+        return message
+    if OLD_CLI.search(message):
+        hint = OLD_CLI_HINT.get(backend, OLD_CLI_HINT["claude"])
+    elif LOGGED_OUT.search(message):
+        hint = LOGIN_HINT.get(backend, LOGIN_HINT["claude"])
+    elif QUOTA.search(message):
+        hint = "AI 额度用完或服务繁忙，稍后再试"
+    else:
+        return message
+    return f"{hint}（原始信息：{message}）"
+
+
+MODEL_ID = re.compile(r"[\w.-]+/[\w.:-]+")
+
+
+def _key(model: str) -> str:
+    return re.sub(r"[\s_-]", "", model.lower())
+
+
+def match_models(listing: str, model: str) -> list[str]:
+    """provider/model ids from `codemaker models` whose model part is `model`, ignoring case, spaces, dashes and
+    underscores ("gpt6.1 sol" finds "openai/gpt-6.1-sol", but "gpt-5.6" never "gpt-56"); CodeMaker's own provider
+    first. Lines that are not a bare provider/model id are not ids."""
+    want = _key(model)
+    ids = [line.strip() for line in listing.splitlines()
+           if MODEL_ID.fullmatch(line.strip()) and _key(line.strip().rsplit("/", 1)[1]) == want]
+    return sorted(ids, key=lambda i: "codemaker" not in i.split("/", 1)[0])
+
+
 # ---------------------------------------------------------------- the call
+
+def _fail(message: str, backend: str):
+    """Raise the CLI's error, explained; LLMUnavailable when the backend itself cannot run (logged out, too old)."""
+    explained = explain(message, backend)
+    raise (LLMUnavailable if unavailable(explained) else LLMError)(explained)
+
 
 async def complete(settings: Settings, system_prompt: str, user_text: str, schema: dict, role: str,
                    timeout: int) -> dict:
@@ -223,11 +274,10 @@ async def _claude(binary: str, model: str, system_prompt: str, user_text: str, s
             pass
     try:
         obj = json.loads(out.decode("utf-8", "replace"))
-    except ValueError:
-        raise LLMError((err or out).decode("utf-8", "replace")[:300] or "Claude Code 输出无法解析")
+    except ValueError:  # not the CLI's JSON at all: a broken call, not proof the backend is unavailable
+        raise LLMError(explain((err or out).decode("utf-8", "replace")[:300] or "Claude Code 输出无法解析", "claude"))
     if obj.get("is_error"):
-        msg = str(obj.get("result") or obj.get("terminal_reason") or "Claude Code 调用失败")[:300]
-        raise (LLMUnavailable if unavailable(msg) else LLMError)(msg)
+        _fail(str(obj.get("result") or obj.get("terminal_reason") or "Claude Code 调用失败")[:300], "claude")
     structured = obj.get("structured_output")
     if isinstance(structured, dict):
         return structured
@@ -251,11 +301,13 @@ async def codemaker_model_id(binary: str, model: str) -> str:
     proc = await asyncio.create_subprocess_exec(binary, "models", stdin=asyncio.subprocess.DEVNULL,
                                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     out, err = await _communicate(proc, b"", 120, "CodeMaker")
-    ids = [line.strip() for line in out.decode("utf-8", "replace").splitlines() if line.strip().endswith("/" + model)]
+    ids = match_models(out.decode("utf-8", "replace"), model)
     if not ids:
         msg = (err or b"").decode("utf-8", "replace").strip()[-200:]
-        raise (LLMUnavailable if unavailable(msg) else LLMError)(f"CodeMaker 里没有模型 {model}" + (f"：{msg}" if msg else ""))
-    ids.sort(key=lambda i: "codemaker" not in i.split("/", 1)[0])
+        if unavailable(msg):
+            raise LLMUnavailable(explain(msg, "codemaker"))
+        raise LLMError(f"CodeMaker 里没有模型 {model}（在 PowerShell 运行 codemaker models 看看有哪些，"
+                       f"在 settings.json 的 llm.models 里改）" + (f"：{msg}" if msg else ""))
     _codemaker_ids[model] = ids[0]
     return ids[0]
 
@@ -301,12 +353,10 @@ async def _codemaker(binary: str, model: str, system_prompt: str, user_text: str
             elif event.get("type") == "error":
                 errors.append(json.dumps(event.get("error"), ensure_ascii=False))
         if errors:
-            msg = errors[0][:300]
-            raise (LLMUnavailable if unavailable(msg) else LLMError)(f"CodeMaker 调用失败：{msg}")
+            _fail(f"CodeMaker 调用失败：{errors[0][:300]}", "codemaker")
         if not texts:
             detail = (err or b"").decode("utf-8", "replace").strip().splitlines()
-            msg = detail[-1][:300] if detail else "CodeMaker 没有返回内容"
-            raise (LLMUnavailable if unavailable(msg) else LLMError)(msg)
+            _fail(detail[-1][:300] if detail else "CodeMaker 没有返回内容", "codemaker")
         return parse_json_text(texts[-1])
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)

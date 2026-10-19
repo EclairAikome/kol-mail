@@ -1,6 +1,6 @@
 # KOL Mail
 
-给做海外 KOL 合作的同学用的本机网页邮箱。外语来信自动翻成中文，左右对照着看。回信时 AI 按你们团队的谈判手册先给出两三种回法，你挑一种，它起草，你提意见它再改，每一段都附中文回译，你核对无误才发得出去。下班时间来的消息，AI 起草后推到你手机上的 Telegram，你在手机上和它商量、批准，才会发出。
+给做海外 KOL 合作的同学用的本机网页邮箱。外语来信自动翻成中文，左右对照着看。回信时 AI 按你自己的谈判方式先给出两三种回法，你挑一种，它起草，你提意见它再改，每一段都附中文回译，你核对无误才发得出去。下班时间来的消息，AI 起草后推到你手机上的 Telegram，你在手机上和它商量、批准，才会发出。
 
 AI 可以用 CodeMaker，也可以用 Claude Code，安装时选一个。程序只在你自己电脑上运行，网页地址是 http://127.0.0.1:8765/ ，别的电脑打不开。
 
@@ -9,12 +9,18 @@ AI 可以用 CodeMaker，也可以用 Claude Code，安装时选一个。程序�
 维护者会在 POPO 群里发一条带参数的安装命令，复制到 PowerShell 里运行就行。大致是这样
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/<owner>/kol-mail/main/install.ps1 -OutFile $env:TEMP\kolmail-install.ps1; & $env:TEMP\kolmail-install.ps1 -Repo <owner>/kol-mail -ImapHost <收信服务器> -SmtpHost <发信服务器> -Feedback <反馈地址>"
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/<owner>/kol-mail/main/install.ps1 -OutFile $env:TEMP\kolmail-install.ps1; & $env:TEMP\kolmail-install.ps1 -Repo <owner>/kol-mail -Feedback <反馈地址>"
 ```
 
-脚本会一步步问你几件事，邮箱、署名、用哪个 AI、谈判手册放在哪。邮箱密码会弹出一个小窗口让你输入，先点一下输入框再 Ctrl+V 粘贴，密码直接交给邮件组件存进 Windows 凭据管理器，安装脚本不显示也不保存。密码没通过验证时窗口会再问，最多三次；如果是网络或服务器地址的问题，脚本会直接说明，不会让你反复输密码。装完以后发现密码不对，重新运行安装命令就会再弹出这个窗口。装完桌面上会多一个“KOL Mail”图标，以后开机自动在后台运行，双击图标打开网页。
+脚本只问几件事：邮箱（只填 @lootbar.com 前面的部分）、对外署名（默认用邮箱前缀，回车就行）、用哪个 AI、要不要接 KOL 总表（不用就回车）。收发信服务器已经是公司邮箱的默认值，不用填。邮箱密码会弹出一个小窗口让你输入，先点一下输入框再 Ctrl+V 粘贴，密码直接交给邮件组件存进 Windows 凭据管理器，安装脚本不显示也不保存。密码没通过验证时窗口会再问，最多三次；如果是网络或服务器地址的问题，脚本会直接说明，不会让你反复输密码。装完以后发现密码不对，重新运行安装命令就会再弹出这个窗口。装完桌面上会多一个“KOL Mail”图标，以后开机自动在后台运行，双击图标打开网页。
 
-用 CodeMaker 的话，先确认命令行版装好并登录过（在终端运行 `codemaker auth login`）。用 Claude Code 的话，先装好并登录一次。
+接着脚本会连接 AI，连不上会停下来带你处理：
+
+- CodeMaker：没装会告诉你去装，装好按回车重新检测。没登录会自动弹出一个窗口运行 `codemaker auth login`，登录好回到安装窗口按回车。
+- Claude Code：没装或者版本太旧（起草用的模型要 2.1.280 以上），会问你要不要用官方安装器装最新版。没登录会弹出窗口，输入 `/login` 登录。
+- 最后用翻译和起草两个模型各真调一次，都通过才算连上。实在处理不了可以输入 `s` 跳过，以后在页面上方点“重新检测 AI”。
+
+第一次打开页面会弹出“设置”，请你写两样东西：自己的签名（每个人格式不一样，照你平时的写），和“我的谈判方式”（用自己的话说个大概：默认推什么合作、固定费大概给多少、哪些不能答应）。AI 出策略和起草都照它来，以后在页面上方“设置”里随时改。
 
 公司网络装依赖慢，可以在命令后面加 `-PipIndex https://mirrors.aliyun.com/pypi/simple`。
 
@@ -49,7 +55,7 @@ powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/<ow
 
 ## 右下角的反馈按钮
 
-想吐槽或者想要新功能，点右下角“反馈”。内容直接推到维护者的 POPO，不带你的名字、邮箱和电脑信息。
+想吐槽或者想要新功能，点右下角“反馈”。内容直接推到维护者的 POPO，不带你的名字、邮箱和电脑信息。按钮是灰的，说明安装命令里没带反馈地址，直接找维护者。
 
 ## 设置在哪
 
@@ -58,16 +64,18 @@ powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/<ow
 | 设置 | 作用 |
 |---|---|
 | `llm.backend` | `codemaker` 或 `claude` |
-| `llm.models` | 不填就用默认的，翻译用 Sonnet 5.5，策略和起草用 Opus 5.5 |
-| `identity.signature` | 每封回信末尾的签名，一字不差 |
-| `paths.playbook` | 谈判手册，AI 的策略和草稿都照它来，改了立刻生效 |
+| `llm.models` | 不填就用默认的。CodeMaker：翻译 GPT-5.6 Terra，策略和起草 GPT-6.1 Sol；Claude Code：翻译 Sonnet 5.5，策略和起草 Opus 5.5。写法如 `{"translate": "gpt-5.6-terra", "draft": "gpt-6.1-sol"}`，大小写、空格、点和横线都不讲究 |
+| `identity.signature` | 每封回信末尾的签名，一字不差。在页面“设置”里改，立刻生效 |
+| `paths.playbook` | 谈判手册，最前面一节“我的谈判方式”是你在页面“设置”里写的，AI 的策略和草稿都照它来，改了立刻生效 |
 | `paths.koc_knowledge` | KOC 机器人能用的全部知识 |
 | `paths.sheet_workbook` | KOL 总表，不用就留空 |
 | `koc` | KOC 机器人回复里允许出现的数字、比例和网站 |
 
 改完 settings.json 要重启一次程序。在 PowerShell 里运行 `Stop-ScheduledTask kol-mail`，再双击桌面图标。
 
-谈判手册和 KOC 知识卡的模板在 `templates` 文件夹。团队的正式版本找维护者要，不要传到网上。
+谈判手册和 KOC 知识卡的模板在 `templates` 文件夹。团队没有统一的谈判手册，每个人的打法写在自己的“我的谈判方式”里；模板里其余各节想补就补，没填的 AI 按常识处理。KOC 知识卡的正式版本找维护者要，不要传到网上。
+
+AI 出错时，页面顶部会用中文说明怎么处理（比如没登录要运行什么命令），处理好后点旁边的“重新检测 AI”。
 
 ## 其他功能
 
@@ -88,5 +96,9 @@ powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/<ow
 python -m pytest tests
 $env:KOL_DEV = "1"; $env:KOL_MAIL_PORT = "8766"; python app.py   # 测试副本，不跑任何自动任务，也不会发信
 ```
+
+从 Claude Code 的会话里启动测试副本时，先去掉继承来的 `CLAUDE*`、`ANTHROPIC*` 环境变量，否则程序调用的 `claude` 会用那个会话的登录，报 401。
+
+试装安装脚本：`install.ps1 -Source <源码目录> -Dir <别的目录> -NoService`，装好的程序不注册开机任务、不放桌面图标、不启动（真服务会在下班时间自动回信），也不会停掉本机正在跑的 KOL Mail。邮件组件的配置是全机共用的（`%USERPROFILE%\.config\mcp-email-server`），试装用的是真的邮箱账户。
 
 有 `.git` 文件夹的副本被当作开发副本，不会自动更新。
