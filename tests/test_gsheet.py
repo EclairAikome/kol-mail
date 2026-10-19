@@ -31,17 +31,24 @@ class FakeSheets:
         return self.books[sid]["tabs"][title]
 
     def rows(self, sid, title):
+        """Like values.get: trailing empty cells and rows dropped, but a formula's "" is a value. The header's
+        ARRAYFORMULA in KOL总表 fills 频道 down to the last grid row, "" where 频道链接 is empty."""
         t = self.tab(sid, title)
         out = [list(r) for r in t["cells"]]
-        if title == "KOL总表" and out:  # the header's ARRAYFORMULA fills 频道 wherever 频道链接 is set
-            h = out[0]
-            if "频道" in h and "频道链接" in h:
-                ci, li = h.index("频道"), h.index("频道链接")
-                for r in out[1:]:
-                    while len(r) <= max(ci, li):
-                        r.append(None)
-                    r[ci] = "打开 ↗" if r[li] not in (None, "") else None
-        return gsheet.normalized(out)
+        if title == "KOL总表" and out and "频道" in out[0] and "频道链接" in out[0]:
+            ci, li = out[0].index("频道"), out[0].index("频道链接")
+            while len(out) < t["rowCount"]:
+                out.append([])
+            for r in out[1:]:
+                while len(r) <= max(ci, li):
+                    r.append(None)
+                r[ci] = "打开 ↗" if r[li] not in (None, "") else ""
+        for r in out:
+            while r and r[-1] is None:
+                r.pop()
+        while out and not out[-1]:
+            out.pop()
+        return out
 
     def put(self, sid, title, r, c, value):
         cells = self.tab(sid, title)["cells"]
@@ -56,6 +63,8 @@ class FakeSheets:
     def handler(self, request: httpx.Request) -> httpx.Response:
         if self.down:
             raise httpx.ConnectError("offline", request=request)
+        if getattr(self, "portal", False):  # a Wi-Fi login page answers every request
+            return httpx.Response(200, text="<html>Please log in to the hotel Wi-Fi</html>")
         url, path = request.url, request.url.path
         self.calls.append((request.method, path))
         if str(url).startswith(gsheet.TOKEN_URL):
@@ -146,7 +155,8 @@ def sheet(fake, tmp_path, monkeypatch):
 
 def kol_rows(fake, sid):
     rows = fake.rows(sid, "KOL总表")
-    return [dict(zip(rows[0], r)) for r in rows[1:]]
+    found = [dict(zip(rows[0], r)) for r in rows[1:]]
+    return [r for r in found if any(v not in (None, "") for k, v in r.items() if k != "频道")]
 
 
 def log_rows(fake, sid):
@@ -213,6 +223,18 @@ def test_text_that_looks_like_a_formula_stays_text(fake, sheet):
     for req in fake.updates[-1]:
         v = req.get("updateCells", {}).get("rows", [{"values": [{}]}])[0]["values"][0].get("userEnteredValue", {})
         assert "formulaValue" not in v
+
+
+def test_rows_go_right_under_the_last_kol_despite_the_formula_column(fake, sheet, capsys):
+    kol, sid = sheet
+    for name in ("Ana", "Bob"):
+        kol.run([kol.norm_op({"op": "upsert", "email": f"{name.lower()}@gmail.com", "kol": name})], "t")
+    cells = fake.tab(sid, "KOL总表")["cells"]
+    assert [r[1] for r in cells[1:3]] == ["Ana", "Bob"]  # rows 2 and 3 of the sheet, not 1000 and 1001
+    assert fake.tab(sid, "KOL总表")["rowCount"] == 1000
+    with pytest.raises(SystemExit):
+        kol.main(["stats"])
+    assert json.loads(capsys.readouterr().out)["total"] == 2
 
 
 def test_concurrent_edit_queues_then_flush_writes(fake, sheet):
@@ -333,3 +355,13 @@ def test_list_reads_the_google_sheet(fake, sheet, capsys):
     assert stop.value.code == 0
     out = json.loads(capsys.readouterr().out)
     assert out["rows"] == [{"邮箱": "ana@gmail.com", "频道链接": "https://youtube.com/@ana", "阶段": "未联系", "意向": ""}]
+
+
+def test_wifi_login_page_queues_instead_of_crashing(fake, sheet):
+    kol, sid = sheet
+    fake.portal = True
+    res = kol.run([kol.norm_op({"op": "upsert", "email": "ana@gmail.com", "kol": "Ana"})], "t")
+    assert res["status"] == "queued" and "网络登录页" in res["reason"]
+    fake.portal = False
+    assert kol.run([], "补写队列")["status"] == "ok"
+    assert kol_rows(fake, sid)[0]["KOL"] == "Ana"

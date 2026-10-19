@@ -19,6 +19,7 @@ kol.py 把总表当成几张“表格”来读写（表头、整表的值、改�
 from __future__ import annotations
 
 import base64
+import contextlib
 import copy
 import hashlib
 import json
@@ -40,6 +41,7 @@ TIMEOUT = httpx.Timeout(60, connect=15)
 GROW_ROWS = 500
 # kol.py names its tables (sheet, table) after the Excel ListObjects; in Google every table is a whole tab.
 TAB_FOR = {"PROJ": "项目"}
+DATE_COLUMNS = {"首次发信": "yyyy-mm-dd", "更新时间": "yyyy-mm-dd hh:mm", "时间": "yyyy-mm-dd hh:mm", "日期": "yyyy-mm-dd"}
 
 # Tests swap this for an httpx.MockTransport-backed client.
 client_factory = lambda: httpx.Client(timeout=TIMEOUT, follow_redirects=True)  # noqa: E731
@@ -96,14 +98,20 @@ class Credentials:
         return data
 
     def save(self, data: dict):
+        """Atomic, private, and safe when two kol.py processes refresh at once (each has its own temp file)."""
+        import tempfile
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        os.replace(tmp, self.path)
-        if os.name != "nt":
-            os.chmod(self.path, 0o600)
+        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".google-token-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            if os.name != "nt":
+                os.chmod(tmp, 0o600)
+            os.replace(tmp, self.path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
 
     def access_token(self, client: httpx.Client) -> str:
         data = self.load()
@@ -116,13 +124,16 @@ class Credentials:
             raise self.unavailable(f"连不上 Google（检查网络或代理）：{type(e).__name__}") from None
         if r.status_code in (400, 401):
             raise self.unavailable("Google 授权已失效或被撤销，请重新运行安装命令重新授权")
-        if r.status_code != 200:
-            raise self.unavailable(f"Google 登录服务暂时不可用（HTTP {r.status_code}）")
-        body = r.json()
-        data["access_token"] = body["access_token"]
+        try:
+            body = r.json() if r.status_code == 200 else {}
+            token = str(body["access_token"])
+        except (ValueError, KeyError, TypeError):
+            raise self.unavailable(f"Google 登录服务暂时不可用（HTTP {r.status_code}，可能是网络登录页或代理）") from None
+        data["access_token"] = token
         data["expires_at"] = time.time() + int(body.get("expires_in") or 3600)
-        self.save(data)
-        return data["access_token"]
+        with contextlib.suppress(OSError):  # only a cache: the next run refreshes again
+            self.save(data)
+        return token
 
 
 class Api:
@@ -146,24 +157,34 @@ class Api:
             if r.status_code == 401 and attempt == 1:  # access token expired early: refresh once
                 data = self.creds.load()
                 data.pop("access_token", None)
-                self.creds.save(data)
+                with contextlib.suppress(OSError):
+                    self.creds.save(data)
                 self.token = None
                 continue
             break
         if r.status_code == 200:
-            return r.json()
+            try:
+                body = r.json()
+            except ValueError:  # e.g. a Wi-Fi login page answered instead of Google
+                raise self.unavailable("Google 返回的不是表格数据（可能是网络登录页或代理），稍后自动补写") from None
+            if not isinstance(body, dict):
+                raise self.unavailable("Google 返回的数据格式不对，稍后自动补写")
+            return body
         detail = ""
-        try:
-            detail = str((r.json().get("error") or {}).get("message") or "")[:200]
-        except ValueError:
-            pass
-        if r.status_code in (401, 403):
-            raise self.unavailable(f"没有权限读写这张 Google 表格（HTTP {r.status_code}），请重新运行安装命令重新授权")
+        with contextlib.suppress(ValueError, AttributeError):
+            detail = str((r.json().get("error") or {}).get("message") or "")[:160]
+        detail = f"：{detail}" if detail else ""
+        # Everything becomes Unavailable: kol.py queues the changes and the page shows this text until it is fixed,
+        # so nothing is lost and nobody has to dig the batch out of a failed-queue file.
+        if r.status_code == 401:
+            raise self.unavailable(f"Google 授权失效，请重新运行安装命令重新授权{detail}")
+        if r.status_code == 403:
+            raise self.unavailable(f"Google 拒绝访问这张表格（HTTP 403{detail}）。没开 Sheets API、配额用完或授权被撤销都会这样")
         if r.status_code == 404:
             raise self.unavailable("找不到这张 Google 表格（被删除了？），请重新运行安装命令新建一张")
         if r.status_code == 429 or r.status_code >= 500:
             raise self.unavailable(f"Google 表格暂时忙（HTTP {r.status_code}），稍后自动补写")
-        raise RuntimeError(f"Google 表格拒绝了这次请求（HTTP {r.status_code}）：{detail}")
+        raise self.unavailable(f"Google 表格拒绝了这次写入（HTTP {r.status_code}{detail}），表格结构被改过的话请改回去")
 
     def meta(self, sid: str) -> dict:
         return self.call("GET", f"/v4/spreadsheets/{sid}",
@@ -210,8 +231,11 @@ class GTable:
         self.headers = [str(h) if h is not None else "" for h in header]
         self.col = {h: i + 1 for i, h in enumerate(self.headers)}
         width = len(self.headers)
-        # body rows padded to the header width; rows 1.. of the tab
+        # body rows padded to the header width; rows 1.. of the tab. The 频道 column's ARRAYFORMULA reports "" down
+        # to the bottom of the grid, so trailing rows with nothing but formula output are not rows at all.
         self.rows = [list(r[:width]) + [None] * (width - len(r[:width])) for r in rows[1:]]
+        while self.rows and self.blank(self.rows[-1]):
+            self.rows.pop()
 
     def need(self, headers: list[str]):
         missing = [h for h in headers if h not in self.col]
@@ -231,6 +255,8 @@ class GTable:
         while len(self.rows) < r:
             self.rows.append([None] * len(self.headers))
         self.rows[r - 1][c - 1] = strip_text_mark(value) if value != "" else None
+        if number_format is None and isinstance(value, (int, float)) and not isinstance(value, bool):
+            number_format = DATE_COLUMNS.get(self.headers[c - 1])  # dates are serial numbers: give them their format
         cell, fields = cell_data(value, number_format)
         self.book.write_cell(self.tab, r, c - 1, cell, fields)
 
@@ -246,10 +272,14 @@ class GTable:
         return all(v in (None, "") for h, v in zip(self.headers, row) if h not in self.book.formula_columns)
 
     def append(self) -> int:
+        """Index of a fresh row right under the last real one (trailing formula-only rows were dropped on load)."""
         if self.rows and self.blank(self.rows[-1]):
             return len(self.rows)
         self.rows.append([None] * len(self.headers))
         return len(self.rows)
+
+    def records(self) -> list[list]:
+        return [r for r in self.values() if not self.blank(r)]
 
 
 class GBook:
@@ -305,8 +335,14 @@ class GBook:
         need = r + 1  # header row + r body rows
         if need > self.row_counts[tab]:
             grow = max(GROW_ROWS, need - self.row_counts[tab])
-            self.requests.append({"appendDimension": {"sheetId": self.sheet_ids[tab], "dimension": "ROWS",
-                                                      "length": grow}})
+            sheet = self.sheet_ids[tab]
+            old = self.row_counts[tab]
+            self.requests.append({"appendDimension": {"sheetId": sheet, "dimension": "ROWS", "length": grow}})
+            if old >= 2:  # new grid rows start bare: copy the dropdowns and date formats of the first body row
+                self.requests.append({"copyPaste": {
+                    "source": {"sheetId": sheet, "startRowIndex": 1, "endRowIndex": 2},
+                    "destination": {"sheetId": sheet, "startRowIndex": old, "endRowIndex": old + grow},
+                    "pasteType": "PASTE_FORMAT"}})
             self.row_counts[tab] += grow
         self.requests.append({"updateCells": {
             "start": {"sheetId": self.sheet_ids[tab], "rowIndex": r, "columnIndex": c},
@@ -397,7 +433,10 @@ def create(api: Api, title: str) -> str:
                 "rule": {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": v} for v in choices]},
                          "showCustomUi": True, "strict": False}}})
     if requests:
-        api.update(sid, requests)
+        try:
+            api.update(sid, requests)
+        except Exception as e:  # noqa: BLE001  the sheet exists and works; only formats and dropdowns are missing
+            print(f"表格已建好，但日期格式和下拉选项没设置成功：{e}", file=sys.stderr)
     return sid
 
 
@@ -424,7 +463,6 @@ def authorize(state_dir: Path, client_id: str, client_secret: str, open_browser:
               timeout: float = 600) -> None:
     """Desktop OAuth with a loopback redirect and PKCE; stores the refresh token."""
     import http.server
-    import threading
     import webbrowser
 
     verifier = secrets.token_urlsafe(64)[:96]
@@ -452,7 +490,9 @@ def authorize(state_dir: Path, client_id: str, client_secret: str, open_browser:
         def log_message(self, *args):
             pass
 
-    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    Handler.timeout = 30  # an idle pre-connection from the browser gives up instead of blocking the real redirect
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
     redirect = f"http://127.0.0.1:{server.server_port}/"
     url = AUTH_URL + "?" + urllib.parse.urlencode({
         "client_id": client_id, "redirect_uri": redirect, "response_type": "code", "scope": SCOPE,
@@ -462,11 +502,10 @@ def authorize(state_dir: Path, client_id: str, client_secret: str, open_browser:
     print(url, flush=True)
     if open_browser:
         webbrowser.open(url)
-    worker = threading.Thread(target=lambda: [server.handle_request() for _ in range(20) if "code" not in result],
-                              daemon=True)
-    server.timeout = timeout
-    worker.start()
-    worker.join(timeout)
+    server.timeout = 1  # handle_request returns every second, so the loop notices the code as soon as it arrives
+    deadline = time.monotonic() + timeout
+    while "code" not in result and time.monotonic() < deadline:
+        server.handle_request()
     server.server_close()
     if not result.get("code"):
         raise SystemExit("没有拿到 Google 授权" + (f"（{result['error']}）" if result.get("error") else "（超时）"))

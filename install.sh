@@ -306,6 +306,15 @@ case "$CURRENT_SHEET" in
     gsheet:*)
         if ! CHECK_OUT="$("$PY" -I "$GSHEET" check --state "$DATA/sheet" --id "${CURRENT_SHEET#gsheet:}" 2>&1)"; then
             warn "  现有的 Google 总表现在读不了：$CHECK_OUT"
+            if [ -n "$GCLIENT_ID" ] && [ "$YES" != 1 ]; then
+                ask "要重新授权 Google 表格吗？输入 y 重新授权，直接回车跳过" ""
+                case "$REPLY" in
+                    y|Y|yes)
+                        "$PY" -I "$GSHEET" auth --state "$DATA/sheet" --client-id "$GCLIENT_ID" --client-secret "$GCLIENT_SECRET" &&
+                            "$PY" -I "$GSHEET" check --state "$DATA/sheet" --id "${CURRENT_SHEET#gsheet:}" >/dev/null 2>&1 &&
+                            say "  Google 总表又能用了" || warn "  还是不行，把上面的提示截图发给维护者。" ;;
+                esac
+            fi
         fi ;;
     "")
         if [ -n "$GCLIENT_ID" ] && [ "$YES" != 1 ]; then
