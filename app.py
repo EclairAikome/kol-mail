@@ -79,7 +79,7 @@ SCAN_INTERVAL = int(os.environ.get("KOL_SCAN_INTERVAL", "180"))
 DEV = os.environ.get("KOL_DEV") == "1"  # test copy: no background automation, and nothing is ever sent
 MAX_ATTEMPTS = 3
 IDENTITY = CFG["identity"]
-SIGNATURE = (IDENTITY["signature"] or IDENTITY["name"] or "").strip()
+SIGNATURE = (IDENTITY["signature"] or IDENTITY["name"] or "").replace("\r\n", "\n").strip()
 OWNER = IDENTITY["name"] or "the user"
 OWNER_ROLE = " ".join(x for x in (IDENTITY["title"], f"at {IDENTITY['company']}" if IDENTITY["company"] else "") if x)
 COMPANY = IDENTITY["company"] or "our company"
@@ -469,16 +469,8 @@ def sanitize_reply(body: str) -> tuple[str, list[str]]:
     if cleaned != normalized:
         warnings.append("已删除正文里的隐藏字符")
     collapsed = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-    if not SIGNATURE:  # no signature configured: nothing to check or cut
-        return collapsed, warnings
-    idx = collapsed.find(SIGNATURE)
-    if idx == -1:
-        warnings.append("正文没有以标准签名结尾，已自动补上")
-        collapsed = collapsed.rstrip() + "\n\n" + SIGNATURE
-    elif collapsed[idx + len(SIGNATURE):].strip():
-        warnings.append("签名之后还有内容，已删除")
-        collapsed = collapsed[:idx + len(SIGNATURE)]
-    return collapsed, warnings
+    finished, signature_warnings = replyflow.finish_with_signature(collapsed, SIGNATURE)
+    return finished, warnings + signature_warnings
 
 
 # ---------------------------------------------------------------- app state
@@ -1721,7 +1713,8 @@ async def koc_handle(job: dict) -> tuple[str, dict]:
         return "human", {**fields, "reason": str(result.get("human_reason_zh") or "机器人判断要你处理")[:300]}
     if route == "offer_profit_share" and offered:
         return "human", {**fields, "reason": "已经提过 20% 利润分成，对方还想谈"}
-    reply = strip_hidden(str(result.get("reply_body") or "").replace("\r\n", "\n")).replace(SIGNATURE, "").strip()
+    reply = replyflow.strip_trailing_signature(strip_hidden(str(result.get("reply_body") or "").replace("\r\n", "\n")),
+                                               SIGNATURE)
     problems = koc.check_reply(reply, route, wrote_in_cjk(msg.get("body")), urls) if reply else ["机器人没写出回复"]
     if problems:
         return "human", {**fields, "reply": reply, "reason": "回复没通过检查：" + "；".join(problems)}
@@ -1815,7 +1808,8 @@ async def koc_rehearse_one(address: str, email_id: str) -> dict:
                                   KOC_SCHEMA, DRAFT_MODEL, timeout=300)
     except ClaudeError as e:
         return {"error": err_text(e), "thread_subject": thread_subject}
-    reply = strip_hidden(str(result.get("reply_body") or "")).replace(SIGNATURE, "").strip()
+    reply = replyflow.strip_trailing_signature(strip_hidden(str(result.get("reply_body") or "").replace("\r\n", "\n")),
+                                               SIGNATURE)
     return {"thread_subject": thread_subject, "route": result.get("route"), "summary_zh": result.get("summary_zh"),
             "human_reason_zh": result.get("human_reason_zh"), "reply_language": result.get("reply_language"),
             "reply_body": reply, "reply_zh": result.get("reply_zh"),

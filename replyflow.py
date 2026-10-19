@@ -203,6 +203,40 @@ def clean_options(result: dict) -> tuple[str, list[dict], int]:
     return str(result.get("situation_zh") or "").strip(), options, rec if 0 <= rec < len(options) else 0
 
 
+# ---------------------------------------------------------------- the signature
+
+def _signature_blocks(text: str, signature: str) -> list[re.Match]:
+    """Where the signature stands as a block of whole lines (stray spaces around its lines allowed). A name inside a
+    sentence ("от имени Eclair") is not the signature, even when the signature is just that name."""
+    lines = r"[ \t]*\n[ \t]*".join(re.escape(line.strip()) for line in signature.split("\n"))
+    return list(re.finditer(r"(?:^|(?<=\n))[ \t]*" + lines + r"[ \t]*(?=\n|$)", text))
+
+
+def finish_with_signature(body: str, signature: str) -> tuple[str, list[str]]:
+    """An email ends with the signature exactly: cut whatever follows its last block, or add it when it is missing."""
+    if not signature:
+        return body, []
+    blocks = _signature_blocks(body, signature)
+    if not blocks:
+        return body.rstrip() + "\n\n" + signature, ["正文没有以标准签名结尾，已自动补上"]
+    last = blocks[-1]
+    finished = body[:last.start()] + signature
+    return finished, ["签名之后还有内容，已删除"] if body[last.end():].strip() else []
+
+
+def strip_trailing_signature(text: str, signature: str) -> str:
+    """The text without the signature it ends with, also when it closes a sign-off line ("С уважением, Eclair");
+    the name elsewhere in the text stays."""
+    stripped = text.strip()
+    if not signature:
+        return stripped
+    blocks = _signature_blocks(stripped, signature)
+    if blocks and blocks[-1].end() == len(stripped):
+        return stripped[:blocks[-1].start()].strip()
+    sign_off = re.search(r"(?<=[,;:\-–—])[ \t]*" + re.escape(signature) + r"$", stripped)
+    return stripped[:sign_off.start()].strip() if sign_off else stripped
+
+
 # ---------------------------------------------------------------- the Chinese side-by-side
 
 def split_paragraphs(body: str) -> list[str]:
