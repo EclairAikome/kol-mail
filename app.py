@@ -47,6 +47,7 @@ import llm  # noqa: E402
 import mobile  # noqa: E402
 import feedback  # noqa: E402
 import updater  # noqa: E402
+import outgoing  # noqa: E402
 import replyflow  # noqa: E402
 
 # ---------------------------------------------------------------- config
@@ -2084,11 +2085,48 @@ async def _send_case(case: dict) -> tuple[str, str]:
     return "sent", "已发送 ✅ 副本在“已发送”里"
 
 
+POPO_SYNC = SHEET_TOOL.parent / "popo_sync.py"  # kol-sheet\popo_sync.py, next to kol.py when it is installed
+
+
+async def on_popo_button(bot: mobile.Bot, q: dict, parts: list[str], pressed: int | None):
+    """popo:y|n:<id|batch> from a popo_sync card: write (or skip) the approved change to the team's POPO sheets.
+    A batch id (b…) covers exactly the changes listed on that card, never older ones the owner has not seen."""
+    if len(parts) != 3 or parts[1] not in ("y", "n") or not re.fullmatch(r"[0-9a-f]{6}|b[0-9a-f]{5}", parts[2]):
+        await bot.answer(q["id"], "看不懂这个按钮")
+        return
+    if not (SHEET_PYTHON and POPO_SYNC.exists()):
+        await bot.answer(q["id"], "这台电脑上没有 popo_sync.py")
+        return
+    await bot.answer(q["id"], "正在改 POPO，稍等" if parts[1] == "y" else "好的，不改")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            SHEET_PYTHON, str(POPO_SYNC), "decide", parts[1], parts[2], cwd=str(POPO_SYNC.parent), env=SHEET_ENV,
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, err = await asyncio.wait_for(proc.communicate(), 600)
+    except (OSError, asyncio.TimeoutError) as e:
+        await tell_owner(f"POPO 同步没跑完：{err_text(e)}", reply_to=pressed)
+        return
+    try:
+        res = json.loads((out or b"").decode("utf-8", "replace"))
+    except ValueError:
+        await tell_owner("POPO 同步出错：" + ((err or out or b"").decode("utf-8", "replace").strip()[-300:] or "没有输出"),
+                         reply_to=pressed)
+        return
+    if res.get("status") != "ok":
+        await tell_owner(f"POPO 同步：{res.get('error') or res.get('note') or res.get('status')}", reply_to=pressed)
+        return
+    lines = [f"{p['kol']} · {p['header']}：{p['result']}" for p in res.get("done", []) + res.get("not_done", [])]
+    await tell_owner("POPO 同步\n" + ("\n".join(lines) or "没有要处理的"), reply_to=pressed)
+
+
 async def on_button(bot: mobile.Bot, q: dict):
     data = str(q.get("data") or "")
     parts = data.split(":")
     message = q.get("message") or {}
     pressed = message.get("message_id")
+    if parts[0] == "popo":
+        await on_popo_button(bot, q, parts, pressed)
+        return
     try:
         kind, case_id = parts[0], int(parts[1])
     except (IndexError, ValueError):
@@ -2239,9 +2277,12 @@ async def handle_update(bot: mobile.Bot, u: dict):
             return
         if chat.get("id") != owner_chat():
             return  # strangers get no answer at all
-        if text.startswith("/start") or text in ("/help", "帮助"):
-            await bot.send(int(chat["id"]), "下班时间来的 KOL 消息会推到这里。点方案起草；回复某条消息可以提问或提修改意见；"
-                                             "点“发送”后还要再确认一次才会发出。")
+        if text.startswith("/start"):
+            await bot.send(int(chat["id"]), mobile.help_text())
+            return
+        command = mobile.parse_command(text)
+        if command:
+            await bot.send(int(chat["id"]), owner_command(*command))
             return
         await on_owner_text(m)
     except Exception as e:  # noqa: BLE001  one bad update must not stop the bot
@@ -2252,6 +2293,50 @@ async def handle_update(bot: mobile.Bot, u: dict):
                 await tell_owner(f"处理出错：{err_text(e)}")
 
 
+def owner_command(name: str, rest: str) -> str:
+    """Runs one owner command from the phone and returns the answer. Plain code, no AI."""
+    try:
+        if name == "help":
+            return mobile.help_text()
+        if name in ("template", "ai"):
+            autoreply.set_switch(AUTOREPLY_CONFIG, "offhours_mode", name)
+            log("mobile command: offhours_mode", name)
+            return ("好了，下班时间改发固定模板自动回复，不再推送审稿。" if name == "template"
+                    else "好了，下班时间改成 AI 起草、手机审批，什么都不会自动发出。")
+        if name in ("holiday", "unholiday"):
+            days = mobile.parse_dates(rest, datetime.now(autoreply.TZ).date())
+            changed = autoreply.change_holidays(AUTOREPLY_CONFIG, days, add=name == "holiday")
+            log("mobile command:", name, days[0], days[-1])
+            span = days[0].isoformat() if len(days) == 1 else f"{days[0].isoformat()} 到 {days[-1].isoformat()}"
+            verb = "设成假期" if name == "holiday" else "从假期里去掉"
+            return f"好了，{span} 共 {len(days)} 天已{verb}（其中 {len(changed)} 天原来不是这样）。假期里全天都算下班时间。"
+        if name == "status":
+            return status_text()
+    except ValueError as e:
+        return f"没办成：{e}"
+    except OSError as e:
+        return f"没办成，写不进设置文件：{err_text(e)}"
+    return "看不懂这个指令，发 /help 看看能用哪些。"
+
+
+def status_text() -> str:
+    cfg = load_autoreply_config()
+    if not cfg:
+        return "autoreply.json 有误，自动回复全部停了，请到电脑上看。"
+    now = datetime.now(autoreply.TZ)
+    mode = "AI 起草、手机审批" if cfg.offhours_mode == "ai" else "固定模板自动回复"
+    waiting = cases.all_open()
+    upcoming = sorted(d for d in cfg.schedule.holidays if d >= now.date())[:6]
+    lines = [f"下班回复方式：{mode}",
+             f"渠道：邮件{'开' if cfg.email_enabled else '关'}，Telegram{'开' if cfg.telegram_enabled else '关'}",
+             f"现在：{'下班时间' if cfg.schedule.off_period_start(now) else '工作时间'}",
+             f"等你处理的来信：{len(waiting)} 封" + (f"（{'、'.join('#' + str(c['id']) for c in waiting[:8])}）" if waiting else ""),
+             "接下来的假期：" + ("、".join(d.strftime("%m-%d") for d in upcoming) if upcoming else "无")]
+    if state.get("autoreply_alert"):
+        lines.append(f"最近的问题：{state['autoreply_alert']}")
+    return "\n".join(lines)
+
+
 async def mobile_loop():
     """Long-polls the bot. Each update runs on its own, so a one-minute draft never blocks a tap on another case."""
     while True:
@@ -2259,6 +2344,10 @@ async def mobile_loop():
         if not bot:
             await asyncio.sleep(30)
             continue
+        if bot_state.get("menu_for") != bot_state["token"]:  # the command menu next to the input box
+            with contextlib.suppress(Exception):
+                await bot.call("setMyCommands", commands=mobile.menu())
+                bot_state["menu_for"] = bot_state["token"]
         offset = int(cases.get_kv("tg_offset", "0") or 0)
         try:
             updates = await bot.updates(offset)
@@ -3721,6 +3810,40 @@ async def api_reply_pairs(request: Request):
         return reply_error(e)
 
 
+outbox = outgoing.Store(DATA / "outgoing")
+
+
+async def api_reply_upload(request: Request):
+    """One attachment per request, the raw file as the body and its name (URL-encoded) in X-File-Name. Raw bytes
+    rather than a form keep this free of extra parsing libraries."""
+    name = urllib.parse.unquote(request.headers.get("x-file-name") or "")
+    limit = f"单个附件最大 {outgoing.MAX_FILE // 1024 // 1024} MB"
+    data = bytearray()
+    async for chunk in request.stream():  # never more than the limit in memory, whatever Content-Length says
+        data += chunk
+        if len(data) > outgoing.MAX_FILE:
+            return bad(limit)
+    outbox.cleanup()  # cheap: drops uploads of drafts abandoned more than a week ago
+    try:
+        info = await asyncio.to_thread(outbox.add, name, bytes(data))
+    except outgoing.AttachmentError as e:
+        return bad(str(e))
+    log("attachment added", info["name"], info["size"])
+    return JSONResponse(info)
+
+
+sending_ids: set[str] = set()  # attachments of a send in progress: never removed under it
+
+
+async def api_reply_unupload(request: Request):
+    body = await request.json()
+    file_id = str(body.get("id") or "")
+    if file_id in sending_ids:
+        return bad("这封信正在发送，附件不能再改")
+    outbox.remove(file_id)
+    return JSONResponse({"ok": True})
+
+
 async def api_send(request: Request):
     body = await request.json()
     mailbox, email_id = body.get("mailbox"), str(body.get("email_id", ""))
@@ -3729,6 +3852,21 @@ async def api_send(request: Request):
     text = strip_hidden((body.get("body") or "").replace("\r\n", "\n")).strip()
     if not (mailbox and email_id.isdigit() and subject and text and to):
         return bad("收件人、主题和正文都不能为空")
+    try:
+        attachments = outbox.resolve(body.get("attachments") or [])
+    except (outgoing.AttachmentError, OSError) as e:
+        return bad(str(e))
+    ids = {str(i) for i in body.get("attachments") or []}
+    if ids & sending_ids:
+        return bad("这些附件正在随另一封信发送")
+    sending_ids.update(ids)
+    try:
+        return await send_reply(body, mailbox, email_id, to, subject, text, attachments)
+    finally:
+        sending_ids.difference_update(ids)
+
+
+async def send_reply(body: dict, mailbox: str, email_id: str, to: str, subject: str, text: str, attachments: list):
     if DEV:
         return bad("开发模式不发送邮件")
     try:
@@ -3748,8 +3886,9 @@ async def api_send(request: Request):
     close_cases_for("email", kol)  # before sending: a phone confirmation arriving now must find the case closed
     refs = " ".join(x for x in [msg.get("references"), msg.get("message_id")] if x)
     try:
+        extra = {"attachments": [str(p) for p in attachments], "timeout": 420} if attachments else {}
         result = await mail.send(recipients=[kol], subject=subject, body=text,
-                                 in_reply_to=msg.get("message_id"), references=refs or None)
+                                 in_reply_to=msg.get("message_id"), references=refs or None, **extra)
     except MailError as e:
         # The connection may have dropped after SMTP accepted the message: treat as "maybe sent", never retry blindly.
         log("send outcome unknown", kol, err_text(e))
@@ -3757,14 +3896,17 @@ async def api_send(request: Request):
     if not result.startswith("Email sent successfully"):
         log("send not confirmed", kol, result[:200])
         return JSONResponse({"error": f"发送结果不确定：{result[:300]}", "uncertain": True}, status_code=502)
-    log("sent reply to", kol)
+    log("sent reply to", kol, f"with {len(attachments)} attachment(s)" if attachments else "")
     try:  # the mail is out: bookkeeping problems below must never look like a failed send (and invite a resend)
+        for item in body.get("attachments") or []:
+            outbox.remove(str(item))
         kq.resolve(kol)  # anything the KOC bot handed over for this person is answered now
         sent_changed()  # reopening the conversation must show this reply, or it invites a second send
         # body_zh is the verified side-by-side Chinese of exactly this text (the page sends it only then)
         zh = body.get("body_zh")
         zh = strip_hidden(zh).strip() if isinstance(zh, str) else ""
-        sheet_guard("记录回信", sheet_after_send, kol, subject, "我方回信：" + gist(zh or text))
+        note = f"（附件 {len(attachments)} 个）" if attachments else ""
+        sheet_guard("记录回信", sheet_after_send, kol, subject, "我方回信" + note + "：" + gist(zh or text))
     except Exception as e:  # noqa: BLE001
         log("after-send bookkeeping failed", kol, err_text(e))
     return JSONResponse({"ok": True, "to": kol})
@@ -3805,6 +3947,7 @@ async def handle_errors(request: Request, exc: Exception):
 async def lifespan(app):
     reconcile_unfinished()
     koc_reconcile()
+    outbox.cleanup()  # attachments of drafts never sent, older than a week
     loops = [mail.run(), bg.run(), finder.run(), translator_loop(), prefetch_loop()]
     if not DEV:  # a dev copy next to the real service must never answer, notify, log or send anything by itself
         loops += [scan_loop(), tg.run(), telegram_loop(), sheet_loop(), sheet_channels_loop(), koc_loop(),
@@ -3839,6 +3982,8 @@ routes = [
     Route("/api/reply/strategies", api_reply_strategies, methods=["POST"]),
     Route("/api/reply/draft", api_reply_draft, methods=["POST"]),
     Route("/api/reply/pairs", api_reply_pairs, methods=["POST"]),
+    Route("/api/reply/upload", api_reply_upload, methods=["POST"]),
+    Route("/api/reply/unupload", api_reply_unupload, methods=["POST"]),
     Route("/api/feedback", api_feedback, methods=["POST"]),
     Route("/api/update", api_update, methods=["GET", "POST"]),
     Route("/api/mobile", api_mobile),

@@ -198,6 +198,20 @@ SWITCHES = ("email_enabled", "telegram_enabled", "koc_enabled")
 MODES = ("template", "ai")
 
 
+def change_holidays(path: Path, days: list[date], add: bool) -> list[date]:
+    """Add or remove holiday dates in autoreply.json (atomic, everything else kept). Returns the dates that changed."""
+    path = Path(path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    current = {date.fromisoformat(d) for d in raw.get("holidays") or []}
+    changed = [d for d in days if (d not in current) == add]
+    current = current | set(days) if add else current - set(days)
+    raw["holidays"] = sorted(d.isoformat() for d in current)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    return changed
+
+
 def set_switch(path: Path, key: str, value) -> None:
     """Flip one switch in autoreply.json, keeping everything else as it is (written atomically)."""
     if key == "offhours_mode":

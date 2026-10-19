@@ -143,6 +143,14 @@
   #mobileCases .job { border-top: 1px solid var(--line); padding: 6px 0; font-size: 13px; }
   .phonebar { display: none; margin: 0 0 10px; padding: 8px 10px; border-radius: 6px; background: var(--accent-soft); font-size: 13px; }
   .phonebar button { margin-left: 8px; }
+  .outatts { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 8px; }
+  .outatt { display: flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; background: var(--bg); font-size: 12px; max-width: 280px; }
+  .outatt img { width: 44px; height: 44px; object-fit: cover; border-radius: 4px; }
+  .outatt .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .outatt button { border: 0; background: none; color: var(--muted); cursor: pointer; font: inherit; padding: 0 2px; }
+  .outatt button:hover { color: var(--bad); }
+  .outatt.busy { opacity: .6; }
+  .reply.dragging { outline: 2px dashed var(--accent); outline-offset: 4px; }
   @media (max-width: 1100px) { .cols { grid-template-columns: 1fr; } main { grid-template-columns: 140px 300px 1fr; } }
 </style>
 </head>
@@ -178,8 +186,10 @@
   <div class="row2"><b>Telegram 机器人</b><span id="botState" class="note"></span></div>
   <div class="row2"><input type="password" id="botToken" placeholder="在 Telegram 找 @BotFather，/newbot 建一个机器人，把它给的令牌粘贴到这里" autocomplete="off">
     <button class="act" id="botSave" type="button">保存</button></div>
-  <div class="row2" id="pairRow" hidden>配对码 <span class="code" id="pairCode"></span>
-    <span class="note">10 分钟内在 Telegram 打开 <b id="botName"></b>，发送 <b>/start 配对码</b></span>
+  <div class="row2" id="pairRow" hidden>
+    <a class="act primary" id="pairLink" target="_blank" rel="noopener" style="text-decoration:none;padding:5px 12px;border-radius:6px">在 Telegram 里配对</a>
+    <span class="note">10 分钟内点这个按钮，Telegram 打开 <b id="botName"></b> 后点底部的 START（或“开始”）就配好了。
+      手机上配对的话，用手机打开这个链接：<span id="pairUrl" style="user-select:all"></span>（配对码 <span class="code" id="pairCode"></span>）</span>
     <button class="act" id="pairNew" type="button">换一个</button></div>
   <div class="note" id="mobileNote"></div>
   <div id="mobileCases"></div>
@@ -257,6 +267,10 @@
       <label>修改意见（写给 AI，比如“语气再热情点”“去掉第二段”“价格改成 150 美元两条”）</label>
       <textarea data-f="feedback" style="min-height:60px"></textarea>
       <div class="btns"><button class="act" data-f="reviseBtn">按意见修改</button><span class="note" data-f="reviseNote"></span></div>
+      <label>附件（可以点按钮选，也可以把文件拖进回复区，截图直接在正文框里 Ctrl+V 粘贴）</label>
+      <div class="btns"><button class="act" data-f="attachBtn">添加附件</button><input type="file" multiple hidden data-f="attachInput">
+        <span class="note" data-f="attachNote">加起来最多 15 MB，最多 10 个</span></div>
+      <div class="outatts" data-f="outatts"></div>
       <div class="btns"><button class="act primary" data-f="sendBtn">确认无误，发送</button><span class="note" data-f="sendNote"></span></div>
     </div>
   </div>
@@ -759,6 +773,7 @@ async function openMessage(id, rowEl, mailbox) {
   if (!loading.isConnected) return;  // another conversation was opened meanwhile
   // Everything below is bound to this conversation; replies always go to its latest KOL message.
   const ctx = { view, cards: new Map(), urls: [], opened: { mailbox, id: String(id) } };
+  if (st.current && st.current.outAtts) st.current.outAtts.forEach(a => a.url && URL.revokeObjectURL(a.url));
   st.current = ctx;
   view.append($("#readerTpl").content.cloneNode(true));
   field(view, "subject").textContent = data.subject || "(无主题)";
@@ -770,6 +785,7 @@ async function openMessage(id, rowEl, mailbox) {
   field(view, "pairsBtn").onclick = () => refreshPairs(ctx);
   field(view, "rbody").oninput = () => markStale(ctx);
   field(view, "sendBtn").onclick = () => send(ctx);
+  setupAttachments(ctx);
   phoneDraft(ctx).catch(() => {});
   if (!data.partial) return;
   let full;
@@ -977,13 +993,20 @@ async function send(ctx) {
   const v = ctx.view, to = field(v, "to2").value, subject = field(v, "rsubject").value, body = field(v, "rbody").value;
   if (!body.trim() || st.current !== ctx || !ctx.pairs || ctx.pairs.text !== body) return;
   const preview = body.length > 300 ? body.slice(0, 300) + "…" : body;
-  if (!confirm(`确认发送？发出后无法撤回。\n\n收件人：${to}\n主题：${subject}\n\n${preview}`)) return;
+  if ((ctx.outAtts || []).some(a => !a.id)) { field(v, "sendNote").textContent = "附件还在上传，等一下再发"; return; }
+  const atts = (ctx.outAtts || []).map(a => a.name);
+  const attLine = atts.length ? `\n附件：${atts.join("、")}` : "";
+  if (!confirm(`确认发送？发出后无法撤回。\n\n收件人：${to}\n主题：${subject}${attLine}\n\n${preview}`)) return;
   const note = field(v, "sendNote");
   ctx.sent = true; updateSend(ctx);  // locked from here on: a second click must never send twice
+  ctx.sendingNow = true; renderOutAtts(ctx); field(v, "attachBtn").disabled = true;
   note.className = "note"; note.textContent = "发送中…";
   try {
-    const r = await post("/api/send", { mailbox: ctx.mailbox, email_id: ctx.email_id, to, subject, body, body_zh: ctx.pairs.zh });
-    note.textContent = `已发送给 ${r.to}，副本在“已发送”里。`;
+    const r = await post("/api/send", { mailbox: ctx.mailbox, email_id: ctx.email_id, to, subject, body, body_zh: ctx.pairs.zh,
+                                        attachments: (ctx.outAtts || []).map(a => a.id) });
+    note.textContent = `已发送给 ${r.to}` + (atts.length ? `，带 ${atts.length} 个附件` : "") + "，副本在“已发送”里。";
+    ctx.outAtts.forEach(a => a.url && URL.revokeObjectURL(a.url));
+    ctx.outAtts = [];
   } catch (e) {
     note.className = "note err";
     if (e.data && e.data.uncertain) {
@@ -992,6 +1015,8 @@ async function send(ctx) {
     } else {
       note.textContent = "发送失败：" + e.message; ctx.sent = false; updateSend(ctx);
     }
+  } finally {
+    ctx.sendingNow = false; field(v, "attachBtn").disabled = false; renderOutAtts(ctx);
   }
 }
 
@@ -1028,6 +1053,95 @@ window.addEventListener("hashchange", safe(openFromHash));
   if (target) safe(openMessage)(target.id, document.querySelector(`#rows .row[data-id="${target.id}"]`), target.mailbox);
   setInterval(safe(() => { if (st.mailbox === "INBOX" && st.page === 1 && !st.search && !st.loadingMore) return loadList(false, "revalidate"); }), 60000);
 })();
+
+// ---------------------------------------------------------------- reply attachments
+const ATT_MAX = 15 * 1024 * 1024, ATT_COUNT = 10;
+
+function setupAttachments(ctx) {
+  const v = ctx.view, box = field(v, "replybox"), input = field(v, "attachInput");
+  ctx.outAtts = [];
+  field(v, "attachBtn").onclick = () => input.click();
+  input.onchange = () => { addFiles(ctx, [...input.files]); input.value = ""; };
+  const pasteTarget = e => {
+    const files = [...(e.clipboardData && e.clipboardData.files || [])];
+    // Ordinary text paste. Excel and Word also put a picture of the copied cells next to the text: keep the text.
+    if (!files.length || e.clipboardData.getData("text/plain")) return;
+    e.preventDefault();
+    addFiles(ctx, files.map((f, i) => f.name && f.name !== "image.png" ? f
+      : new File([f], `截图-${localStamp()}${i ? "-" + i : ""}.png`, { type: f.type })));
+  };
+  field(v, "rbody").addEventListener("paste", pasteTarget);
+  field(v, "feedback").addEventListener("paste", pasteTarget);
+  box.addEventListener("dragover", e => { if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) { e.preventDefault(); box.classList.add("dragging"); } });
+  box.addEventListener("dragleave", e => { if (!box.contains(e.relatedTarget)) box.classList.remove("dragging"); });
+  box.addEventListener("drop", e => {
+    if (!e.dataTransfer || !e.dataTransfer.files.length) return;
+    e.preventDefault(); box.classList.remove("dragging");
+    addFiles(ctx, [...e.dataTransfer.files]);
+  });
+}
+
+function localStamp() {
+  const d = new Date(), p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+function uniqueName(ctx, name) {
+  const taken = new Set(ctx.outAtts.map(a => a.name));
+  if (!taken.has(name)) return name;
+  const dot = name.lastIndexOf("."), stem = dot > 0 ? name.slice(0, dot) : name, ext = dot > 0 ? name.slice(dot) : "";
+  for (let n = 2; ; n++) if (!taken.has(`${stem} (${n})${ext}`)) return `${stem} (${n})${ext}`;
+}
+
+async function addFiles(ctx, files) {
+  const note = field(ctx.view, "attachNote");
+  note.className = "note";
+  if (ctx.sendingNow) { note.className = "note err"; note.textContent = "正在发送，附件不能再改"; return; }
+  if (field(ctx.view, "draft").style.display !== "block") {
+    const dn = field(ctx.view, "draftNote"); dn.className = "note err"; dn.textContent = "先起草出回信，再加附件"; return;
+  }
+  for (const original of files) {
+    if (st.current !== ctx) return;
+    const f = new File([original], uniqueName(ctx, original.name || "attachment"), { type: original.type });
+    const total = ctx.outAtts.reduce((n, a) => n + a.size, 0);
+    if (ctx.outAtts.length >= ATT_COUNT) { note.className = "note err"; note.textContent = `最多 ${ATT_COUNT} 个附件`; break; }
+    if (f.size > ATT_MAX || total + f.size > ATT_MAX) { note.className = "note err"; note.textContent = `${f.name} 太大了：附件加起来最多 15 MB`; continue; }
+    const item = { name: f.name, size: f.size, image: /^image\//.test(f.type), url: /^image\//.test(f.type) ? URL.createObjectURL(f) : null };
+    ctx.outAtts.push(item); renderOutAtts(ctx);
+    try {
+      const r = await fetch("/api/reply/upload", { method: "POST", body: f,
+        headers: { "X-KOL-Mail": "1", "X-File-Name": encodeURIComponent(f.name), "Content-Type": "application/octet-stream" } });
+      const data = await r.json().catch(() => ({ error: "响应无法解析" }));
+      if (!r.ok) throw new Error(data.error || r.statusText);
+      Object.assign(item, { id: data.id, name: data.name, size: data.size });
+      if (!ctx.outAtts.includes(item)) post("/api/reply/unupload", { id: data.id }).catch(() => {});  // removed meanwhile
+    } catch (e) {
+      ctx.outAtts = ctx.outAtts.filter(a => a !== item);
+      note.className = "note err"; note.textContent = `${f.name} 没加上：${e.message}`;
+    }
+    renderOutAtts(ctx);
+  }
+}
+
+function renderOutAtts(ctx) {
+  const box = field(ctx.view, "outatts"); box.textContent = "";
+  for (const a of ctx.outAtts) {
+    const el = document.createElement("div"); el.className = "outatt" + (a.id ? "" : " busy");
+    if (a.url) { const img = document.createElement("img"); img.src = a.url; img.alt = ""; el.append(img); }
+    const nm = document.createElement("span"); nm.className = "nm"; nm.title = a.name;
+    nm.textContent = `${a.name}（${a.size >= 1048576 ? (a.size / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(a.size / 1024)) + " KB"}）` + (a.id ? "" : " 上传中…");
+    const x = document.createElement("button"); x.textContent = "×"; x.title = "去掉这个附件";
+    x.disabled = !!ctx.sendingNow;
+    x.onclick = () => {
+      if (ctx.sendingNow) return;
+      ctx.outAtts = ctx.outAtts.filter(b => b !== a);
+      if (a.id) post("/api/reply/unupload", { id: a.id }).catch(() => {});
+      if (a.url) URL.revokeObjectURL(a.url);
+      renderOutAtts(ctx);
+    };
+    el.append(nm, x); box.append(el);
+  }
+}
 
 // ---------------------------------------------------------------- self-update: checked on the first open of the day
 async function checkUpdate() {
@@ -1077,8 +1191,10 @@ async function loadMobile() {
   document.querySelectorAll("input[name=ohmode]").forEach(r => r.checked = r.value === m.mode);
   $("#botState").textContent = !m.configured ? "还没设置" : m.paired ? `已配对 @${m.bot_username || "?"}` : `@${m.bot_username || "?"} 还没配对`;
   $("#pairRow").hidden = !m.configured || m.paired;
-  if (m.pairing_code) $("#pairCode").textContent = m.pairing_code;
   $("#botName").textContent = "@" + (m.bot_username || "你的机器人");
+  st.botName = m.bot_username || "";
+  if (m.pairing_code) showPairing(m.pairing_code);
+  else if (m.configured && !m.paired) showPairing((await post("/api/mobile/pair", {})).pairing_code);
   $("#mobileNote").className = m.error ? "note err" : "note";
   $("#mobileNote").textContent = m.error || "";
   const box = $("#mobileCases"); box.textContent = "";
@@ -1101,10 +1217,14 @@ $("#botSave").onclick = safe(async () => {
     const r = await post("/api/mobile/token", { token });
     $("#botToken").value = "";
     await loadMobile();
-    $("#pairCode").textContent = r.pairing_code; $("#pairRow").hidden = false;
+    st.botName = r.bot_username || st.botName; showPairing(r.pairing_code); $("#pairRow").hidden = false;
   } catch (e) { $("#mobileNote").className = "note err"; $("#mobileNote").textContent = e.message; }
 });
-$("#pairNew").onclick = safe(async () => { const r = await post("/api/mobile/pair", {}); $("#pairCode").textContent = r.pairing_code; });
+$("#pairNew").onclick = safe(async () => { const r = await post("/api/mobile/pair", {}); showPairing(r.pairing_code); });
+function showPairing(code) {
+  const url = `https://t.me/${encodeURIComponent(st.botName)}?start=${encodeURIComponent(code)}`;
+  $("#pairCode").textContent = code; $("#pairUrl").textContent = url; $("#pairLink").href = url;
+}
 
 $("#fbBtn").onclick = () => { $("#fbNote").textContent = ""; $("#fbDlg").showModal(); $("#fbText").focus(); };
 $("#fbClose").onclick = () => $("#fbDlg").close();

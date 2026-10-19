@@ -14,8 +14,9 @@ import hashlib
 import json
 import secrets
 import sqlite3
+import re
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -248,6 +249,68 @@ class Cases:
     def recent(self, limit: int = 50) -> list[dict]:
         rows = self.db.execute("SELECT id FROM cases ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [self.get(r[0]) for r in rows]
+
+
+# ---------------------------------------------------------------- owner commands
+# Fixed commands, executed by plain code (no AI), only for the paired owner. Telegram's menu only shows latin command
+# names, so each has an English name for the menu and a Chinese one to type.
+
+COMMANDS = {  # name -> (Chinese aliases, menu description)
+    "template": (("模板", "固定模板"), "下班改发固定模板自动回复"),
+    "ai": (("AI", "ai审批", "AI审批", "手机审批"), "下班改成 AI 起草、手机审批"),
+    "status": (("状态",), "看现在的开关和待处理的来信"),
+    "holiday": (("休假", "放假"), "把一段日期设成假期：/holiday 10-25 11-02"),
+    "unholiday": (("取消休假", "取消放假"), "把一段日期从假期里去掉"),
+    "help": (("帮助",), "列出所有指令"),
+}
+MAX_HOLIDAY_DAYS = 60
+DATE_RE = re.compile(r"(?:(\d{4})[-/.年])?(\d{1,2})[-/.月](\d{1,2})日?")
+
+
+def parse_command(text: str) -> tuple[str, str] | None:
+    """(command, rest of the line) when the whole message is one of the owner commands, else None. A sentence that
+    merely contains a command word stays a comment on a draft."""
+    t = (text or "").strip()
+    head, _, rest = t.partition(" ")
+    word = head.lstrip("/").split("@")[0]
+    for name, (aliases, _desc) in COMMANDS.items():
+        if word.lower() == name or word in aliases:
+            if name in ("holiday", "unholiday") or not rest.strip():
+                return name, rest.strip()
+    return None
+
+
+def parse_dates(text: str, today: date) -> list[date]:
+    """'10-25 11-02', '10-25 到 11-02', '2026-12-24' or '12月24日': every day from the first to the last date given.
+    A date without a year is the next such day from today (so in December, 01-03 means next January)."""
+    found = []
+    for y, m, d in DATE_RE.findall(text or ""):
+        year = int(y) if y else today.year
+        day = date(year, int(m), int(d))
+        if not y and day < today - timedelta(days=1):
+            day = date(year + 1, int(m), int(d))
+        found.append(day)
+    if not found or len(found) > 2:
+        raise ValueError("看不懂日期。写法例如 /holiday 10-25 11-02，或者 /holiday 2026-12-24")
+    start, end = found[0], found[-1]
+    if end < start:
+        raise ValueError("结束日期早于开始日期")
+    days = (end - start).days + 1
+    if days > MAX_HOLIDAY_DAYS:
+        raise ValueError(f"一次最多 {MAX_HOLIDAY_DAYS} 天")
+    return [start + timedelta(days=i) for i in range(days)]
+
+
+def help_text() -> str:
+    lines = ["可以用的指令（也可以直接打中文名）："]
+    for name, (aliases, desc) in COMMANDS.items():
+        lines.append(f"/{name}（{aliases[0]}）  {desc}")
+    lines.append("其他文字会当成对某封草稿的提问或修改意见；有几封在等时，长按那条草稿选“回复”再写。")
+    return "\n".join(lines)
+
+
+def menu() -> list[dict]:
+    return [{"command": name, "description": desc[:60]} for name, (_a, desc) in COMMANDS.items()]
 
 
 # ---------------------------------------------------------------- message formats (Chinese, plain text)
