@@ -3,7 +3,9 @@
 #
 # 用法（维护者会在 POPO 群里发带参数的完整命令，复制到“终端”里回车）：
 #   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/<owner>/kol-mail/main/install.sh)" -- \
-#       --repo <owner>/kol-mail --imap-host <收信服务器> --smtp-host <发信服务器> --feedback <反馈地址>
+#       --repo <owner>/kol-mail --imap-host <收信服务器> --smtp-host <发信服务器> --feedback <反馈地址> \
+#       --google-client-id <OAuth 客户端 ID> --google-client-secret <客户端密钥>
+# 带了 Google 客户端参数，才会问要不要接 KOL 总表（Mac 上总表是一张 Google 表格）。
 #
 # 做的事：找到或安装 Python，下载最新版 KOL Mail，装依赖，配置你的邮箱和 AI（Claude Code 或 CodeMaker），
 # 写好你的签名，注册开机自动启动的后台服务（launchd），在“应用程序”里放一个“KOL Mail”。重复运行是安全的，
@@ -11,7 +13,7 @@
 
 set -eo pipefail
 
-REPO=""; FEEDBACK=""; IMAP_HOST=""; SMTP_HOST=""; PIP_INDEX=""; MIRROR=""; SOURCE=""
+REPO=""; FEEDBACK=""; IMAP_HOST=""; SMTP_HOST=""; PIP_INDEX=""; MIRROR=""; SOURCE=""; GCLIENT_ID=""; GCLIENT_SECRET=""
 DIR="$HOME/Library/Application Support/kol-mail"
 # 维护者测试用（云主机上无人值守安装）：不提问，用下面的参数和默认值
 YES=0; ASK_EMAIL=""; ASK_NAME=""; ASK_COMPANY=""; ASK_BACKEND=""; PASSWORD_STDIN=0; NO_OPEN=0
@@ -26,6 +28,8 @@ while [ $# -gt 0 ]; do
         --mirror) MIRROR="$2"; shift 2 ;;   # GitHub 连不上时用的 https 代理前缀
         --dir) DIR="$2"; shift 2 ;;
         --source) SOURCE="$2"; shift 2 ;;   # 本地源码目录（维护者测试用）；留空则从 GitHub 下载最新版
+        --google-client-id) GCLIENT_ID="$2"; shift 2 ;;
+        --google-client-secret) GCLIENT_SECRET="$2"; shift 2 ;;
         --yes) YES=1; shift ;;
         --email) ASK_EMAIL="$2"; shift 2 ;;
         --name) ASK_NAME="$2"; shift 2 ;;
@@ -294,7 +298,32 @@ if [ -z "$(old paths.koc_knowledge)" ]; then
     [ -f "$KM_KNOWLEDGE" ] || cp "$APP/templates/KOC机器人知识.example.md" "$KM_KNOWLEDGE"
 fi
 [ -z "$(old paths.autoreply_record)" ] && KM_RECORD="$DATA/自动回复记录.md"
-export KM_TITLE KM_COMPANY KM_EXTRA KM_SITE KM_PLAYBOOK KM_KNOWLEDGE KM_RECORD
+# KOL 总表：Mac 上是同事自己云端硬盘里的一张 Google 表格，KOL Mail 只能碰它自己建的这张
+KM_SHEET=""
+GSHEET="$APP/sheet/gsheet.py"
+CURRENT_SHEET="$(old paths.sheet_workbook)"
+case "$CURRENT_SHEET" in
+    gsheet:*)
+        if ! CHECK_OUT="$("$PY" -I "$GSHEET" check --state "$DATA/sheet" --id "${CURRENT_SHEET#gsheet:}" 2>&1)"; then
+            warn "  现有的 Google 总表现在读不了：$CHECK_OUT"
+        fi ;;
+    "")
+        if [ -n "$GCLIENT_ID" ] && [ "$YES" != 1 ]; then
+            ask "要不要接 KOL 总表（Google 表格）？收发邮件会自动记进去。输入 y 接，直接回车不接" ""
+            case "$REPLY" in
+                y|Y|yes)
+                    mkdir -p "$DATA/sheet"
+                    if "$PY" -I "$GSHEET" auth --state "$DATA/sheet" --client-id "$GCLIENT_ID" --client-secret "$GCLIENT_SECRET" &&
+                       SHEET_OUT="$("$PY" -I "$GSHEET" create --state "$DATA/sheet")"; then
+                        KM_SHEET="gsheet:$(printf '%s\n' "$SHEET_OUT" | tail -n 1)"
+                        say "  $(printf '%s\n' "$SHEET_OUT" | head -n 1)"
+                    else
+                        warn "  Google 总表没接上，先不用。以后重新运行安装命令可以再接。"
+                    fi ;;
+            esac
+        fi ;;
+esac
+export KM_TITLE KM_COMPANY KM_EXTRA KM_SITE KM_PLAYBOOK KM_KNOWLEDGE KM_RECORD KM_SHEET KM_APP="$APP" KM_PY="$PY"
 ANSWERS="$STAGING/answers.json"
 "$PY" -I - "$ANSWERS" <<'PYEOF'
 import json, os, sys
@@ -318,6 +347,9 @@ if e("KM_COMPANY"):
 for key, env in (("playbook", "KM_PLAYBOOK"), ("koc_knowledge", "KM_KNOWLEDGE"), ("autoreply_record", "KM_RECORD")):
     if e(env):
         answers["paths"][key] = e(env)
+if e("KM_SHEET"):
+    answers["paths"].update(sheet_workbook=e("KM_SHEET"), sheet_tool=os.path.join(e("KM_APP"), "sheet", "kol.py"),
+                            sheet_python=e("KM_PY"))
 if e("KM_REPO"):
     answers["update"]["repo"] = e("KM_REPO")
 if e("KM_MIRROR"):

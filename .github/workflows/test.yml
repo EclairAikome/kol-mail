@@ -70,6 +70,12 @@ jobs:
           f="$RUNNER_TEMP/q.pdf"; echo x > "$f"
           /usr/bin/xattr -w com.apple.quarantine "0081;$(printf %x "$(date +%s)");KOL Mail;" "$f"
           /usr/bin/xattr -p com.apple.quarantine "$f"
+      - name: Sheet tool runs as the app runs it (Google backend; status needs no network)
+        run: |
+          base="$HOME/Library/Application Support/kol-mail"
+          KOL_SHEET_PATH=gsheet:ci-test KOL_SHEET_STATE="$RUNNER_TEMP/sheet" "$base/venv/bin/python" "$base/app/sheet/kol.py" status
+          out=$("$base/venv/bin/python" -I "$base/app/sheet/gsheet.py" check --state "$RUNNER_TEMP/sheet" --id ci-test 2>&1 || true)
+          echo "$out"; echo "$out" | grep -q "授权"
       - name: The app icon's script opens a running service
         run: /bin/bash "$HOME/Library/Application Support/kol-mail/app/service/open.sh" --no-browser
       - name: Second install over the first keeps the settings

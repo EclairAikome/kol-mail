@@ -6,6 +6,9 @@
 看不见的 Excel 写完再关。Excel 正忙（主人正在单元格里打字、开着对话框）时会等着重试，等不到就把
 改动排进 pending.jsonl，之后任何一次写入调用都会先把排队的补写进去。
 
+Mac 版没有 Excel COM，总表是一张 Google 表格：KOL_SHEET_PATH 写成 gsheet:<表格ID> 时，读写都走 gsheet.py，
+下面的记账规则不变。
+
 用法见同目录 README.md，或运行 `python kol.py -h`。
 """
 
@@ -32,6 +35,8 @@ else:  # the Mac build (Google Sheets backend) only needs the lock
 HERE = Path(__file__).resolve().parent
 WORKBOOK = Path(os.environ.get("KOL_SHEET_PATH") or HERE.parent / "KOL总表.xlsx")
 STATE_DIR = Path(os.environ.get("KOL_SHEET_STATE") or HERE)
+_SETTING = (os.environ.get("KOL_SHEET_PATH") or "").strip()
+GSHEET_ID = _SETTING[len("gsheet:"):].strip() or None if _SETTING.startswith("gsheet:") else None  # the Mac build
 PENDING = STATE_DIR / "pending.jsonl"
 FAILED = STATE_DIR / "pending.failed.jsonl"
 LOCKFILE = STATE_DIR / ".kol.lock"
@@ -381,6 +386,15 @@ def make_sure_exited(pid: int | None, wait: float = 8.0):
         win32api.CloseHandle(handle)
 
 
+def open_book(write: bool = True):
+    """The master workbook for one command: the Google sheet in the Mac build, else Excel."""
+    if GSHEET_ID:
+        import gsheet
+        return gsheet.GBook(GSHEET_ID, STATE_DIR, write=write, usage=UsageError, unavailable=Unavailable,
+                            formula_columns=FORMULA_COLUMNS)
+    return Book(write=write)
+
+
 class Book:
     """One connection to the master workbook for the duration of a command."""
 
@@ -490,6 +504,10 @@ class Table:
 
     def get(self, row: list, header: str):
         return row[self.col[header] - 1]
+
+    def cell(self, r: int, header: str):
+        """The live value of one cell (row r of the body)."""
+        return self.lo.DataBodyRange.Cells(r, self.col[header]).Value2
 
     def set(self, r: int, header: str, value, number_format: str | None = None):
         cell = self.lo.DataBodyRange.Cells(r, self.col[header])
@@ -657,7 +675,7 @@ class Master:
 
     def update(self, i: int, fields: dict, source: str, created: bool = False, rename: bool = False) -> dict:
         expect = self.t.get(self.rows[i - 1], "ID")
-        actual = self.t.lo.DataBodyRange.Cells(i, self.t.col["ID"]).Value2
+        actual = self.t.cell(i, "ID")
         if expect and actual != expect:  # rows moved since we read them
             self.refresh()
             j = self.find({"id": str(expect)})
@@ -942,7 +960,7 @@ def _run(ops: list[dict], source: str) -> dict:
         with process_lock():
             while True:
                 try:
-                    with Book() as book:
+                    with open_book() as book:
                         book.backup_once_a_day()
                         flushed, failed = 0, []
                         entries, done_lines = read_pending()
@@ -992,9 +1010,10 @@ def _run(ops: list[dict], source: str) -> dict:
 # ---------------------------------------------------------------- reading
 
 def snapshot() -> tuple[list[dict], list[dict]]:
-    """Current rows of the KOL and LOG tables. Live from Excel if the workbook is open there, else from the file."""
-    if find_open_workbook_safe(WORKBOOK):
-        with Book(write=False) as book:
+    """Current rows of the KOL and LOG tables. Live from Excel if the workbook is open there, else from the file.
+    The Google sheet is always read live."""
+    if GSHEET_ID or find_open_workbook_safe(WORKBOOK):
+        with open_book(write=False) as book:
             m = Master(book)
             kols = [m.record(i) for i in range(1, len(m.rows) + 1)]
             lt = book.table(LOG_SHEET, LOG_TABLE)
@@ -1147,6 +1166,10 @@ def main(argv=None):
             if not pending:
                 emit({"status": "ok", "note": "没有排队的改动"})
             res = run([], "补写队列")
+        elif a.cmd == "status" and GSHEET_ID:
+            emit({"workbook": f"https://docs.google.com/spreadsheets/d/{GSHEET_ID}/edit", "google_sheet": True,
+                  "queued_ops": sum(len(e.get("ops", [])) for e in read_pending()[0]),
+                  "failed_queue_file": str(FAILED) if FAILED.exists() else ""})
         elif a.cmd == "status":
             emit({"workbook": str(WORKBOOK), "exists": WORKBOOK.exists(),
                   "open_in_excel": find_open_workbook_safe(WORKBOOK) if WORKBOOK.exists() else False,
@@ -1183,6 +1206,10 @@ def main(argv=None):
         emit(res, 4 if problems else 0)
     except UsageError as e:
         emit({"status": "error", "error": str(e)}, 2)
+    except Unavailable as e:
+        if not GSHEET_ID:
+            raise
+        emit({"status": "unavailable", "reason": str(e)}, 3)  # a read (list/get/stats) while Google is unreachable
 
 
 if __name__ == "__main__":

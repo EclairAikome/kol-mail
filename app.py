@@ -1223,7 +1223,12 @@ async def run_sheet(args: list[str], ops: list[dict] | None) -> bool:
         result = json.loads(text)
         problems += [r.get("error", "") for r in result.get("rejected", [])]
         problems += [r.get("error", "") for r in result.get("results", []) if r.get("status") in ("error", "needs_review")]
-    if proc.returncode == 3:
+    if proc.returncode == 3 and MACOS:  # the Google sheet: kol.py says why (offline, authorisation, an edit)
+        reason = ""
+        with contextlib.suppress(ValueError, AttributeError):
+            reason = str(json.loads(text).get("reason") or "")[:200]
+        state["sheet_error"] = f"总表暂时写不进去（{reason or '原因未知'}），改动已排队，稍后自动补写"
+    elif proc.returncode == 3:
         state["sheet_error"] = "总表暂时写不进去（Excel 正忙或只读打开），改动已排队，稍后自动补写"
     elif problems:
         state["sheet_error"] = "有改动没写进总表：" + "；".join(p for p in problems if p)[:300]
