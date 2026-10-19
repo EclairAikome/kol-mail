@@ -12,7 +12,7 @@ AI 可以用 CodeMaker，也可以用 Claude Code，安装时选一个。程序�
 powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/<owner>/kol-mail/main/install.ps1 -OutFile $env:TEMP\kolmail-install.ps1; & $env:TEMP\kolmail-install.ps1 -Repo <owner>/kol-mail -ImapHost <收信服务器> -SmtpHost <发信服务器> -Feedback <反馈地址>"
 ```
 
-脚本会一步步问你几件事，邮箱、署名、用哪个 AI、谈判手册放在哪。邮箱密码只在邮件组件自己的提示里输入，安装脚本看不到。装完桌面上会多一个“KOL Mail”图标，以后开机自动在后台运行，双击图标打开网页。
+脚本会一步步问你几件事，邮箱、署名、用哪个 AI、谈判手册放在哪。邮箱密码会弹出一个小窗口让你输入，先点一下输入框再 Ctrl+V 粘贴，密码直接交给邮件组件存进 Windows 凭据管理器，安装脚本不显示也不保存。密码没通过验证时窗口会再问，最多三次；如果是网络或服务器地址的问题，脚本会直接说明，不会让你反复输密码。装完以后发现密码不对，重新运行安装命令就会再弹出这个窗口。装完桌面上会多一个“KOL Mail”图标，以后开机自动在后台运行，双击图标打开网页。
 
 用 CodeMaker 的话，先确认命令行版装好并登录过（在终端运行 `codemaker auth login`）。用 Claude Code 的话，先装好并登录一次。
 

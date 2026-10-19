@@ -5,7 +5,8 @@
 #
 # 做的事：找到或安装 Python，下载最新版 KOL Mail，装依赖，配置你的邮箱和 AI（Claude Code 或 CodeMaker），
 # 写好你的签名，注册开机自动启动的后台任务，在桌面放一个“KOL Mail”图标。重复运行是安全的，已有的设置会保留。
-# 邮箱密码只在邮件组件自己的提示里输入，这个脚本看不到也不保存。
+# 邮箱密码在一个小窗口里输入（可以 Ctrl+V 粘贴），经标准输入直接交给邮件组件存进 Windows 凭据管理器，
+# 这个脚本不显示、不保存，也不把它放进命令行。
 
 param(
     [string]$Repo = "",
@@ -42,6 +43,112 @@ function Run-Native([scriptblock]$block) {
     return @{ Code = $LASTEXITCODE; Out = ($out -join "`n") }
 }
 function Gh($url) { if ($Mirror) { return "$($Mirror.TrimEnd('/'))/$url" } return $url }
+
+# 邮箱密码用一个小窗口来问。控制台的隐藏输入在不少电脑上 Ctrl+V 和右键都粘贴不进去（只送进去一个控制字符），
+# 而邮箱密码长、乱，基本只能粘贴，同事就卡在这一步。窗口里的密码框可以正常粘贴。取消返回 $null。
+function Read-MailPassword($email, $note = "") {
+    if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne "STA") {  # 窗口的粘贴要 STA；powershell.exe 默认就是
+        $secure = Read-Host "$email 的邮箱密码" -AsSecureString
+        return (New-Object Net.NetworkCredential("", $secure)).Password.Trim()
+    }
+    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+    [Windows.Forms.Application]::EnableVisualStyles()
+    $form = New-Object Windows.Forms.Form -Property @{
+        Text = "KOL Mail 邮箱密码"; FormBorderStyle = "FixedDialog"; MaximizeBox = $false; MinimizeBox = $false
+        StartPosition = "CenterScreen"; TopMost = $true; AutoSize = $true; AutoSizeMode = "GrowAndShrink"
+        Font = New-Object Drawing.Font("Microsoft YaHei UI", 10); Padding = New-Object Windows.Forms.Padding(12)
+    }
+    $panel = New-Object Windows.Forms.FlowLayoutPanel -Property @{ FlowDirection = "TopDown"; AutoSize = $true; WrapContents = $false }
+    $panel.Controls.Add((New-Object Windows.Forms.Label -Property @{ Text = "$email 的密码`n先点一下下面的框，再 Ctrl+V 粘贴"; AutoSize = $true }))
+    if ($note) {
+        $panel.Controls.Add((New-Object Windows.Forms.Label -Property @{
+            Text = $note; AutoSize = $true; ForeColor = [Drawing.Color]::Firebrick; MaximumSize = New-Object Drawing.Size(420, 0) }))
+    }
+    $box = New-Object Windows.Forms.TextBox -Property @{ UseSystemPasswordChar = $true; Width = 420 }
+    $panel.Controls.Add($box)
+    $buttons = New-Object Windows.Forms.FlowLayoutPanel -Property @{ FlowDirection = "RightToLeft"; AutoSize = $true; Width = 420 }
+    $cancel = New-Object Windows.Forms.Button -Property @{ Text = "取消"; DialogResult = "Cancel"; AutoSize = $true }
+    $ok = New-Object Windows.Forms.Button -Property @{ Text = "确定"; DialogResult = "OK"; AutoSize = $true }
+    $buttons.Controls.AddRange(@($cancel, $ok))
+    $panel.Controls.Add($buttons)
+    $form.Controls.Add($panel)
+    $form.AcceptButton = $ok
+    $form.CancelButton = $cancel
+    $form.Add_Shown({ $form.Activate(); $box.Focus() })
+    try {
+        $result = $form.ShowDialog()
+        # 窗口没抢到焦点时，粘贴会落进控制台的输入缓冲，下一个问题会把密码明文显示出来：清掉
+        try { $Host.UI.RawUI.FlushInputBuffer() } catch { }
+        if ($result -ne [Windows.Forms.DialogResult]::OK) { return $null }
+        return $box.Text.Trim()
+    } finally {
+        $form.Dispose()
+    }
+}
+
+# 把密码（每行一个）经标准输入交给邮件组件，不经过命令行参数。两头都统一成 UTF-8，密码里有非英文字符也不会变样：
+# PowerShell 5.1 默认按 ASCII 写管道（非英文字符变成 ?），而且只认脚本作用域的 $OutputEncoding，函数里的局部变量无效；
+# Python 默认按系统代码页读管道。
+function Invoke-McpWithSecret([string[]]$secrets, [string[]]$arguments) {
+    $savedIo, $savedOut = $env:PYTHONIOENCODING, $script:OutputEncoding
+    $env:PYTHONIOENCODING = "utf-8"
+    $script:OutputEncoding = New-Object Text.UTF8Encoding $false
+    try { return Run-Native { $secrets | & $Mcp @arguments } } finally {
+        $env:PYTHONIOENCODING = $savedIo
+        $script:OutputEncoding = $savedOut
+    }
+}
+
+# 测收信和发信，返回没通过的那些（"收信：<邮件组件的一行说明>"）；都通过时什么也不返回。
+function Test-MailAccount($account) {
+    Say "  正在测试收信和发信，网络慢的话要等一两分钟…"
+    foreach ($role in "incoming", "outgoing") {
+        $t = Run-Native { & $Mcp account test $account $role }
+        if ($t.Code -ne 0) { "$(if ($role -eq 'incoming') { '收信' } else { '发信' })：$(($t.Out -split "`n")[0])" }
+    }
+}
+
+# 邮件组件把失败分成认证被拒、凭据丢失、网络/TLS 不通、超时几类；只有前两类重输密码有用
+function Test-PasswordProblem($failed) {
+    return ($failed -join "`n") -match "Authentication or provider policy rejected|Credential is unavailable"
+}
+
+function Write-ConnectionProblem($failed) {
+    Warn "  连不上邮件服务器。这不是密码的问题，多半是网络（比如没连公司 VPN）或服务器地址不对："
+    Warn "    $($failed -join "`n    ")"
+    Warn "  网络好了以后重新运行本脚本；还是不行就把上面这几行发给维护者。"
+}
+
+# 问密码、存进邮件组件、测收发信；密码没通过验证就把服务器的回复显示在窗口里重新问，最多 3 次。
+# 网络/地址问题不再问密码（重输也没用）。$addArgs 非空表示账户还不存在，第一次用 account add 建；
+# 否则只换密码。返回是否测试通过。
+function Set-MailPassword($account, $email, [string[]]$addArgs) {
+    $note = ""
+    $stored = -not $addArgs
+    for ($try = 1; $try -le 3; $try++) {
+        $pw = Read-MailPassword $email $note
+        if ($null -eq $pw) { break }
+        if (-not $pw) { $note = "密码是空的，请重新输入。"; continue }
+        if (-not $stored) {
+            $r = Invoke-McpWithSecret @($pw, $pw) ($addArgs + "--password-stdin")
+            if ($r.Code -ne 0) { throw "添加邮箱失败：$($r.Out)`n检查服务器地址后重新运行本脚本。" }
+            $stored = $true
+        } else {
+            foreach ($role in "incoming", "outgoing") {
+                $r = Invoke-McpWithSecret @($pw) @("account", "set-secret", $account, $role, "--password-stdin")
+                if ($r.Code -ne 0) { throw "保存邮箱密码失败：$($r.Out)" }
+            }
+        }
+        $pw = $null
+        $failed = @(Test-MailAccount $account)
+        if (-not $failed) { return $true }
+        if (-not (Test-PasswordProblem $failed)) { Write-ConnectionProblem $failed; return $false }
+        $note = "密码没通过邮件服务器的验证，请重新输入（第 $($try + 1) 次，共 3 次）。如果确定密码没错，" +
+            "可能要用邮箱的客户端专用密码，或者邮箱还没开通收发信（IMAP/SMTP），请问维护者。`n" + ($failed -join "`n")
+    }
+    if (-not $stored) { throw "没有输入邮箱密码，邮箱没有配置。重新运行本脚本即可。" }
+    return $false
+}
 
 if ($Mirror -and -not $Mirror.StartsWith("https://")) { throw "-Mirror 必须是 https 地址" }
 
@@ -139,13 +246,21 @@ $accounts = (Run-Native { & $Mcp account list }).Out
 if ($accounts -notmatch "(?m)\b$([regex]::Escape($account))\b") {
     if (-not $ImapHost) { $ImapHost = Ask "收信服务器（IMAP）" }
     if (-not $SmtpHost) { $SmtpHost = Ask "发信服务器（SMTP）" }
-    Say "  下面会提示输入邮箱密码（输入时不显示），密码由邮件组件存进 Windows 凭据管理器。"
-    & $Mcp account add $account --email $email --full-name $fullName --imap-host $ImapHost --smtp-host $SmtpHost `
-        --imap-user $email --smtp-user $email
-    if ($LASTEXITCODE -ne 0) { throw "添加邮箱失败，检查服务器地址和密码后重新运行本脚本。" }
-    $t = Run-Native { & $Mcp account test $account }
-    if ($t.Code -ne 0) { Warn "  邮箱连接测试没通过：$($t.Out)" }
+    Say "  马上会弹出一个小窗口，在里面输入邮箱密码（可以 Ctrl+V 粘贴）。密码由邮件组件存进 Windows 凭据管理器。"
+    $mailOk = Set-MailPassword $account $email @("account", "add", $account, "--email", $email, "--full-name", $fullName,
+        "--imap-host", $ImapHost, "--smtp-host", $SmtpHost, "--imap-user", $email, "--smtp-user", $email)
+} else {
+    $failed = @(Test-MailAccount $account)
+    $mailOk = -not $failed
+    if ($failed -and (Test-PasswordProblem $failed)) {
+        # 已经配过但密码不对，多半是上次粘贴没成功：重新运行本脚本就能改
+        Warn "  邮箱已经配置过，但密码没通过验证，弹出窗口重新输入一次。"
+        $mailOk = Set-MailPassword $account $email @()
+    } elseif ($failed) {
+        Write-ConnectionProblem $failed
+    }
 }
+if ($mailOk) { Say "  邮箱连接测试通过" } else { Warn "  邮箱还没连通，KOL Mail 暂时收不到信。处理好后重新运行本脚本即可，已有的设置都会保留。" }
 # 回信、附件、移动邮件要用到的权限
 $policy = (Run-Native { & $Mcp config policy }).Out
 $rev = [regex]::Match($policy, "(?m)^revision=(\d+)").Groups[1].Value
