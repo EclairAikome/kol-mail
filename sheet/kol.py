@@ -18,12 +18,16 @@ import email.utils
 import gc
 import hashlib
 import json
-import msvcrt
 import os
 import re
 import sys
 import time
 from pathlib import Path
+
+if sys.platform == "win32":
+    import msvcrt
+else:  # the Mac build (Google Sheets backend) only needs the lock
+    import fcntl
 
 HERE = Path(__file__).resolve().parent
 WORKBOOK = Path(os.environ.get("KOL_SHEET_PATH") or HERE.parent / "KOL总表.xlsx")
@@ -844,7 +848,10 @@ def file_lock(path: Path, wait: float, what: str):
     while True:
         try:
             f.seek(0)
-            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            if sys.platform == "win32":
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             break
         except OSError:
             if time.monotonic() > deadline:
@@ -856,7 +863,10 @@ def file_lock(path: Path, wait: float, what: str):
     finally:
         with contextlib.suppress(OSError):
             f.seek(0)
-            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            if sys.platform == "win32":
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         f.close()
 
 

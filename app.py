@@ -77,6 +77,7 @@ TRANSLATE_MODEL = "translate"  # roles; the model behind each role comes from se
 DRAFT_MODEL = "draft"
 SCAN_INTERVAL = int(os.environ.get("KOL_SCAN_INTERVAL", "180"))
 DEV = os.environ.get("KOL_DEV") == "1"  # test copy: no background automation, and nothing is ever sent
+MACOS = sys.platform == "darwin"  # the Mac build: launchd service, osascript notifications, no virus scanner
 MAX_ATTEMPTS = 3
 IDENTITY = CFG["identity"]
 SIGNATURE = (IDENTITY["signature"] or IDENTITY["name"] or "").strip()
@@ -513,7 +514,8 @@ def telegram_params() -> StdioServerParameters | None:
     # Process env beats telegram-mcp's own .env (load_dotenv never overrides), so this login is the one used.
     env = dict(os.environ, TELEGRAM_SESSION_STRING=session, TELEGRAM_EXPOSED_TOOLS="read-only+send_message",
                TELEGRAM_DEVICE_MODEL="KOL Mail autoreply")
-    return StdioServerParameters(command=str(TG_REPO / ".venv" / "Scripts" / "python.exe"),
+    venv_python = TG_REPO / ".venv" / ("bin/python" if MACOS else "Scripts/python.exe")
+    return StdioServerParameters(command=str(venv_python),
                                  args=[str(TG_REPO / "main.py")], env=env)
 
 
@@ -958,8 +960,43 @@ def toast_text(text: str) -> str:
     return "".join(ch for ch in text if not (0xD800 <= ord(ch) <= 0xDFFF or ord(ch) in (0xFFFE, 0xFFFF)))[:200]
 
 
+MAC_NOTIFY_SCRIPT = ("on run argv\n"
+                     "display notification (item 3 of argv) with title (item 1 of argv) subtitle (item 2 of argv)\n"
+                     "end run")
+
+
+async def show_mac_notification(title: str, line1: str, line2: str) -> bool:
+    """macOS: a Notification Center banner through osascript. The texts go in as arguments, never as AppleScript
+    source, so no quoting can break out. Clicking it cannot open the mail (it belongs to Script Editor)."""
+    args = [toast_text(t) for t in (title, line1, line2)]
+    async with toast_lock:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "/usr/bin/osascript", "-e", MAC_NOTIFY_SCRIPT, *args,
+                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        except OSError as e:
+            state["notify_error"] = f"桌面通知启动失败：{err_text(e)}"
+            return False
+        try:
+            _, err = await asyncio.wait_for(proc.communicate(), 30)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            state["notify_error"] = "桌面通知 30 秒没弹出来，下次检查新邮件时重试"
+            return False
+    if proc.returncode != 0:
+        detail = (err or b"").decode("utf-8", "replace").strip().splitlines()
+        state["notify_error"] = f"桌面通知失败（退出码 {proc.returncode}），下次检查新邮件时重试：" + (detail[0][:150] if detail else "")
+        log("notification failed", state["notify_error"])
+        return False
+    state["notify_error"] = None
+    return True
+
+
 async def show_toast(title: str, line1: str, line2: str, mailbox: str, email_id) -> bool:
     """True when Windows accepted the toast."""
+    if MACOS:
+        return await show_mac_notification(title, line1, line2)
     from xml.sax.saxutils import escape, quoteattr
     target = f"http://{HOST}:{PORT}/"
     if email_id and str(email_id).isdigit():
@@ -2522,7 +2559,7 @@ async def restart_when_idle():
         await asyncio.sleep(5)
     log("restarting for update", UPDATE.status.get("latest"))
     await asyncio.sleep(2)  # let the page read "restarting"
-    os._exit(0)  # service/run.ps1 starts the new code 15 s later
+    os._exit(0)  # service/run.ps1 (launchd on macOS) starts the new code 15 s later
 
 
 async def api_update(request: Request):
@@ -3234,9 +3271,11 @@ async def api_search(request: Request):
 #   2. The real bytes must match the claimed type, and the risky parts of each type are inspected: Office files for
 #      macros, embedded objects, external templates and DDE; PDFs for scripts, auto-actions and embedded files;
 #      zips for encryption, structural tricks, nested archives and anything not on the allowlist.
-#   3. Windows Defender scans the file (under its real extension).
+#   3. Windows Defender scans the file (under its real extension). macOS has no virus scanner a program can call, so
+#      the Mac build skips this step and says so in the caution shown before saving.
 #   4. Nothing is handed to the browser as a download: "保存" copies the file into the Downloads folder and marks it
 #      as coming from the internet (Mark-of-the-Web), so Office opens it in Protected View and SmartScreen applies.
+#      On macOS the mark is the com.apple.quarantine attribute, so Gatekeeper asks before anything inside runs.
 # A clean verdict is cached by SHA-256 and POLICY_VERSION; a refused file is deleted.
 
 import struct
@@ -3258,6 +3297,8 @@ DEFENDER = next((p for p in (r"C:\Program Files\Windows Defender\MpCmdRun.exe",
                                      reverse=True)) if Path(p).exists()), None)
 DOWNLOADS = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Downloads"
 MOTW = "[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=about:internet\r\n"
+MACHO_MAGIC = (b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe")
+NOT_SCANNED = "Mac 版没有杀毒软件可调用，这个文件未经杀毒扫描。"
 
 
 def attachment_ext(name: str) -> str:
@@ -3372,6 +3413,8 @@ def inspect_content(path: Path, ext: str) -> tuple[str | None, str]:
         raise
     if head[:2] == b"MZ" or head[:4] == b"\x7fELF" or head[:8] == b"\x4c\x00\x00\x00\x01\x14\x02\x00":
         return "这其实是一个程序或快捷方式（不管文件名写的是什么）", ""
+    if MACOS and (head[:4] in MACHO_MAGIC or head[:2] == b"#!"):
+        return "这其实是一个 Mac 程序或脚本（不管文件名写的是什么）", ""
     if ext in IMAGE_TYPES:
         return (None, "") if sniff_image(path) else ("文件内容不是图片", "")
     if ext in VIDEO_TYPES:
@@ -3387,7 +3430,9 @@ def inspect_content(path: Path, ext: str) -> tuple[str | None, str]:
 
 async def defender_scan(path: Path) -> str | None:
     """None when Windows Defender found nothing; otherwise the reason to refuse. Judged from its own words, since its
-    exit code is 2 both for a threat and for a failed scan."""
+    exit code is 2 both for a threat and for a failed scan. The Mac build has nothing to call (see NOT_SCANNED)."""
+    if MACOS:
+        return None
     if not DEFENDER:
         return "找不到 Windows Defender，无法扫描"
     try:
@@ -3414,6 +3459,14 @@ async def defender_scan(path: Path) -> str | None:
 
 
 def attachment_caution(ext: str) -> str:
+    if MACOS:
+        if ext == "pdf":
+            return NOT_SCANNED + "格式检查通过，里面没有脚本和自动动作。打开后如果让你点链接登录、输入密码或再下载别的文件，不要照做。"
+        if ext in OOXML_TYPES:
+            return NOT_SCANNED + "格式检查通过，没有宏和外部链接。保存后会标记为来自互联网，看内容不需要点“启用编辑”。"
+        if ext == "zip":
+            return NOT_SCANNED + "压缩包里只有允许的文件类型。"
+        return NOT_SCANNED + "格式检查通过。"
     if ext == "pdf":
         return "PDF 已通过检查和杀毒扫描。打开后如果里面让你点链接登录、输入密码或再下载别的文件，不要照做。"
     if ext in OOXML_TYPES:
@@ -3560,6 +3613,22 @@ def downloads_name(name: str) -> str:
     return f"{stem}.{ext}"
 
 
+async def mark_quarantined(target: Path):
+    """macOS counterpart of Zone.Identifier: the quarantine attribute a browser download gets (flag 0081: downloaded,
+    not yet approved by the user). OSError when it could not be set."""
+    value = f"0081;{int(time.time()):x};KOL Mail;"
+    proc = await asyncio.create_subprocess_exec(
+        "/usr/bin/xattr", "-w", "com.apple.quarantine", value, str(target),
+        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+    try:
+        _, err = await asyncio.wait_for(proc.communicate(), 30)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise OSError("xattr 30 秒没有返回") from None
+    if proc.returncode != 0:
+        raise OSError((err or b"").decode("utf-8", "replace").strip()[:150] or f"xattr 退出码 {proc.returncode}")
+
+
 async def api_attachment_save(request: Request):
     """Copy a checked attachment into Downloads and mark it as coming from the internet (Zone.Identifier)."""
     body = await request.json()
@@ -3580,8 +3649,11 @@ async def api_attachment_save(request: Request):
         n += 1
     shutil.copyfile(path, target)
     try:
-        with open(f"{target}:Zone.Identifier", "w", encoding="ascii", newline="") as ads:  # MOTW is already CRLF
-            ads.write(MOTW)
+        if MACOS:
+            await mark_quarantined(target)
+        else:
+            with open(f"{target}:Zone.Identifier", "w", encoding="ascii", newline="") as ads:  # MOTW is already CRLF
+                ads.write(MOTW)
     except OSError as e:  # without the mark Office would skip Protected View: do not leave such a copy behind
         with contextlib.suppress(OSError):
             target.unlink()
