@@ -167,8 +167,11 @@ New-Item -ItemType Directory -Force $Dir | Out-Null
 
 # 重复安装时先停掉正在运行的旧版本，不然 pip 换不了被占用的文件
 if (-not $NoService -and (Get-ScheduledTask -TaskName "kol-mail" -ErrorAction SilentlyContinue)) {
-    Stop-ScheduledTask -TaskName "kol-mail" -ErrorAction SilentlyContinue
-    Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object { $_.CommandLine -like "*app.py*" -and $_.ExecutablePath -like "$Venv*" } |
+    Stop-ScheduledTask -TaskName "kol-mail" -ErrorAction SilentlyContinue  # 只停任务本身，不会结束它启动的 python
+    # venv 里的 python.exe 在 Windows 上只是个启动器，真正跑程序、占着端口的是它启动的基础 Python 子进程：两个都要停
+    $running = @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object { $_.CommandLine -like "*app.py*" })
+    $launchers = @($running | Where-Object { $_.ExecutablePath -like "$Venv*" } | ForEach-Object { $_.ProcessId })
+    $running | Where-Object { $launchers -contains $_.ProcessId -or $launchers -contains $_.ParentProcessId } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
