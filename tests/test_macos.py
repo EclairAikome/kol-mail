@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import llm  # noqa: E402
+import outgoing  # noqa: E402
 
 
 @pytest.fixture
@@ -81,3 +82,10 @@ def test_shell_scripts_parse(script):
     assert b"\r\n" not in raw, "bash scripts must have LF line endings"
     result = subprocess.run([bash, "-n", str(ROOT / script)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_long_chinese_attachment_name_fits_a_mac_file_name(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    name = outgoing.clean_name("合作报价" * 40 + ".pdf")
+    assert name.endswith(".pdf") and len(name.encode("utf-8")) <= 240
+    assert outgoing.clean_name("short.pdf") == "short.pdf"

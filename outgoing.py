@@ -53,7 +53,15 @@ def clean_name(name: str) -> str:
     stem, dot, ext = name.rpartition(".")
     if dot and len(name) > 120:
         name = stem[:110] + "." + ext[:9]
-    return name[:120]
+    name = name[:120]
+    if sys.platform == "darwin":  # a macOS file name is at most 255 UTF-8 bytes (120 Chinese characters are 360)
+        stem, dot, ext = name.rpartition(".")
+        if not dot:
+            stem, ext = name, ""
+        while stem and len((stem + dot + ext).encode("utf-8")) > 240:
+            stem = stem[:-1]
+        name = (stem + dot + ext) if stem else "attachment" + dot + ext
+    return name
 
 
 def extension(name: str) -> str:

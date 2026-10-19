@@ -3492,7 +3492,8 @@ async def attachment_verdict(name: str, path: Path) -> tuple[str | None, str]:
     digest = await asyncio.to_thread(file_sha256, path)
     with contextlib.suppress(OSError, ValueError):
         cached = json.loads(marker.read_text(encoding="utf-8"))
-        if cached.get("sha256") == digest and cached.get("policy") == POLICY_VERSION:
+        if cached.get("sha256") == digest and cached.get("policy") == POLICY_VERSION \
+                and bool(cached.get("noscan")) == MACOS:  # a Mac verdict (no virus scan) never passes on Windows
             return None, cached.get("caution", "")
     reason = type_refusal(name)
     extra = ""
@@ -3511,8 +3512,10 @@ async def attachment_verdict(name: str, path: Path) -> tuple[str | None, str]:
         return reason, ""
     caution = " ".join(x for x in (attachment_caution(ext), extra) if x)
     with contextlib.suppress(OSError):
-        marker.write_text(json.dumps({"sha256": digest, "policy": POLICY_VERSION, "caution": caution},
-                                     ensure_ascii=False), encoding="utf-8")
+        verdict = {"sha256": digest, "policy": POLICY_VERSION, "caution": caution}
+        if MACOS:
+            verdict["noscan"] = True
+        marker.write_text(json.dumps(verdict, ensure_ascii=False), encoding="utf-8")
     return None, caution
 
 
@@ -3610,6 +3613,9 @@ def downloads_name(name: str) -> str:
     stem = stem.strip(". ")[:120] or "附件"
     if re.fullmatch(r"(con|prn|aux|nul|com\d|lpt\d)", stem, re.I):  # Windows device names
         stem = "_" + stem
+    if MACOS:  # a macOS file name is at most 255 UTF-8 bytes; keep room for " (12)" and the extension
+        while len(f"{stem}.{ext}".encode("utf-8")) > 230:
+            stem = stem[:-1]
     return f"{stem}.{ext}"
 
 

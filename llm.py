@@ -117,6 +117,7 @@ MAC_CLAUDE_PATTERNS = (
     "~/.nvm/versions/node/*/bin/claude",
     "~/Library/Application Support/Claude/claude-code/*/claude",
     "~/Library/Application Support/Claude/claude-code/*/*/claude",
+    "~/Library/Application Support/Claude/claude-code/*/claude.app/Contents/MacOS/claude",
 )
 
 

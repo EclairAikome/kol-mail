@@ -15,6 +15,7 @@ listening() { /usr/sbin/lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; }
 
 if ! listening; then
     if ! launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+        launchctl enable "gui/$(id -u)/$LABEL" 2>/dev/null  # switched off under Login Items: back on
         launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null
     fi
     launchctl kickstart "gui/$(id -u)/$LABEL" >/dev/null 2>&1

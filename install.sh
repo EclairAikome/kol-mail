@@ -65,9 +65,17 @@ gh_url() { if [ -n "$MIRROR" ]; then printf '%s/%s' "${MIRROR%/}" "$1"; else pri
 [ "$(uname -s)" = "Darwin" ] || die "这个脚本只用于 Mac。Windows 请用 install.ps1。"
 case "$MIRROR" in ""|https://*) ;; *) die "--mirror 必须是 https 地址" ;; esac
 mkdir -p "$DIR"
-
-# 重复安装时先停掉正在运行的旧版本
-launchctl bootout "$GUI/$LABEL" >/dev/null 2>&1 || true
+STAGING="$(mktemp -d)"
+WAS_LOADED=0; DONE=0
+on_exit() {
+    rm -rf "$STAGING"
+    # 中途失败时把原来在跑的服务拉回来，不让同事的后台一直停着
+    if [ "$DONE" != 1 ] && [ "$WAS_LOADED" = 1 ] && [ -f "$PLIST" ]; then
+        launchctl enable "$GUI/$LABEL" >/dev/null 2>&1 || true
+        launchctl bootstrap "$GUI" "$PLIST" >/dev/null 2>&1 || true
+    fi
+}
+trap on_exit EXIT
 
 # ---------------------------------------------------------------- 1. Python
 say "[1/8] 检查 Python…"
@@ -115,8 +123,6 @@ say "  用 $BASEPY"
 
 # ---------------------------------------------------------------- 2. 程序本体
 say "[2/8] 获取 KOL Mail…"
-STAGING="$(mktemp -d)"
-trap 'rm -rf "$STAGING"' EXIT
 if [ -n "$SOURCE" ]; then
     SRC="$(cd "$SOURCE" && pwd)"
 else
@@ -124,10 +130,13 @@ else
     TAG="$(curl -fsSL -H "Accept: application/vnd.github+json" "$(gh_url "https://api.github.com/repos/$REPO/releases/latest")" |
         "$BASEPY" -I -c 'import json, sys; print(json.load(sys.stdin)["tag_name"])')" || die "查不到最新版本，检查网络或 --repo 参数。"
     curl -fsSL -o "$STAGING/src.zip" "$(gh_url "https://codeload.github.com/$REPO/zip/refs/tags/$TAG")" || die "下载 KOL Mail 失败。"
-    (cd "$STAGING" && /usr/bin/unzip -q src.zip -d x)
+    /usr/bin/ditto -x -k "$STAGING/src.zip" "$STAGING/x" || die "解压 KOL Mail 失败。"
     SRC="$(find "$STAGING/x" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
     say "  最新版 $TAG"
 fi
+# 换文件前先停掉正在运行的旧版本（重复安装时）
+if launchctl print "$GUI/$LABEL" >/dev/null 2>&1; then WAS_LOADED=1; fi
+launchctl bootout "$GUI/$LABEL" >/dev/null 2>&1 || true
 mkdir -p "$APP"
 # data/ 是你的设置和缓存，永远不覆盖
 /usr/bin/rsync -a --exclude data --exclude .git --exclude __pycache__ --exclude .venv --exclude venv "$SRC/" "$APP/" ||
@@ -137,11 +146,21 @@ chmod 700 "$DATA"
 
 # ---------------------------------------------------------------- 3. 依赖
 say "[3/8] 安装依赖（第一次要几分钟）…"
-[ -x "$PY" ] || "$BASEPY" -m venv "$VENV" || die "创建 Python 虚拟环境失败"
+# 虚拟环境依赖的 Python 被卸载或升级后，里面的 python 会失效，这时整个重建
+if ! "$PY" -c "" >/dev/null 2>&1; then
+    rm -rf "$VENV"
+    "$BASEPY" -m venv "$VENV" || die "创建 Python 虚拟环境失败"
+fi
 PIP_ARGS=(-m pip install --disable-pip-version-check -q -r "$APP/requirements.txt")
 [ -n "$PIP_INDEX" ] && PIP_ARGS+=(-i "$PIP_INDEX")
 "$PY" "${PIP_ARGS[@]}" || die "依赖安装失败。公司网络慢的话，可以加参数 --pip-index https://mirrors.aliyun.com/pypi/simple 再试。"
 MCP="$VENV/bin/mcp-email-server"
+# python.org 的 Python 不带根证书时，让它用 certifi 的（安装时测邮箱和后台服务都要用）
+CAFILE=""
+if ! "$PY" -I -c 'import os, ssl, sys; p = ssl.get_default_verify_paths(); sys.exit(0 if (p.cafile and os.path.exists(p.cafile)) or (p.capath and os.path.isdir(p.capath) and os.listdir(p.capath)) else 1)'; then
+    CAFILE="$("$PY" -I -c 'import certifi; print(certifi.where())' 2>/dev/null || true)"
+    [ -n "$CAFILE" ] && export SSL_CERT_FILE="$CAFILE"
+fi
 
 # ---------------------------------------------------------------- 4. 邮箱
 say "[4/8] 配置邮箱…"
@@ -188,8 +207,18 @@ if ! printf '%s\n' "$ACCOUNTS" | grep -Eq "(^|[^A-Za-z0-9_-])$ACCOUNT([^A-Za-z0-
         say "  下面会提示输入邮箱密码（输入时不显示），密码由邮件组件存进 Mac 的钥匙串。"
         "$MCP" "${ADD[@]}" < /dev/tty || die "添加邮箱失败，检查服务器地址和密码后重新运行本脚本。"
     fi
-    if ! TEST_OUT="$("$MCP" account test "$ACCOUNT" 2>&1)"; then warn "  邮箱连接测试没通过：$TEST_OUT"; fi
 fi
+# 连接测试。密码输错了可以当场重输（重跑安装命令时也会再测一次）
+for try in 1 2 3; do
+    if TEST_OUT="$("$MCP" account test "$ACCOUNT" 2>&1)"; then say "  邮箱连接正常"; break; fi
+    warn "  邮箱连接测试没通过：$TEST_OUT"
+    [ "$YES" = 1 ] && break
+    ask "要重新输入邮箱密码吗？输入 y 重输，直接回车跳过" ""
+    case "$REPLY" in y|Y|yes) ;; *) warn "  先跳过。服务器地址填错的话，把上面这段提示截图发给维护者。"; break ;; esac
+    say "  先输收信（IMAP）密码，再输发信（SMTP）密码，一般两次都是邮箱密码。"
+    "$MCP" account set-secret "$ACCOUNT" incoming < /dev/tty || warn "  收信密码没改成"
+    "$MCP" account set-secret "$ACCOUNT" outgoing < /dev/tty || warn "  发信密码没改成"
+done
 # 回信、附件、移动邮件要用到的权限
 POLICY="$("$MCP" config policy 2>&1 || true)"
 REV="$(printf '%s\n' "$POLICY" | sed -n 's/^revision=\([0-9][0-9]*\).*/\1/p' | head -n 1)"
@@ -249,8 +278,16 @@ if [ -z "$(old identity.signature)" ]; then
 fi
 if [ -z "$(old paths.playbook)" ]; then
     ask "谈判手册（Markdown 文件）的完整路径，没有就回车用模板" "$DATA/谈判手册.md"
-    KM_PLAYBOOK="${REPLY/#\~/$HOME}"
-    [ -f "$KM_PLAYBOOK" ] || cp "$APP/templates/谈判手册.example.md" "$KM_PLAYBOOK"
+    # 从访达拖进终端的路径会带引号或反斜杠转义的空格
+    KM_PLAYBOOK="$(printf '%s' "$REPLY" | sed -e "s/^'\(.*\)'$/\1/" -e 's/^"\(.*\)"$/\1/' -e 's/\\\(.\)/\1/g')"
+    KM_PLAYBOOK="${KM_PLAYBOOK/#\~/$HOME}"
+    if [ ! -f "$KM_PLAYBOOK" ]; then
+        if ! { mkdir -p "$(dirname "$KM_PLAYBOOK")" && cp "$APP/templates/谈判手册.example.md" "$KM_PLAYBOOK"; } 2>/dev/null; then
+            warn "  $KM_PLAYBOOK 放不进去，先用模板，放在 $DATA/谈判手册.md"
+            KM_PLAYBOOK="$DATA/谈判手册.md"
+            [ -f "$KM_PLAYBOOK" ] || cp "$APP/templates/谈判手册.example.md" "$KM_PLAYBOOK"
+        fi
+    fi
 fi
 if [ -z "$(old paths.koc_knowledge)" ]; then
     KM_KNOWLEDGE="$DATA/KOC机器人知识.md"
@@ -302,11 +339,6 @@ for tool in "$(command -v node || true)" "$CLAUDE" "$CM"; do
     [ -z "$tool" ] && continue
     case ":$SVC_PATH:" in *":$(dirname "$tool"):"*) ;; *) SVC_PATH="$(dirname "$tool"):$SVC_PATH" ;; esac
 done
-# python.org 的 Python 不带根证书时，让它用 certifi 的
-CAFILE=""
-if ! "$PY" -I -c 'import os, ssl, sys; p = ssl.get_default_verify_paths(); sys.exit(0 if (p.cafile and os.path.exists(p.cafile)) or (p.capath and os.path.isdir(p.capath) and os.listdir(p.capath)) else 1)'; then
-    CAFILE="$("$PY" -I -c 'import certifi; print(certifi.where())' 2>/dev/null || true)"
-fi
 mkdir -p "$HOME/Library/LaunchAgents"
 "$PY" -I - "$PLIST" "$LABEL" "$APP/service/run.sh" "$PY" "$LOG" "$SVC_PATH" "$CAFILE" <<'PYEOF'
 import plistlib, sys
@@ -327,9 +359,11 @@ with open(plist, "wb") as f:
         "StandardErrorPath": log + ".launchd",
     }, f)
 PYEOF
-launchctl bootstrap "$GUI" "$PLIST" 2>/dev/null || { launchctl bootout "$GUI/$LABEL" >/dev/null 2>&1 || true; launchctl bootstrap "$GUI" "$PLIST"; } ||
-    die "注册后台服务失败"
+# 同事在“系统设置 → 登录项”里关掉过后台项的话，不先 enable 就 bootstrap 不进去
 launchctl enable "$GUI/$LABEL" 2>/dev/null || true
+launchctl bootstrap "$GUI" "$PLIST" 2>/dev/null || { launchctl bootout "$GUI/$LABEL" >/dev/null 2>&1 || true; launchctl bootstrap "$GUI" "$PLIST"; } ||
+    die "注册后台服务失败。打开“系统设置 → 通用 → 登录项与扩展”，把 KOL Mail 相关的后台项打开，再重新运行本脚本。"
+DONE=1
 
 # ---------------------------------------------------------------- 8. 应用图标，启动
 say "[8/8] 放“KOL Mail”图标并启动…"
