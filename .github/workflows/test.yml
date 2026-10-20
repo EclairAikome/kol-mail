@@ -1,0 +1,89 @@
+# Unit tests on Windows and on an Apple-silicon Mac, plus an unattended install on the Mac: install.sh from this
+# checkout, the launchd agent serving the page, a restart after the app dies, and a second install over the first.
+name: test
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash  # -eo pipefail: a failing command in a pipe fails the step
+
+jobs:
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --disable-pip-version-check -q -r requirements.txt pytest
+      - run: python -m pytest tests -q -rs
+
+  mac-install:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      ROOT: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Machine
+        run: sw_vers; uname -m; command -v python3 && python3 --version
+      - name: Install (unattended, from this checkout)
+        run: |
+          printf 'not-a-real-password\nnot-a-real-password\n' | /bin/bash install.sh --source "$ROOT" --yes \
+            --email ci@example.com --name "CI Tester" --company Example --backend claude \
+            --imap-host 127.0.0.1 --smtp-host 127.0.0.1 --password-stdin --no-open
+      - name: launchd agent loaded and page served
+        run: |
+          launchctl print "gui/$(id -u)/local.kolmail" > agent.txt
+          head -n 30 agent.txt
+          curl -fsS -o /dev/null -w "page %{http_code}\n" http://127.0.0.1:8765/
+          curl -fsS -H "X-KOL-Mail: 1" http://127.0.0.1:8765/api/status > status.json
+          python3 -c "import json; s = json.load(open('status.json')); print({k: s.get(k) for k in ('version', 'scan_error', 'notify_error')})"
+          curl -sS -o /dev/null -w "api without the page header %{http_code}\n" http://127.0.0.1:8765/api/status | grep -q 403
+          test -d "/Applications/KOL Mail.app" || test -d "$HOME/Applications/KOL Mail.app"
+          python3 -c "import json,os; s=json.load(open(os.path.expanduser('~/Library/Application Support/kol-mail/app/data/settings.json'))); print({k: s[k] for k in ('mail','llm')})"
+      - name: launchd restarts the app after it dies (what a self-update relies on)
+        run: |
+          pid=$(/usr/sbin/lsof -tiTCP:8765 -sTCP:LISTEN)
+          echo "killing $pid"; kill -9 "$pid"
+          for i in $(seq 1 60); do
+            new=$(/usr/sbin/lsof -tiTCP:8765 -sTCP:LISTEN || true)
+            if [ -n "$new" ] && [ "$new" != "$pid" ]; then echo "back as $new after ${i}s"; break; fi
+            sleep 1
+          done
+          curl -fsS -o /dev/null -w "page %{http_code}\n" http://127.0.0.1:8765/
+      - name: Notification script and quarantine mark work on this macOS
+        run: |
+          script=$(python3 -c "import ast, re; src = open('app.py', encoding='utf-8').read(); print(ast.literal_eval(re.search(r'MAC_NOTIFY_SCRIPT = (\(.*?\))\r?\n', src, re.S).group(1)))")
+          /usr/bin/osascript -e "$script" 'KOL Mail · 测试' '新邮件 "quoted" \\ end' '第二行'
+          f="$RUNNER_TEMP/q.pdf"; echo x > "$f"
+          /usr/bin/xattr -w com.apple.quarantine "0081;$(printf %x "$(date +%s)");KOL Mail;" "$f"
+          /usr/bin/xattr -p com.apple.quarantine "$f"
+      - name: Sheet tool runs as the app runs it (Google backend; status needs no network)
+        run: |
+          base="$HOME/Library/Application Support/kol-mail"
+          KOL_SHEET_PATH=gsheet:ci-test KOL_SHEET_STATE="$RUNNER_TEMP/sheet" "$base/venv/bin/python" "$base/app/sheet/kol.py" status
+          out=$("$base/venv/bin/python" -I "$base/app/sheet/gsheet.py" check --state "$RUNNER_TEMP/sheet" --id ci-test 2>&1 || true)
+          echo "$out"; echo "$out" | grep -q "授权"
+      - name: The app icon's script opens a running service
+        run: /bin/bash "$HOME/Library/Application Support/kol-mail/app/service/open.sh" --no-browser
+      - name: Second install over the first keeps the settings
+        run: |
+          /bin/bash install.sh --source "$ROOT" --yes --no-open
+          curl -fsS -o /dev/null -w "page %{http_code}\n" http://127.0.0.1:8765/
+      - name: Logs
+        if: always()
+        run: |
+          tail -n 80 "$HOME/Library/Application Support/kol-mail/server.log" || true
+          tail -n 40 "$HOME/Library/Application Support/kol-mail/server.log.launchd" || true

@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import secrets
 import shutil
+import sys
 import time
 import unicodedata
 from pathlib import Path
@@ -27,6 +28,9 @@ BLOCKED = {".exe", ".com", ".bat", ".cmd", ".msi", ".msp", ".scr", ".pif", ".cpl
            ".vhd", ".vhdx", ".appx", ".msix", ".application", ".gadget", ".scf", ".inf", ".chm", ".docm", ".xlsm",
            ".pptm", ".dotm", ".xltm", ".xlam", ".ppam", ".sldm", ".xlsb", ".xll", ".msc", ".jnlp", ".ws", ".vb",
            ".apk", ".sh", ".py", ".html", ".htm", ".svg"}
+if sys.platform == "darwin":  # what runs or installs when opened on a Mac
+    BLOCKED |= {".command", ".tool", ".pkg", ".mpkg", ".dmg", ".scpt", ".scptd", ".applescript", ".terminal",
+                ".workflow", ".zsh", ".bash", ".csh", ".dylib", ".kext", ".webloc", ".inetloc", ".fileloc"}
 IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
                ".webp": "image/webp"}
 ID = re.compile(r"[0-9a-f]{16}")
@@ -49,7 +53,15 @@ def clean_name(name: str) -> str:
     stem, dot, ext = name.rpartition(".")
     if dot and len(name) > 120:
         name = stem[:110] + "." + ext[:9]
-    return name[:120]
+    name = name[:120]
+    if sys.platform == "darwin":  # a macOS file name is at most 255 UTF-8 bytes (120 Chinese characters are 360)
+        stem, dot, ext = name.rpartition(".")
+        if not dot:
+            stem, ext = name, ""
+        while stem and len((stem + dot + ext).encode("utf-8")) > 240:
+            stem = stem[:-1]
+        name = (stem + dot + ext) if stem else "attachment" + dot + ext
+    return name
 
 
 def extension(name: str) -> str:

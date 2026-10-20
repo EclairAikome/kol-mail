@@ -20,6 +20,7 @@ import os
 import re
 import secrets
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -92,6 +93,8 @@ def find_claude(configured: str = "") -> str | None:
     on_path = shutil.which("claude")
     if on_path:
         return on_path
+    if sys.platform == "darwin":
+        return _newest(MAC_CLAUDE_PATTERNS)
     # The desktop app ships its own CLI; the Store (MSIX) build keeps AppData under its package folder.
     patterns = [
         os.path.join(os.environ.get("USERPROFILE", ""), ".local", "bin", "claude.exe"),
@@ -109,8 +112,32 @@ def find_codemaker(configured: str = "") -> str | None:
     on_path = shutil.which("codemaker")
     if on_path:
         return on_path
+    if sys.platform == "darwin":  # the official install script puts it here and adds it to ~/.zshrc only
+        default = Path.home() / ".codemaker" / "bin" / "codemaker"
+        return str(default) if default.exists() else None
     default = Path(os.environ.get("USERPROFILE", "")) / ".codemaker" / "bin" / "codemaker.exe"
     return str(default) if default.exists() else None
+
+
+# macOS: a launchd service gets no shell PATH, so the installer writes the full path into settings.json; these are
+# only the fallbacks. Native installer, Homebrew (Apple silicon, Intel), npm's usual prefixes, the desktop app's CLI.
+MAC_CLAUDE_PATTERNS = (
+    "~/.local/bin/claude",
+    "~/.claude/local/claude",
+    "/opt/homebrew/bin/claude",
+    "/usr/local/bin/claude",
+    "~/.npm-global/bin/claude",
+    "~/.nvm/versions/node/*/bin/claude",
+    "~/Library/Application Support/Claude/claude-code/*/claude",
+    "~/Library/Application Support/Claude/claude-code/*/*/claude",
+    "~/Library/Application Support/Claude/claude-code/*/claude.app/Contents/MacOS/claude",
+)
+
+
+def _newest(patterns) -> str | None:
+    found = [p for pattern in patterns for p in glob.glob(os.path.expanduser(pattern))
+             if os.path.isfile(p) and os.access(p, os.X_OK)]
+    return max(found, key=os.path.getmtime) if found else None
 
 
 # ---------------------------------------------------------------- output handling

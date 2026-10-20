@@ -34,6 +34,7 @@ BUILTIN = [
     r"sk-[A-Za-z0-9-]{20,}",                             # API keys
     r"open-apis/robots|/hook/[A-Za-z0-9-]{16,}",         # webhook addresses
     r"[A-Za-z]:[\\/]+Users[\\/]+(?!alex\b)[A-Za-z0-9._-]+",  # someone's Windows profile, either slash
+    r"(?<![\w.])/Users/(?!alex\b|Shared\b)[A-Za-z0-9._-]+",  # someone's Mac home folder
     r"TELEGRAM_SESSION_STRING\s*=\s*\S{20,}",
     r"BEGIN [A-Z ]*PRIVATE KEY",
 ]
@@ -44,7 +45,8 @@ ALLOWED_EMAIL = re.compile(
     r"|^(mailer-daemon|postmaster|no-reply|noreply|no_reply|do_not_reply)@"  # machine senders
     r"|^(ana\.gamer|ana|bob|busy|done|fee|mixed|no|gone|someone|stranger)@gmail\.com$"
     r"|@users\.noreply\.github\.com$|^noreply@anthropic\.com$", re.IGNORECASE)
-TEXT_SUFFIXES = {".py", ".md", ".txt", ".json", ".html", ".js", ".css", ".ps1", ".cmd", ".toml", ".cfg", ".ini", ""}
+TEXT_SUFFIXES = {".py", ".md", ".txt", ".json", ".html", ".js", ".css", ".ps1", ".cmd", ".toml", ".cfg", ".ini", ".sh",
+                 ".yml", ".yaml", ""}
 SKIP_SELF = {"tools/publish.py"}  # its own patterns would match themselves
 
 

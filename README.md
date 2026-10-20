@@ -24,6 +24,24 @@ powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/<ow
 
 公司网络装依赖慢，可以在命令后面加 `-PipIndex https://mirrors.aliyun.com/pypi/simple`。
 
+### Mac
+
+macOS 13 以上，Apple 芯片和 Intel 都行。维护者发的 Mac 命令复制到“终端”里回车，大致是这样
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/<owner>/kol-mail/main/install.sh)" -- --repo <owner>/kol-mail --imap-host <收信服务器> --smtp-host <发信服务器> --feedback <反馈地址>
+```
+
+问的问题和 Windows 一样。电脑上没有 Python 3.11 以上时，脚本会用 Homebrew 装，没有 Homebrew 就从 python.org 下载安装包，这一步要输一次开机密码。邮箱密码存进 Mac 的钥匙串，第一次收信时系统可能弹窗问是否允许访问钥匙串，点“始终允许”。装完“应用程序”里会多一个“KOL Mail”，点开就是网页。后台服务开机自动运行，程序退出后 15 秒内会自己重启。
+
+Mac 版和 Windows 版的区别
+
+- 新邮件通知是系统右上角的通知横幅，点它打不开那封信，要自己切到网页。第一次弹出时系统可能问是否允许“脚本编辑器”发通知，点允许。
+- Mac 上没有能被程序调用的杀毒软件，附件只做格式、宏、脚本和压缩包检查，不做杀毒扫描，保存前的提示里会写明“未经杀毒扫描”。保存下来的文件带“来自互联网”标记，打开时系统会照常提示。
+- 安装目录是 `~/Library/Application Support/kol-mail`，日志是里面的 `server.log`。
+- KOL 总表在 Mac 上是你自己 Google 云端硬盘里的一张 Google 表格，分页和 Windows 的 xlsx 一样（KOL总表、沟通记录、发信批次、项目）。安装命令里带了 Google 客户端参数时，安装器会问要不要接，回答 y 后浏览器打开 Google 授权页，登录点允许，安装器自动建好一张空表并打印链接。KOL Mail 只能读写它自己建的这张表，碰不到你云端硬盘里的其他文件。断网或 Google 暂时不可用时，改动先排队，网通了自动补写。表格可以照常共享给组长看，同事在网页上编辑的同时 KOL Mail 也在写也没关系，撞上了它会稍后重写。
+- 用 CodeMaker 的话，命令行版装在 `~/.codemaker/bin/codemaker`，装好后在终端运行 `codemaker auth login` 登录。CodeMaker 或 Claude Code 是装完 KOL Mail 之后才装的，重新运行一次安装命令，让它记下 AI 命令行的位置。
+
 ## 每天第一次打开会自动更新
 
 打开网页时程序会去 GitHub 看有没有新版本，一天只看一次。有新版就自动下载、装好、重启，页面右上角会提示“已更新到 vX.Y.Z”，十几秒后自动刷新。你的设置、缓存和草稿都在 `data` 文件夹里，更新不会碰。GitHub 连不上的时候安静跳过，第二天再试。
@@ -75,7 +93,9 @@ powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/<ow
 | `paths.sheet_workbook` | KOL 总表，不用就留空 |
 | `koc` | KOC 机器人回复里允许出现的数字、比例和网站 |
 
-改完 settings.json 要重启一次程序。在 PowerShell 里运行 `Stop-ScheduledTask kol-mail`，再双击桌面图标。
+改完 settings.json 要重启一次程序。在 PowerShell 里运行 `Stop-ScheduledTask kol-mail`，再双击桌面图标。Mac 上设置在 `~/Library/Application Support/kol-mail/app/data/settings.json`，改完在终端运行 `launchctl kickstart -k gui/$(id -u)/local.kolmail` 重启。
+
+Mac 上要卸载的话，在终端依次运行 `launchctl bootout gui/$(id -u)/local.kolmail`、`rm ~/Library/LaunchAgents/local.kolmail.plist`，再删掉“应用程序”里的 KOL Mail 和 `~/Library/Application Support/kol-mail` 文件夹。
 
 谈判手册和 KOC 知识卡的模板在 `templates` 文件夹。团队没有统一的谈判手册，每个人的打法写在自己的“我的谈判方式”里；模板里其余各节想补就补，没填的 AI 按常识处理。KOC 知识卡的正式版本找维护者要，不要传到网上。
 
