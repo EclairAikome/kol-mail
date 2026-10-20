@@ -1,12 +1,14 @@
 """Self-update: only a newer, correctly signed release installs; data/ is never touched; anything unsigned, altered or
 unsafe is refused and the running code stays as it was."""
 
+import asyncio
 import base64
 import io
 import sys
 import zipfile
 from pathlib import Path
 
+import httpx
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -112,3 +114,68 @@ def test_failed_swap_restores_the_old_code(base, monkeypatch):
 def test_developer_checkout_never_updates(base):
     (base / ".git").mkdir()
     assert not updater.Updater(base, base / "data", "owner/kol-mail", "0.1.0").enabled
+
+
+# ---------------------------------------------------------------- finding the newest release
+
+RELEASES = "https://github.com/owner/kol-mail/releases"
+API = "https://api.github.com/repos/owner/kol-mail/releases/latest"
+
+
+def find_latest(base, github, mirror=""):
+    """Ask a stand-in GitHub for the newest release; returns the result and every URL that was asked."""
+    asked = []
+
+    def handle(request):
+        asked.append(str(request.url))
+        return github(request)
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle), follow_redirects=True) as client:
+            return await updater.Updater(base, base / "data", "owner/kol-mail", "0.1.0", mirror=mirror).latest(client)
+    return asyncio.run(go()), asked
+
+
+def test_latest_comes_from_the_redirect_without_the_rate_limited_api(base):
+    def github(request):
+        if str(request.url) == f"{RELEASES}/latest":
+            return httpx.Response(302, headers={"location": f"{RELEASES}/tag/v0.2.1"})
+        raise AssertionError(f"unexpected request {request.url}")
+    rel, asked = find_latest(base, github)
+    assert rel["tag"] == "v0.2.1" and rel["version"] == "0.2.1"
+    assert rel["zip"] == "https://codeload.github.com/owner/kol-mail/zip/refs/tags/v0.2.1"
+    assert asked == [f"{RELEASES}/latest"]
+
+
+def test_redirect_goes_through_the_mirror(base):
+    def github(request):
+        return httpx.Response(302, headers={"location": f"https://gh.example.com/{RELEASES}/tag/v0.3.0"})
+    rel, asked = find_latest(base, github, mirror="https://gh.example.com/")
+    assert rel["version"] == "0.3.0" and asked == [f"https://gh.example.com/{RELEASES}/latest"]
+
+
+def test_api_is_the_fallback_when_the_redirect_has_no_tag(base):
+    def github(request):
+        if str(request.url) == f"{RELEASES}/latest":
+            return httpx.Response(200, text="<html>")
+        return httpx.Response(200, json={"tag_name": "v0.2.1", "body": "notes"})
+    rel, asked = find_latest(base, github)
+    assert rel["version"] == "0.2.1" and rel["notes"] == "notes" and asked[-1] == API
+
+
+def test_no_release_yet(base):
+    def github(request):
+        if str(request.url) == f"{RELEASES}/latest":
+            return httpx.Response(302, headers={"location": RELEASES})
+        return httpx.Response(404, json={"message": "Not Found"})
+    with pytest.raises(updater.UpdateError, match="还没有发布"):
+        find_latest(base, github)
+
+
+def test_rate_limited_api_says_so(base):
+    def github(request):
+        if str(request.url) == f"{RELEASES}/latest":
+            raise httpx.ConnectError("blocked")
+        return httpx.Response(403, headers={"x-ratelimit-remaining": "0"}, json={"message": "API rate limit exceeded"})
+    with pytest.raises(updater.UpdateError, match="限制了这个网络的查询次数"):
+        find_latest(base, github)

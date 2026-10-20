@@ -35,6 +35,7 @@ PUBLIC_KEY = "r6rtHPMD2rAmovmVExDFPcHi0G8lFE/Z4/sQMrkNTj0="  # Ed25519, raw 32 b
 MANIFEST, SIGNATURE = "MANIFEST.json", "MANIFEST.sig"
 KEEP = {"data", ".git", "__pycache__", ".venv", "venv"}  # never replaced or removed (compared case-insensitively)
 VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+LATEST_TAG = re.compile(r"/releases/tag/(v\d+\.\d+\.\d+)/?$")  # where github.com/<repo>/releases/latest redirects
 MAX_ZIP = 20 * 1024 * 1024
 MAX_UNPACKED = 60 * 1024 * 1024
 
@@ -124,18 +125,41 @@ class Updater:
         return f"{self.mirror}/{url}" if self.mirror else url
 
     async def latest(self, client: httpx.AsyncClient) -> dict:
+        """The newest release's tag, read from where github.com/<repo>/releases/latest redirects to. The REST API
+        allows 60 anonymous calls an hour per IP, and a company network shares one IP among everybody, so it is
+        only the fallback when the redirect gives no tag."""
+        tag, notes, api_error = await self._latest_by_redirect(client), "", None
+        if not tag:
+            try:
+                tag, notes = await self._latest_by_api(client)
+            except UpdateError as e:
+                api_error = e
+        if not tag:
+            raise api_error or UpdateError("查不到最新版本")
+        if not parse_version(tag):
+            raise UpdateError(f"最新版本号看不懂：{tag[:30]}")
+        return {"tag": tag, "version": tag.lstrip("v"), "zip": f"https://codeload.github.com/{self.repo}/zip/refs/tags/{tag}",
+                "notes": notes}
+
+    async def _latest_by_redirect(self, client: httpx.AsyncClient) -> str:
+        try:
+            r = await client.head(self._url(f"https://github.com/{self.repo}/releases/latest"), follow_redirects=False)
+        except httpx.HTTPError:
+            return ""
+        m = LATEST_TAG.search(r.headers.get("location", "")) if r.is_redirect else None
+        return m.group(1) if m else ""
+
+    async def _latest_by_api(self, client: httpx.AsyncClient) -> tuple[str, str]:
         r = await client.get(self._url(f"https://api.github.com/repos/{self.repo}/releases/latest"),
                              headers={"Accept": "application/vnd.github+json"})
         if r.status_code == 404:
             raise UpdateError("仓库还没有发布任何版本")
+        if r.status_code == 403 and r.headers.get("x-ratelimit-remaining") == "0":
+            raise UpdateError("GitHub 限制了这个网络的查询次数，过一会儿会自动再试")
         if r.status_code != 200:
             raise UpdateError(f"GitHub 返回 HTTP {r.status_code}")
         data = r.json()
-        tag = str(data.get("tag_name") or "")
-        if not parse_version(tag):
-            raise UpdateError(f"最新版本号看不懂：{tag[:30]}")
-        return {"tag": tag, "version": tag.lstrip("v"), "zip": f"https://codeload.github.com/{self.repo}/zip/refs/tags/{tag}",
-                "notes": str(data.get("body") or "")[:2000]}
+        return str(data.get("tag_name") or ""), str(data.get("body") or "")[:2000]
 
     async def check(self, force: bool = False, install: bool = True) -> dict:
         """Called on page open. Does nothing unless enabled and not yet checked today (or forced)."""

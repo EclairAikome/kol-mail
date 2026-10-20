@@ -131,8 +131,16 @@ if [ -n "$SOURCE" ]; then
     SRC="$(cd "$SOURCE" && pwd)"
 else
     if [ -z "$REPO" ]; then ask "GitHub 仓库（owner/name）" ""; REPO="$REPLY"; fi
-    TAG="$(curl -fsSL -H "Accept: application/vnd.github+json" "$(gh_url "https://api.github.com/repos/$REPO/releases/latest")" |
-        "$BASEPY" -I -c 'import json, sys; print(json.load(sys.stdin)["tag_name"])')" || die "查不到最新版本，检查网络或 --repo 参数。"
+    # 版本号从 releases/latest 的跳转地址里读：GitHub API 每个 IP 每小时只给 60 次匿名查询，公司网络共用出口 IP 时
+    # 经常早就用完了。API 只在跳转读不到时兜底。
+    TAG="$(curl -sS -I -o /dev/null -w '%{redirect_url}' --max-time 30 "$(gh_url "https://github.com/$REPO/releases/latest")" |
+        sed -nE 's#.*/releases/tag/(v[0-9]+\.[0-9]+\.[0-9]+)/?$#\1#p')" || TAG=""
+    if [ -z "$TAG" ]; then
+        TAG="$(curl -fsSL -H "Accept: application/vnd.github+json" "$(gh_url "https://api.github.com/repos/$REPO/releases/latest")" |
+            "$BASEPY" -I -c 'import json, sys; print(json.load(sys.stdin)["tag_name"])' 2>/dev/null)" || TAG=""
+    fi
+    printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' ||
+        die "查不到 KOL Mail 的最新版本。多半是网络连不上 GitHub，换个网络（比如手机热点）再运行一次安装；还不行就把这个窗口截图发给维护者。"
     curl -fsSL -o "$STAGING/src.zip" "$(gh_url "https://codeload.github.com/$REPO/zip/refs/tags/$TAG")" || die "下载 KOL Mail 失败。"
     /usr/bin/ditto -x -k "$STAGING/src.zip" "$STAGING/x" || die "解压 KOL Mail 失败。"
     SRC="$(find "$STAGING/x" -mindepth 1 -maxdepth 1 -type d | head -n 1)"

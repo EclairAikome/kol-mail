@@ -50,6 +50,22 @@ function Run-Native([scriptblock]$block) {
     return @{ Code = $LASTEXITCODE; Out = ($out -join "`n") }
 }
 function Gh($url) { if ($Mirror) { return "$($Mirror.TrimEnd('/'))/$url" } return $url }
+# 最新版本号从 github.com/<仓库>/releases/latest 的跳转地址里读。GitHub API 每个 IP 每小时只给 60 次匿名查询，
+# 公司网络大家共用一个出口 IP，经常早就用完了（报 API rate limit exceeded），所以 API 只在跳转读不到时兜底。
+function Get-LatestTag {
+    try {
+        $req = [Net.HttpWebRequest]::Create((Gh "https://github.com/$Repo/releases/latest"))
+        $req.Method = "HEAD"; $req.AllowAutoRedirect = $false; $req.Timeout = 30000; $req.UserAgent = "kol-mail-installer"
+        $resp = $req.GetResponse()
+        try { $location = "$($resp.Headers['Location'])" } finally { $resp.Close() }
+        if ($location -match '/releases/tag/(v\d+\.\d+\.\d+)/?$') { return $Matches[1] }
+    } catch { }
+    try {
+        $rel = Invoke-RestMethod -Headers @{ Accept = "application/vnd.github+json" } (Gh "https://api.github.com/repos/$Repo/releases/latest")
+        if ("$($rel.tag_name)" -match '^v\d+\.\d+\.\d+$') { return "$($rel.tag_name)" }
+    } catch { }
+    throw "查不到 KOL Mail 的最新版本。多半是网络连不上 GitHub，换个网络（比如手机热点）再运行一次安装；还不行就把这个窗口截图发给维护者。"
+}
 
 # 邮箱密码用一个小窗口来问。控制台的隐藏输入在不少电脑上 Ctrl+V 和右键都粘贴不进去（只送进去一个控制字符），
 # 而邮箱密码长、乱，基本只能粘贴，同事就卡在这一步。窗口里的密码框可以正常粘贴。取消返回 $null。
@@ -209,12 +225,12 @@ try {
         $src = (Resolve-Path $Source).Path
     } else {
         if (-not $Repo) { $Repo = Ask "GitHub 仓库（owner/name）" }
-        $rel = Invoke-RestMethod -Headers @{ Accept = "application/vnd.github+json" } (Gh "https://api.github.com/repos/$Repo/releases/latest")
+        $tag = Get-LatestTag
         $zip = Join-Path $staging "src.zip"
-        Invoke-WebRequest -UseBasicParsing (Gh "https://codeload.github.com/$Repo/zip/refs/tags/$($rel.tag_name)") -OutFile $zip
+        Invoke-WebRequest -UseBasicParsing (Gh "https://codeload.github.com/$Repo/zip/refs/tags/$tag") -OutFile $zip
         Expand-Archive $zip (Join-Path $staging "x")
         $src = (Get-ChildItem (Join-Path $staging "x") -Directory | Select-Object -First 1).FullName
-        Say "  最新版 $($rel.tag_name)"
+        Say "  最新版 $tag"
     }
     New-Item -ItemType Directory -Force $App | Out-Null
     # data\ 是你的设置和缓存，永远不覆盖

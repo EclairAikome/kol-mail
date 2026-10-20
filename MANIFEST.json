@@ -4,14 +4,14 @@
   ".github/workflows/test.yml": "16fc10a49137f41f0f3ce5c042b222df206c873331784dade44cafaaa174c39d",
   ".gitignore": "fda225b90576b3ac12290237432cc59ce4344dd9beaafa95846bad849e9d735a",
   "README.md": "a220dd7cf8d85bc27892377ca6de4778f2051e4c14eade57a7fdf31585098457",
-  "VERSION": "1f930dd1f133c1f97a94fe3acb8db34372cf4c01ffdb2b3ff4ca72f9494121e9",
+  "VERSION": "71015c979ccb0fc8a0be7ca0ae83046ab045cdc2c8faa09fb2f0f7e440f9b4a6",
   "app.py": "741d94107d3f3aa7987bf01bf563407e06fa35841f8ee4b601675ac7c4c26442",
   "autoreply.example.json": "edb9dfc884b466773254b6dafc1618d0babd49ca4b7b052fe0879749b3e5e5d1",
   "autoreply.py": "06a44152a398d4678eb51cd33e679dfc4b5fa7f0a2c952b50d5dbfc7cb0f1376",
   "config.py": "03b060259df7bf6dac8083180a883e82f3eae52b604926c5308f3e0968480b47",
   "feedback.py": "e8f7995e323292f4d425f913beded70cf133453b2e1d6410e0819b30b189796c",
-  "install.ps1": "48638a1137f27dbb8388f416de121da7598dd4ad453c0da5e0395df9519df1d7",
-  "install.sh": "6be4bbf62dd9de6e2b7a19734983d2aa3008f859fc23dfe7263e6c5409ad46ce",
+  "install.ps1": "1516e8cf19daec3bd2c045d04393bebfcb2bbceb4557376852c3ad72c5efd8f1",
+  "install.sh": "71dd15a1e453a2ead9d961bb9619c1b153f20252b5ebac6f7a5adbdb426cc886",
   "koc.py": "2a0597f13138ac2ee7dbe34003c3ba1f03d8667f2993f57d2b83011ef7fb5eab",
   "llm.py": "83632ecb046f24c966543c6bc60191c4950f35b06f6b5dcc4534b54ea0fda01b",
   "mobile.py": "b33c658bc23149d6ff9edd6c93468f87759f6a7c00e31068dd1b075226ff10c9",
@@ -34,6 +34,7 @@
   "tests/conftest.py": "b148a759615439dca6abcab70d8f9353b21a138b6ecc33e66224d168030d3a4e",
   "tests/test_autoreply.py": "5590b3f1dd4a5f7d70e4b230bcbcdd5fa0849505a3c99cdfe547c076fe17cba6",
   "tests/test_commands.py": "7b4c9d00750b687f0b84a6a1d093d3e128a1fd1bcb2d23dcb72ec9764981eff7",
+  "tests/test_feedback.py": "358f78d7597c11165147bbf93a4803dec2b9ad4db2aed07146ea8cf342a14476",
   "tests/test_gsheet.py": "4cfe67cdf05c5fb8a9656501cb82cf650de60be4a0f9f0d5fc40dc7c48a13f67",
   "tests/test_koc.py": "7899057b9cac2b3255c1b58176d94b5b4d7281dd143699f356f9fc435ad5bc89",
   "tests/test_llm.py": "dc860783969cbec9e5086911a7739827f401e536c853ccdcbcbe4857ae7132cb",
@@ -43,10 +44,10 @@
   "tests/test_onboarding.py": "dc616bd4104cb9cfe1b2885813d7e48e6127c10eabb3e137b35468b73dd0e06d",
   "tests/test_outgoing.py": "bc06d4b3d07acd62b7e3cd40e424116fa9a7504949c916b9eac15ad0bd4e8825",
   "tests/test_replyflow.py": "070f6896e2c83d54494f59e40f7a83cc19f28fef4d4aade1b9844e62fd3c18f7",
-  "tests/test_updater.py": "5b77373891354e3d3273b81d939a1ba66bc66c1a456ee3eb615715dd3cd5c569",
+  "tests/test_updater.py": "96db06a3325b00f74b48bf4b5c7c1e76a138bcc614755727710a1f5d54adf32f",
   "tools/merge_settings.py": "d5fb6a54b46cf185e61184833697c6cf137b47416f812606a936a6f434ae243e",
   "tools/publish.py": "b125f29399e7bc1a6c2ec1d176b17159cc237a65925fa3fb63213169d655fc3d",
-  "updater.py": "a4e7a748e46071a8543eb6498397f50d625b211a04fa91c5e2daa1ef8b9b1af5"
+  "updater.py": "0c95084b5871fc5b71fcc6e7c46a321b23e0cc6d946c6ef8bf3bfa082c75b6f6"
  },
- "version": "0.2.0"
+ "version": "0.2.1"
 }
