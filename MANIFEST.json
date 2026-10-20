@@ -4,7 +4,7 @@
   ".github/workflows/test.yml": "16fc10a49137f41f0f3ce5c042b222df206c873331784dade44cafaaa174c39d",
   ".gitignore": "fda225b90576b3ac12290237432cc59ce4344dd9beaafa95846bad849e9d735a",
   "README.md": "a220dd7cf8d85bc27892377ca6de4778f2051e4c14eade57a7fdf31585098457",
-  "VERSION": "998f6b887ed7a6ef44e84210d0237b715bed42ea7254f48dc418afec0a484103",
+  "VERSION": "3ab94c04d24986f3af288ba1cda2c0bbddbc5a89dff097182805f54578e1ea75",
   "app.py": "741d94107d3f3aa7987bf01bf563407e06fa35841f8ee4b601675ac7c4c26442",
   "autoreply.example.json": "edb9dfc884b466773254b6dafc1618d0babd49ca4b7b052fe0879749b3e5e5d1",
   "autoreply.py": "06a44152a398d4678eb51cd33e679dfc4b5fa7f0a2c952b50d5dbfc7cb0f1376",
@@ -13,7 +13,7 @@
   "install.ps1": "589464a9e066f1a4380f8484b528e3f4fb5fe02deb5f2aa05a9c2aebc4a3b012",
   "install.sh": "71dd15a1e453a2ead9d961bb9619c1b153f20252b5ebac6f7a5adbdb426cc886",
   "koc.py": "2a0597f13138ac2ee7dbe34003c3ba1f03d8667f2993f57d2b83011ef7fb5eab",
-  "llm.py": "83632ecb046f24c966543c6bc60191c4950f35b06f6b5dcc4534b54ea0fda01b",
+  "llm.py": "7d578f107191ae1f2aa39f8ee04daf0a6ad45dcd8cc6fa4bad5363ec47fb53c9",
   "mobile.py": "b33c658bc23149d6ff9edd6c93468f87759f6a7c00e31068dd1b075226ff10c9",
   "onboarding.py": "9369fc3ad8f33875b276b8681791363737afca2406748399ef0ce9e148ee1fe6",
   "outgoing.py": "07011200a1bb5ee4e96d61fcd8f48e272c04d091a7fdf3a56a7e169465fbc1e8",
@@ -37,7 +37,7 @@
   "tests/test_feedback.py": "358f78d7597c11165147bbf93a4803dec2b9ad4db2aed07146ea8cf342a14476",
   "tests/test_gsheet.py": "4cfe67cdf05c5fb8a9656501cb82cf650de60be4a0f9f0d5fc40dc7c48a13f67",
   "tests/test_koc.py": "7899057b9cac2b3255c1b58176d94b5b4d7281dd143699f356f9fc435ad5bc89",
-  "tests/test_llm.py": "dc860783969cbec9e5086911a7739827f401e536c853ccdcbcbe4857ae7132cb",
+  "tests/test_llm.py": "493c83c832f24e547527ec7fa42c0cda98138ed6a36aa947be13306f5c46d28c",
   "tests/test_macos.py": "0c036c02df825b87cfc5bf9cdeb682873e8d1bee92f6944600a09c662f0cfb4d",
   "tests/test_mobile.py": "c44a802e13ef413cf9eb8268ce6e6a8c0ac06b5824f88f2fccdc26911dabf046",
   "tests/test_offhours_switch.py": "ae9b8dd2cf8e3a9e84e68b5136f6916ae2a815263dc35c542245fbdd53aedfb9",
@@ -49,5 +49,5 @@
   "tools/publish.py": "b125f29399e7bc1a6c2ec1d176b17159cc237a65925fa3fb63213169d655fc3d",
   "updater.py": "0c95084b5871fc5b71fcc6e7c46a321b23e0cc6d946c6ef8bf3bfa082c75b6f6"
  },
- "version": "0.2.2"
+ "version": "0.2.3"
 }

@@ -66,3 +66,78 @@ def test_an_old_claude_code_counts_as_unavailable():
 def test_other_errors_pass_through_unchanged():
     assert llm.explain("AI 没有按格式返回结果", "claude") == "AI 没有按格式返回结果"
     assert llm.explain("", "codemaker") == ""
+
+
+def test_codemaker_runs_without_the_agent_flag_and_with_tools_off(tmp_path, monkeypatch):
+    """CodeMaker 1.15.x crashes on `run --agent` ("No context found for instance"): the no-tools agent replaces
+    the default one instead, and git inside CodeMaker may never pop up a login window."""
+    import asyncio
+    import json
+    seen = {}
+
+    class Proc:
+        returncode = 0
+
+        async def communicate(self, data):
+            seen["stdin"] = data
+            return b'{"type":"text","sessionID":"s1","part":{"text":"{\\"ok\\": \\"ok\\"}"}}\n', b""
+
+        def kill(self):
+            pass
+
+    async def fake_exec(*args, cwd=None, env=None, **kw):
+        if args[1] == "session":  # the clean-up call after the run
+            return Proc()
+        seen["args"], seen["env"] = list(args), env
+        seen["config"] = json.loads((Path(cwd) / "codemaker.json").read_text(encoding="utf-8"))
+        return Proc()
+
+    async def model_id(binary, model):
+        return "codemaker/" + model
+
+    monkeypatch.setattr(llm.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(llm, "codemaker_model_id", model_id)
+    schema = {"type": "object", "properties": {"ok": {"type": "string"}}, "required": ["ok"]}
+    out = asyncio.run(llm._codemaker("cm.exe", "gpt-5.6-terra", "SYSTEM", "ping", schema, tmp_path, 30))
+    assert out == {"ok": "ok"} and seen["stdin"] == b"ping"
+    assert "--agent" not in seen["args"] and "--pure" in seen["args"]
+    cfg = seen["config"]
+    assert cfg["default_agent"] == "build" and list(cfg["agent"]) == ["build"]
+    build = cfg["agent"]["build"]
+    assert build["prompt"].startswith("SYSTEM") and build["tools"] == {"*": False}
+    assert build["permission"] == {"edit": "deny", "bash": "deny", "webfetch": "deny"}
+    assert seen["env"]["GIT_TERMINAL_PROMPT"] == "0" and seen["env"]["GCM_INTERACTIVE"] == "never"
+    assert "PATH" in seen["env"] or "Path" in seen["env"]
+
+
+def test_old_codemaker_crash_says_to_upgrade():
+    msg = llm.explain("Error: Unexpected error\nNo context found for instance", "codemaker")
+    assert "codemaker upgrade" in msg
+
+
+def test_old_codemaker_crash_with_a_stack_trace_after_it_still_says_to_upgrade(tmp_path, monkeypatch):
+    import asyncio
+
+    class Proc:
+        returncode = 1
+
+        async def communicate(self, data):
+            return b"", b"Error: Unexpected error\nNo context found for instance\n    at runLoop (B:/~BUN/root/x.js:25:2045)\n"
+
+        def kill(self):
+            pass
+
+    async def fake_exec(*args, **kw):
+        return Proc()
+
+    async def model_id(binary, model):
+        return "codemaker/" + model
+
+    monkeypatch.setattr(llm.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(llm, "codemaker_model_id", model_id)
+    try:
+        asyncio.run(llm._codemaker("cm.exe", "gpt-5.6-terra", "S", "ping", {"type": "object"}, tmp_path, 30))
+    except llm.LLMError as e:
+        assert "codemaker upgrade" in str(e)
+    else:
+        raise AssertionError("a crash must raise")

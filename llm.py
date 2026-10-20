@@ -37,13 +37,16 @@ LOGIN_HINT = {
     "claude": "Claude Code 没登录或登录已过期：打开 PowerShell 运行 claude，输入 /login 登录，然后在页面上点“重新检测 AI”",
     "codemaker": "CodeMaker 没登录或登录已过期：打开 PowerShell 运行 codemaker auth login，然后在页面上点“重新检测 AI”",
 }
-OLD_CLI = re.compile(r"or newer is required", re.IGNORECASE)
+OLD_CLI = re.compile(r"or newer is required|No context found for instance", re.IGNORECASE)  # the second: old CodeMaker
 LOGGED_OUT = re.compile(r"authenticat|API Error: 401|oauth (access )?token|not logged in|\blog ?in\b|/login\b|"
                         r"unauthori[sz]ed", re.IGNORECASE)
 OLD_CLI_HINT = {
     "claude": "Claude Code 版本太旧，不支持现在用的模型：打开 PowerShell 运行 claude update（不行就重新运行 KOL Mail 安装命令）",
-    "codemaker": "CodeMaker 版本太旧，不支持现在用的模型：按公司指引更新 CodeMaker",
+    "codemaker": "CodeMaker 版本太旧：打开 PowerShell 运行 codemaker upgrade，更新好后在页面上点“重新检测 AI”（不行就按公司指引重装 CodeMaker）",
 }
+# CodeMaker may run git in the background (plugins, skill repositories): it must fail quietly, never pop up a
+# Git Credential Manager window in front of a colleague.
+NO_GIT_PROMPTS = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
 QUOTA = re.compile(r"quota|credit|rate limit|usage limit|overloaded|额度", re.IGNORECASE)
 # Context the CLIs inject into the user turn. A model that copies its input (a lazy "translation") copies these too.
 INJECTED_TAG = re.compile(r"<(system-reminder|ip_reminder|user-prompt-submit-hook|env|context)\b[^>]*>.*?</\1>\s*",
@@ -326,6 +329,7 @@ async def codemaker_model_id(binary: str, model: str) -> str:
     if model in _codemaker_ids:
         return _codemaker_ids[model]
     proc = await asyncio.create_subprocess_exec(binary, "models", stdin=asyncio.subprocess.DEVNULL,
+                                                env={**os.environ, **NO_GIT_PROMPTS},
                                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     out, err = await _communicate(proc, b"", 120, "CodeMaker")
     ids = match_models(out.decode("utf-8", "replace"), model)
@@ -343,12 +347,15 @@ async def _codemaker(binary: str, model: str, system_prompt: str, user_text: str
                      timeout: int) -> dict:
     model = await codemaker_model_id(binary, model)
     # The agent (system prompt, no tools) is defined in a codemaker.json of a fresh folder per call, so parallel
-    # calls never share a prompt and nothing is left in a project folder.
+    # calls never share a prompt and nothing is left in a project folder. It replaces the default agent "build"
+    # instead of being picked with --agent: CodeMaker before 0.4 (1.15.x) crashes on run --agent with
+    # "No context found for instance", and colleagues do not always update CodeMaker.
     run_dir = workdir / f"cm-{secrets.token_hex(6)}"
     run_dir.mkdir(parents=True)
     agent = {
         "$schema": "https://opencode.ai/config.json",
-        "agent": {"kolmail": {
+        "default_agent": "build",  # even when the colleague's own config names another default
+        "agent": {"build": {
             "mode": "primary",
             "description": "kol-mail text task, no tools",
             "prompt": system_prompt + CODEMAKER_FORMAT.format(schema=json.dumps(schema, ensure_ascii=False)),
@@ -360,8 +367,8 @@ async def _codemaker(binary: str, model: str, system_prompt: str, user_text: str
     session_id = None
     try:
         proc = await asyncio.create_subprocess_exec(
-            binary, "run", "--pure", "--agent", "kolmail", "-m", model, "--format", "json", "--dir", str(run_dir),
-            cwd=str(run_dir),
+            binary, "run", "--pure", "-m", model, "--format", "json", "--dir", str(run_dir),
+            cwd=str(run_dir), env={**os.environ, **NO_GIT_PROMPTS},
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         out, err = await _communicate(proc, user_text.encode("utf-8"), timeout, "CodeMaker")
@@ -383,7 +390,8 @@ async def _codemaker(binary: str, model: str, system_prompt: str, user_text: str
             _fail(f"CodeMaker 调用失败：{errors[0][:300]}", "codemaker")
         if not texts:
             detail = (err or b"").decode("utf-8", "replace").strip().splitlines()
-            _fail(detail[-1][:300] if detail else "CodeMaker 没有返回内容", "codemaker")
+            known = [line for line in detail if OLD_CLI.search(line)]  # a crash may end with a stack frame
+            _fail((known or detail)[-1][:300] if detail else "CodeMaker 没有返回内容", "codemaker")
         return parse_json_text(texts[-1])
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
@@ -394,7 +402,7 @@ async def _codemaker(binary: str, model: str, system_prompt: str, user_text: str
 async def _forget(binary: str, session_id: str):
     try:
         proc = await asyncio.create_subprocess_exec(
-            binary, "session", "delete", session_id, stdin=asyncio.subprocess.DEVNULL,
+            binary, "session", "delete", session_id, stdin=asyncio.subprocess.DEVNULL, env={**os.environ, **NO_GIT_PROMPTS},
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         await asyncio.wait_for(proc.wait(), 60)
     except Exception:  # noqa: BLE001  housekeeping only
