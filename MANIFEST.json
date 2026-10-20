@@ -4,16 +4,16 @@
   ".github/workflows/test.yml": "16fc10a49137f41f0f3ce5c042b222df206c873331784dade44cafaaa174c39d",
   ".gitignore": "fda225b90576b3ac12290237432cc59ce4344dd9beaafa95846bad849e9d735a",
   "README.md": "a220dd7cf8d85bc27892377ca6de4778f2051e4c14eade57a7fdf31585098457",
-  "VERSION": "d915cc95d6ca8f47ae297713ed46d4e5c5d99ddd29fc3c61e263bdf305f2b5b0",
+  "VERSION": "79e3f22ca37c7fdf4c29ae3648d6b008c3cb6547260a453409275470919dc674",
   "app.py": "dbc98ff7b22e40030379cb1d8aeb2a748a137965af2d15ef15b7e6dad7f2df36",
   "autoreply.example.json": "edb9dfc884b466773254b6dafc1618d0babd49ca4b7b052fe0879749b3e5e5d1",
   "autoreply.py": "06a44152a398d4678eb51cd33e679dfc4b5fa7f0a2c952b50d5dbfc7cb0f1376",
   "config.py": "03b060259df7bf6dac8083180a883e82f3eae52b604926c5308f3e0968480b47",
   "feedback.py": "e8f7995e323292f4d425f913beded70cf133453b2e1d6410e0819b30b189796c",
-  "install.ps1": "d2b57b1ab753136748e9003c9d54e7f3f3eb626b305ad5cd7ab5daf5c9622b66",
+  "install.ps1": "b2bcc8d4b50ee75c9f82ebe71a7c1188b9cfbf21edac93dfea258ead56a9e6a7",
   "install.sh": "f12d5b480cf72cf502c030fee0718b2664f9cda58a2afcffb242a32cc19e1e78",
   "koc.py": "2a0597f13138ac2ee7dbe34003c3ba1f03d8667f2993f57d2b83011ef7fb5eab",
-  "llm.py": "7d578f107191ae1f2aa39f8ee04daf0a6ad45dcd8cc6fa4bad5363ec47fb53c9",
+  "llm.py": "52197fcaedb22a3035a496a7bcca767631f7511cf86765e439e3e85187ec828e",
   "mobile.py": "b33c658bc23149d6ff9edd6c93468f87759f6a7c00e31068dd1b075226ff10c9",
   "onboarding.py": "9369fc3ad8f33875b276b8681791363737afca2406748399ef0ce9e148ee1fe6",
   "outgoing.py": "07011200a1bb5ee4e96d61fcd8f48e272c04d091a7fdf3a56a7e169465fbc1e8",
@@ -39,7 +39,7 @@
   "tests/test_feedback.py": "358f78d7597c11165147bbf93a4803dec2b9ad4db2aed07146ea8cf342a14476",
   "tests/test_gsheet.py": "4cfe67cdf05c5fb8a9656501cb82cf650de60be4a0f9f0d5fc40dc7c48a13f67",
   "tests/test_koc.py": "7899057b9cac2b3255c1b58176d94b5b4d7281dd143699f356f9fc435ad5bc89",
-  "tests/test_llm.py": "493c83c832f24e547527ec7fa42c0cda98138ed6a36aa947be13306f5c46d28c",
+  "tests/test_llm.py": "30138af42b30d8307d4700bfd32ee00eb4978c74910df51024ba92e81a887c06",
   "tests/test_macexcel.py": "818ee28431dd43af20903ebabc0e02794aff365ea85345b6852bfe20f7aabcc4",
   "tests/test_macos.py": "0c036c02df825b87cfc5bf9cdeb682873e8d1bee92f6944600a09c662f0cfb4d",
   "tests/test_mobile.py": "c44a802e13ef413cf9eb8268ce6e6a8c0ac06b5824f88f2fccdc26911dabf046",
@@ -55,5 +55,5 @@
   "tools/publish.py": "b125f29399e7bc1a6c2ec1d176b17159cc237a65925fa3fb63213169d655fc3d",
   "updater.py": "0c95084b5871fc5b71fcc6e7c46a321b23e0cc6d946c6ef8bf3bfa082c75b6f6"
  },
- "version": "0.3.0"
+ "version": "0.3.1"
 }

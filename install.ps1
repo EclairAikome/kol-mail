@@ -360,8 +360,16 @@ $oldModels = (Has $old "llm") -and (Has $old.llm "models") -and @($old.llm.model
 $pinCmModels = ($backend -eq "codemaker") -and -not $appDefaultsCm -and -not $oldModels
 $AiCheck = Join-Path $env:TEMP ("kolmail-aicheck-" + [guid]::NewGuid().ToString("N") + ".py")
 $aiCheckCode = @'
-import asyncio, json, subprocess, sys, tempfile
+import asyncio, json, os, subprocess, sys, tempfile, threading
 from pathlib import Path
+
+
+def watchdog():  # whatever hangs, the installer gets an answer and the colleague can retry or skip
+    print(json.dumps({"errors": [["error", "检测超过 11 分钟没有结束"]]}), flush=True)  # ASCII escapes, like below
+    os._exit(1)
+
+
+threading.Timer(660, watchdog).start()  # the slowest honest run: two model lookups (120 s) and two calls (180 s)
 
 app, backend, mode = sys.argv[1], sys.argv[2], sys.argv[3]
 claude_bin = sys.argv[4] if len(sys.argv) > 4 else ""
@@ -395,8 +403,10 @@ for role in llm.ROLES:
         out["errors"].append(["unavailable", f"{s.models[role]}: {e}"])
     except Exception as e:
         out["errors"].append(["error", f"{s.models[role]}: {e}"])
-print(json.dumps(out))
-sys.exit(0 if not out["errors"] else 2 if any(k == "unavailable" for k, _ in out["errors"]) else 1)
+print(json.dumps(out), flush=True)
+# Leave at once: interpreter shutdown must never be what keeps the installer waiting (it once hung for good in
+# asyncio's clean-up on Python 3.12 for Windows).
+os._exit(0 if not out["errors"] else 2 if any(k == "unavailable" for k, _ in out["errors"]) else 1)
 '@
 
 function Invoke-AiCheck($mode) {

@@ -20,6 +20,7 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -396,14 +397,16 @@ async def _codemaker(binary: str, model: str, system_prompt: str, user_text: str
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
         if session_id:  # CodeMaker keeps every session locally; mail text should not pile up there
-            asyncio.ensure_future(_forget(binary, session_id))
+            _forget(binary, session_id)
 
 
-async def _forget(binary: str, session_id: str):
+def _forget(binary: str, session_id: str):
+    """Delete the session in a process of its own, never as a task of the event loop: the installer's AI check
+    ends its asyncio.run right after the call, and cancelling a task that is starting or waiting for a subprocess
+    hangs asyncio.run for good on Python 3.12 for Windows (seen on a colleague's PC)."""
     try:
-        proc = await asyncio.create_subprocess_exec(
-            binary, "session", "delete", session_id, stdin=asyncio.subprocess.DEVNULL, env={**os.environ, **NO_GIT_PROMPTS},
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-        await asyncio.wait_for(proc.wait(), 60)
-    except Exception:  # noqa: BLE001  housekeeping only
+        subprocess.Popen([binary, "session", "delete", session_id], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={**os.environ, **NO_GIT_PROMPTS},
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except OSError:  # housekeeping only
         pass

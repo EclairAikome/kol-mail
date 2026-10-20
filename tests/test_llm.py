@@ -86,8 +86,6 @@ def test_codemaker_runs_without_the_agent_flag_and_with_tools_off(tmp_path, monk
             pass
 
     async def fake_exec(*args, cwd=None, env=None, **kw):
-        if args[1] == "session":  # the clean-up call after the run
-            return Proc()
         seen["args"], seen["env"] = list(args), env
         seen["config"] = json.loads((Path(cwd) / "codemaker.json").read_text(encoding="utf-8"))
         return Proc()
@@ -97,8 +95,20 @@ def test_codemaker_runs_without_the_agent_flag_and_with_tools_off(tmp_path, monk
 
     monkeypatch.setattr(llm.asyncio, "create_subprocess_exec", fake_exec)
     monkeypatch.setattr(llm, "codemaker_model_id", model_id)
+    monkeypatch.setattr(llm.subprocess, "Popen", lambda args, **kw: seen.setdefault("forget", (args, kw)))
     schema = {"type": "object", "properties": {"ok": {"type": "string"}}, "required": ["ok"]}
-    out = asyncio.run(llm._codemaker("cm.exe", "gpt-5.6-terra", "SYSTEM", "ping", schema, tmp_path, 30))
+
+    async def call():
+        result = await llm._codemaker("cm.exe", "gpt-5.6-terra", "SYSTEM", "ping", schema, tmp_path, 30)
+        # Nothing may be left running in the loop: asyncio.run cancelling a task that waits on a subprocess
+        # hangs for good on Python 3.12 for Windows, which froze the installer's AI check.
+        seen["left"] = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        return result
+    out = asyncio.run(call())
+    assert seen["left"] == []
+    forget_args, forget_kw = seen["forget"]
+    assert forget_args == ["cm.exe", "session", "delete", "s1"]
+    assert forget_kw["stdout"] == llm.subprocess.DEVNULL and forget_kw["env"]["GCM_INTERACTIVE"] == "never"
     assert out == {"ok": "ok"} and seen["stdin"] == b"ping"
     assert "--agent" not in seen["args"] and "--pure" in seen["args"]
     cfg = seen["config"]
