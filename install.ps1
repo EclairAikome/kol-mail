@@ -109,16 +109,46 @@ function Read-MailPassword($email, $note = "") {
     }
 }
 
-# 把密码（每行一个）经标准输入交给邮件组件，不经过命令行参数。两头都统一成 UTF-8，密码里有非英文字符也不会变样：
-# PowerShell 5.1 默认按 ASCII 写管道（非英文字符变成 ?），而且只认脚本作用域的 $OutputEncoding，函数里的局部变量无效；
-# Python 默认按系统代码页读管道。
+# 按 Windows 命令行的规则给参数加引号（PowerShell 5.1 的 ProcessStartInfo 只收一整串参数）
+function Join-NativeArgs([string[]]$items) {
+    ($items | ForEach-Object {
+        if ($_ -and $_ -notmatch '[\s"]') { $_ } else { '"' + (($_ -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"' }
+    }) -join " "
+}
+
+# 把密码（每行一个）经标准输入交给邮件组件，不经过命令行参数，两头都按 UTF-8（不带 BOM）。以前交给 PowerShell 的管道写，
+# 5.1 不认改过的 $OutputEncoding，非英文字符变成 ?；.NET 启动子进程时还会按控制台输入编码先写一个 BOM（U+FEFF），
+# 在 chcp 65001 的窗口里那就是带 BOM 的 UTF-8，第一行密码开头多一个看不见的字符。存进去的密码和真密码对不上，
+# 服务器只会回“Authentication or provider policy rejected”。所以这里临时把控制台输入编码换成不带 BOM 的 UTF-8，
+# 自己写标准输入。
 function Invoke-McpWithSecret([string[]]$secrets, [string[]]$arguments) {
-    $savedIo, $savedOut = $env:PYTHONIOENCODING, $script:OutputEncoding
-    $env:PYTHONIOENCODING = "utf-8"
-    $script:OutputEncoding = New-Object Text.UTF8Encoding $false
-    try { return Run-Native { $secrets | & $Mcp @arguments } } finally {
-        $env:PYTHONIOENCODING = $savedIo
-        $script:OutputEncoding = $savedOut
+    $utf8 = New-Object Text.UTF8Encoding $false
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $Mcp
+    $psi.Arguments = Join-NativeArgs $arguments
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = $utf8
+    $psi.StandardErrorEncoding = $utf8
+    $psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8"  # Python 默认按系统代码页读管道
+    $savedIn = [Console]::InputEncoding
+    try {
+        [Console]::InputEncoding = $utf8
+        $p = [Diagnostics.Process]::Start($psi)
+    } finally {
+        [Console]::InputEncoding = $savedIn
+    }
+    try {
+        $out, $err = $p.StandardOutput.ReadToEndAsync(), $p.StandardError.ReadToEndAsync()
+        $stdin = New-Object IO.StreamWriter($p.StandardInput.BaseStream, $utf8)
+        try { foreach ($s in $secrets) { $stdin.Write("$s`n") } } finally { $stdin.Close() }
+        $p.WaitForExit()
+        return @{ Code = $p.ExitCode; Out = ((@($out.Result, $err.Result) | Where-Object { $_ }) -join "`n").Trim() }
+    } finally {
+        $p.Dispose()
     }
 }
 
