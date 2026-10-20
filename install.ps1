@@ -544,16 +544,40 @@ if (-not ((Has $old "paths") -and (Has $old.paths "koc_knowledge"))) {
     if (-not (Test-Path $knowledge)) { Copy-Item (Join-Path $App "templates\KOC机器人知识.example.md") $knowledge }
     $answers.paths.koc_knowledge = $knowledge
 }
+# KOL 总表：同事自己的 xlsx，格式各不相同。这里只记下文件；第一次打开页面时请同事核对各列对应什么，
+# 对好之前不往表里写。新建的表是程序自己的简单模板，列对应直接定好。
 if (-not ((Has $old "paths") -and (Has $old.paths "sheet_workbook"))) {
-    $workbook = Ask "KOL 总表（xlsx）的完整路径，不用总表就回车" ""
-    if ($workbook -and -not (Test-Path $workbook)) {
-        Say "  总表不存在，生成一张空表（需要本机装有 Excel）…"
-        $r = Run-Native { & $Py (Join-Path $App "sheet\build.py") --out $workbook }
-        if ($r.Code -ne 0) { Warn "  空表没生成成功，KOL 总表联动先关闭：$($r.Out)"; $workbook = "" }
+    Say "  KOL 总表：连上你自己的 xlsx 总表后，打开邮件会显示 KOL 的频道链接，收发信的进展会自动记进表里（只写对得上的列，不改你的格式）。"
+    $workbook = ""
+    while ($true) {
+        $ans = Ask "总表文件的完整路径（可以把文件拖进这个窗口），输入 new 新建一张，不用就直接回车（以后在页面上方的 KOL 总表按钮里也能接）" ""
+        $ans = "$ans".Trim().Trim('"').Trim("'")
+        if (-not $ans) { break }
+        $create = $ans -eq "new"
+        if ($create) { $ans = Join-Path ([Environment]::GetFolderPath("MyDocuments")) "KOL总表.xlsx" }
+        if ($ans -notmatch '\.xlsx$') { Warn "  只支持 .xlsx 格式（.xls、.csv 请先在 Excel 里另存为 .xlsx）"; continue }
+        if (Test-Path -LiteralPath $ans) {
+            if ($create) { Warn "  $ans 已经有文件了，直接用它" }
+            $workbook = $ans
+            Say "  第一次打开页面时会请你核对表里各列对应什么，对好之后才开始同步。"
+            break
+        }
+        if (-not $create -and (Ask "  这个文件不存在。输入 y 在这里新建一张，直接回车重新输入" "") -ne "y") { continue }
+        $r = Run-Native { & $Py -I (Join-Path $App "sheet\usersheet.py") create --path $ans }
+        $line = (($r.Out -split "`n") | Where-Object { $_.Trim().StartsWith("{") } | Select-Object -Last 1)
+        $made = $null
+        if ($line) { try { $made = $line | ConvertFrom-Json } catch { } }
+        if ($r.Code -eq 0 -and $made -and $made.map) {
+            $workbook = $made.path
+            $answers.sheet_map = $made.map
+            Say "  新建了 $workbook，已经连上"
+            break
+        }
+        Warn "  新建失败：$(if ($made -and $made.error) { $made.error } else { $r.Out })"
     }
     if ($workbook) {
         $answers.paths.sheet_workbook = $workbook
-        $answers.paths.sheet_tool = Join-Path $App "sheet\kol.py"
+        $answers.paths.sheet_tool = Join-Path $App "sheet\usersheet.py"
         $answers.paths.sheet_python = $Py
     }
 }

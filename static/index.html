@@ -139,6 +139,17 @@
   dialog.small:not([open]) { display: none; }
   dialog.small { width: min(560px, 92vw); border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); }
   dialog.small h3 { margin: 0 0 8px; font-size: 15px; }
+  #version { cursor: pointer; border-bottom: 1px dotted var(--muted); }
+  #version:hover, #version:focus-visible { color: var(--accent); border-bottom-color: var(--accent); outline: none; }
+  #version.busy { cursor: progress; }
+  #sheetDlg { width: min(680px, 94vw); }
+  #sheetDlg input[type=text], #sheetDlg input[type=number], #sheetDlg select { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+  #sheetPath { flex: 1; min-width: 240px; }
+  #sheetMap { border-collapse: collapse; width: 100%; font-size: 13px; }
+  #sheetMap td { padding: 4px 6px; border-top: 1px solid var(--line); vertical-align: middle; }
+  #sheetMap td:first-child { white-space: nowrap; font-weight: 600; }
+  #sheetMap td.sample { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+  #sheetMap select { width: 100%; }
   dialog.small .row2 { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
   dialog.small input[type=password] { flex: 1; font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; min-width: 200px; }
   .code { font: 600 20px/1.2 Consolas, monospace; letter-spacing: 3px; color: var(--accent); }
@@ -167,9 +178,10 @@
   <button class="act" id="kocBtn" type="button">KOC 机器人</button>
   <button class="act" id="mobileBtn" type="button">手机审稿</button>
   <button class="act" id="setupBtn" type="button" title="签名和我的谈判方式">设置</button>
+  <button class="act" id="sheetBtn" type="button" title="连接你自己的 KOL 总表">KOL 总表</button>
   <span id="status">连接中…</span>
   <button class="act" id="aiCheckBtn" type="button" hidden>重新检测 AI</button>
-  <span class="note" id="version"></span>
+  <span class="note" id="version" role="button" tabindex="0" title="点一下马上检查更新"></span>
 </header>
 <dialog id="kocDlg">
   <div class="kochead">
@@ -215,6 +227,27 @@
   <p class="note" id="setupOffhoursNote" style="margin:0">不在工作时间（周一到周五 10:00 到 18:00，GMT+8）收到的 KOL 邮件和 Telegram 私聊，自动回一段固定的“我现在下班了，回来再回复你”。默认关，需要时（比如休长假）再打开。</p>
   <div class="row2"><button class="act primary" id="setupSave" type="button">保存</button>
     <button class="act" id="setupClose" type="button">稍后再说</button><span class="note" id="setupNote"></span></div>
+</dialog>
+<dialog id="sheetDlg" class="small">
+  <h3>KOL 总表</h3>
+  <p class="note">连上以后，打开 KOL 的邮件会显示表里记的频道链接；每收到或发出一封 KOL 邮件，会把最近联系时间、轮到谁回和一句话进展写进你的表。只写下面对上的列，不加列、不加工作表、不改你的格式；格子里是你自己写的字不会被覆盖，只改空格子和程序自己写过的格子。表里还没有的 KOL 会在下面第一个整行都空的地方加一行，格式照抄上一行。</p>
+  <div class="note" id="sheetState"></div>
+  <div class="row2"><input type="text" id="sheetPath" placeholder="总表文件的完整路径（.xlsx），也可以点右边的按钮选" autocomplete="off">
+    <button class="act" id="sheetPick" type="button">选择文件…</button>
+    <button class="act" id="sheetRead" type="button">读取</button>
+    <button class="act" id="sheetNew" type="button">新建一张</button></div>
+  <div id="sheetMapBox" hidden>
+    <div class="row2"><label>工作表 <select id="sheetSheet"></select></label>
+      <label>表头在第 <input type="number" id="sheetHeaderRow" min="1" max="50" style="width:4.5em"> 行</label>
+      <span class="note" id="sheetRows"></span></div>
+    <p class="note" style="margin:4px 0">核对一下每一项对应你表里的哪一列。“邮箱”必须对上；没有的项选“不同步”。</p>
+    <table id="sheetMap"></table>
+  </div>
+  <div class="row2"><button class="act primary" id="sheetSave" type="button">保存</button>
+    <button class="act" id="sheetCheck" type="button">测试读取</button>
+    <button class="act" id="sheetUnlink" type="button">断开</button>
+    <button class="act" id="sheetClose" type="button">关闭</button></div>
+  <div class="note" id="sheetNote"></div>
 </dialog>
 <dialog id="fbDlg" class="small">
   <h3>匿名反馈</h3>
@@ -341,6 +374,10 @@ async function loadStatus() {
     sb.classList.toggle("human", !!s.setup_needed);
     sb.title = s.setup_needed ? "签名和谈判方式还没填完，点这里填" : "签名和我的谈判方式";
     if (s.setup_needed && !st.setupOffered && !setupSnoozed()) { st.setupOffered = true; openSetup().catch(showError); }
+    const shb = $("#sheetBtn"), needMap = !!(s.sheet && s.sheet.needs_map);
+    shb.classList.toggle("human", needMap);
+    shb.title = needMap ? "总表已选好但列还没对应，同步没开始，点这里对应" : "连接你自己的 KOL 总表";
+    if (needMap && !s.setup_needed && !st.sheetOffered && !$("#setupDlg").open) { st.sheetOffered = true; openSheet().catch(showError); }
     const fb = $("#fbBtn");
     fb.disabled = !s.feedback_ready;
     fb.title = s.feedback_ready ? "" : "反馈地址还没配置（安装命令里缺 -Feedback），请直接联系维护者";
@@ -1172,12 +1209,20 @@ function renderOutAtts(ctx) {
   }
 }
 
-// ---------------------------------------------------------------- self-update: checked on the first open of the day
-async function checkUpdate() {
-  let u;
-  try { u = await post("/api/update", {}); } catch (e) { return; }
+// ---------------------------------------------------------------- self-update: checked on the first open of the day,
+// and at once when the version number is clicked
+async function checkUpdate(force = false) {
   const el = $("#version");
+  if (el.classList.contains("busy")) return;
+  let u;
+  if (force) { el.classList.add("busy"); el.textContent = "正在检查更新…"; }
+  try { u = await post("/api/update", force ? { force: true } : {}); }
+  catch (e) {
+    if (force) { el.classList.remove("busy"); el.textContent = "检查更新失败"; el.title = e.message + "（点一下再试）"; }
+    return;
+  } finally { if (u) el.classList.remove("busy"); }
   el.textContent = "v" + (u.current || "?");
+  el.title = "点一下马上检查更新";
   if (u.state === "restarting") {
     el.textContent = `已更新到 v${u.latest}，正在重启…`;
     const until = Date.now() + 120000;
@@ -1187,12 +1232,21 @@ async function checkUpdate() {
     };
     setTimeout(wait, 8000);
   } else if (u.state === "error") {
-    el.title = "检查更新失败（明天再试）：" + u.error;
+    el.title = "检查更新失败：" + u.error + "（点一下再试）";
+    if (force) el.textContent = `v${u.current || "?"} · 检查更新失败`;
+  } else if (u.state === "disabled") {
+    el.title = u.dev_copy ? "这是开发副本，不自动更新" : "没有设置更新来源，不能自动更新";
+    if (force) el.textContent = `v${u.current || "?"} · ${u.dev_copy ? "开发副本不自动更新" : "没有设置更新来源"}`;
+  } else if (u.state === "checking") {
+    if (force) el.textContent = `v${u.current || "?"} · 正在检查，稍等再点`;
   } else if (u.latest) {
-    el.title = u.state === "current" ? "已是最新版" : "";
+    el.title = (u.state === "current" ? "已是最新版。" : "") + "点一下马上检查更新";
+    if (force && u.state === "current") el.textContent = `v${u.current} · 已是最新版`;
   }
 }
 checkUpdate();
+$("#version").onclick = () => checkUpdate(true);
+$("#version").onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); checkUpdate(true); } };
 
 // ---------------------------------------------------------------- phone drafts, phone-review settings, feedback
 async function phoneDraft(ctx) {
@@ -1285,6 +1339,128 @@ $("#setupSave").onclick = safe(async () => {
   catch (e) { note.className = "note err"; note.textContent = e.message; }
   finally { $("#setupSave").disabled = false; }
 });
+// ---------------------------------------------------------------- KOL 总表: link a colleague's own sheet
+const SHEET_FIELD_HINT = { email: "必须", name: "新 KOL 加行时填", channel: "邮件里显示的频道链接；只填空格子", last_contact: "写日期时间",
+  owner: "轮到我方 / 对方，沿用表里原有的叫法；格子里写的是别的字（比如人名）就不改", summary: "一句话进展；只改空格子和程序写过的格子" };
+function sheetNote(text, err) { const n = $("#sheetNote"); n.className = err ? "note err" : "note"; n.textContent = text || ""; }
+function sheetBusy(on) { for (const id of ["sheetPick", "sheetRead", "sheetNew", "sheetSave", "sheetCheck", "sheetUnlink"]) $("#" + id).disabled = on; }
+function showSheetState(info) {
+  st.sheetInfo = info;
+  const el = $("#sheetState"), legacy = !!info.owner_fixed;
+  let text = legacy ? "这台电脑用的是固定格式的总表（kol.py），在这里不能改。"
+    : info.mode === "legacy" ? `现在用的是旧的固定格式同步（kol.py）${info.path ? "：" + info.path : ""}。重新选表、对应好列并保存后，会改用按列对应的同步。`
+    : !info.path ? "还没有连接总表。"
+    : !info.exists ? `连接的总表找不到了：${info.path}（被移动或改名了？重新选一下）`
+    : info.needs_map ? `已选 ${info.path}，还没对应好列，同步没有开始。`
+    : `已连接 ${info.path}` + (info.queued ? `，有 ${info.queued} 条改动排队等写入` : "") + "。";
+  if (info.mac && info.mode === "mapped" && info.path) text += " Mac 上第一次写表时系统会问是否允许 KOL Mail 控制 Excel，点“好”；点了“不允许”的话，在 系统设置 → 隐私与安全性 → 自动化 里打开。";
+  el.className = info.error || (info.path && !info.exists) ? "note err" : "note";
+  el.textContent = text + (info.error ? " 最近的问题：" + info.error : "");
+  for (const id of ["sheetPick", "sheetRead", "sheetNew", "sheetSave"]) $("#" + id).hidden = legacy;
+  $("#sheetPath").disabled = legacy;
+  $("#sheetCheck").hidden = !(info.mode === "mapped" && info.path);
+  $("#sheetUnlink").hidden = legacy || !info.path;
+}
+function renderSheetMap(d, preset) {
+  st.sheetInspect = d;
+  $("#sheetMapBox").hidden = false;
+  const sel = $("#sheetSheet"); sel.textContent = "";
+  for (const name of d.sheets) { const o = document.createElement("option"); o.value = o.textContent = name; o.selected = name === d.sheet; sel.append(o); }
+  $("#sheetHeaderRow").value = d.header_row;
+  $("#sheetRows").textContent = `表头下面有 ${d.rows} 行`;
+  const table = $("#sheetMap"); table.textContent = "";
+  for (const [field, label] of Object.entries(d.fields)) {
+    const tr = document.createElement("tr");
+    const name = document.createElement("td"); name.textContent = label + (d.required.includes(field) ? " *" : "");
+    name.title = SHEET_FIELD_HINT[field] || "";
+    const pick = document.createElement("td"), sample = document.createElement("td"); sample.className = "sample";
+    const s2 = document.createElement("select"); s2.dataset.field = field;
+    const none = document.createElement("option"); none.value = ""; none.textContent = "（不同步）"; s2.append(none);
+    const want = preset && field in preset ? preset[field] : d.guess[field];
+    for (const c of d.columns) {
+      const o = document.createElement("option"); o.value = c.header; o.textContent = c.header; o.selected = c.header === want; s2.append(o);
+    }
+    const showSample = () => { const c = d.columns.find(x => x.header === s2.value); sample.textContent = c && c.samples.length ? "例：" + c.samples.join(" ｜ ") : ""; };
+    s2.onchange = showSample; showSample();
+    pick.append(s2); tr.append(name, pick, sample); table.append(tr);
+  }
+}
+async function readSheet(opts = {}) {
+  const path = $("#sheetPath").value.trim();
+  if (!path) { sheetNote("先选一个总表文件", true); return; }
+  sheetBusy(true); sheetNote("读取中…");
+  try { renderSheetMap(await post("/api/sheet/inspect", { path, sheet: opts.sheet, header_row: opts.header_row }), opts.preset); sheetNote(""); }
+  catch (e) { $("#sheetMapBox").hidden = true; sheetNote(e.message, true); }
+  finally { sheetBusy(false); }
+}
+async function openSheet() {
+  const info = await api("/api/sheet");
+  showSheetState(info); sheetNote(""); $("#sheetMapBox").hidden = true;
+  $("#sheetPath").value = info.owner_fixed || String(info.path || "").startsWith("gsheet:") ? "" : info.path || "";
+  if (!$("#sheetDlg").open) $("#sheetDlg").showModal();
+  if (info.mode === "mapped" && info.path && info.exists) {
+    const m = info.map || {};
+    const preset = m.columns ? { ...Object.fromEntries(Object.keys(SHEET_FIELD_HINT).map(f => [f, ""])), ...m.columns } : null;
+    await readSheet({ sheet: m.sheet, header_row: m.header_row, preset });
+  }
+}
+$("#sheetBtn").onclick = safe(openSheet);
+$("#sheetClose").onclick = () => $("#sheetDlg").close();
+$("#sheetRead").onclick = safe(() => readSheet());
+$("#sheetSheet").onchange = safe(() => readSheet({ sheet: $("#sheetSheet").value }));
+$("#sheetHeaderRow").onchange = safe(() => readSheet({ sheet: $("#sheetSheet").value, header_row: $("#sheetHeaderRow").value }));
+$("#sheetPick").onclick = safe(async () => {
+  sheetBusy(true); sheetNote("在弹出的窗口里选你的总表（窗口可能在浏览器后面）…");
+  try {
+    const r = await post("/api/sheet/pick", {});
+    if (r.cancelled) { sheetNote(""); return; }
+    $("#sheetPath").value = r.path;
+  } catch (e) { sheetNote(e.message, true); return; }
+  finally { sheetBusy(false); }
+  await readSheet();
+});
+$("#sheetNew").onclick = safe(async () => {
+  sheetBusy(true); sheetNote("在弹出的窗口里选新总表存在哪里（窗口可能在浏览器后面）…");
+  try {
+    const r = await post("/api/sheet/pick", { save: true });
+    if (r.cancelled) { sheetNote(""); return; }
+    const info = await post("/api/sheet/create", { path: r.path });
+    $("#sheetPath").value = info.path; showSheetState(info);
+  } catch (e) { sheetNote(e.message, true); return; }
+  finally { sheetBusy(false); }
+  await readSheet({ preset: (st.sheetInfo.map || {}).columns });
+  sheetNote("新总表建好了，已经连上。");
+});
+$("#sheetSave").onclick = safe(async () => {
+  const d = st.sheetInspect, path = $("#sheetPath").value.trim();
+  if (!d || $("#sheetMapBox").hidden) { await readSheet(); return; }
+  const columns = {};
+  for (const s2 of $("#sheetMap").querySelectorAll("select")) if (s2.value) columns[s2.dataset.field] = s2.value;
+  sheetBusy(true); sheetNote("保存中…");
+  try {
+    const info = await post("/api/sheet/save", { path, sheet: $("#sheetSheet").value, header_row: Number($("#sheetHeaderRow").value) || 1, columns });
+    showSheetState(info); sheetNote("已保存。以后收发的 KOL 邮件会同步进这张表，点“测试读取”可以确认读得到。");
+    await loadStatus();
+  } catch (e) { sheetNote(e.message, true); }
+  finally { sheetBusy(false); }
+});
+$("#sheetCheck").onclick = safe(async () => {
+  sheetBusy(true); sheetNote("正在经 Excel 按对应好的列读一遍总表，约半分钟…");
+  try {
+    const r = await post("/api/sheet/check", {});
+    const how = r.mode === "live" ? "从开着的 Excel 窗口读的" : "在后台打开读的";
+    sheetNote(`读到了：${r.rows} 行，其中 ${r.emails} 行有邮箱、${r.links} 行有频道链接（${how}）。同步的列：${Object.values(r.columns).join("、")}`);
+  } catch (e) { sheetNote(e.message, true); }
+  finally { sheetBusy(false); }
+});
+$("#sheetUnlink").onclick = safe(async () => {
+  if (!confirm("断开以后不再往这张表同步，表本身不会被改动。确定断开？")) return;
+  sheetBusy(true);
+  try { const info = await post("/api/sheet/unlink", {}); showSheetState(info); $("#sheetPath").value = ""; $("#sheetMapBox").hidden = true; sheetNote("已断开"); }
+  catch (e) { sheetNote(e.message, true); }
+  finally { sheetBusy(false); }
+});
+
 $("#aiCheckBtn").onclick = safe(async () => {
   const b = $("#aiCheckBtn"); b.disabled = true; b.textContent = "检测中，约半分钟…";
   try { await post("/api/ai/check", {}); } catch (e) { /* the status line shows what is wrong */ }

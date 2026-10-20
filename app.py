@@ -1038,16 +1038,59 @@ async def show_toast(title: str, line1: str, line2: str, mailbox: str, email_id)
 # which writes into the open Excel window if the sheet is open. Only bookkeeping happens here (who has the ball, last
 # contact, a log row); stage, intent and terms are judged by the triage task.
 
-SHEET_PYTHON = os.environ.get("KOL_SHEET_PYTHON", CFG["paths"]["sheet_python"] or "")  # a Python with pywin32
-SHEET_TOOL = _path("sheet_tool", "KOL_SHEET_TOOL") or DATA / "no-sheet-tool" / "kol.py"
-SHEET_WORKBOOK = _path("sheet_workbook", "KOL_SHEET_PATH")
-# kol.py finds the workbook and keeps its queue and backups next to itself unless told otherwise.
-SHEET_STATE = DATA / "sheet" if SHEET_WORKBOOK else SHEET_TOOL.parent
-SHEET_ENV = None
-if SHEET_WORKBOOK:
-    SHEET_STATE.mkdir(parents=True, exist_ok=True)
-    SHEET_ENV = dict(os.environ, KOL_SHEET_PATH=str(SHEET_WORKBOOK), KOL_SHEET_STATE=str(SHEET_STATE))
-SHEET_PENDING = SHEET_STATE / "pending.jsonl"
+# Colleagues keep their own sheets in their own layouts: those go through sheet/usersheet.py, which only writes the
+# columns mapped in the settings page (settings sheet_map). The owner's fixed-layout sheet keeps using kol-sheet\kol.py.
+USER_SHEET_TOOL = BASE / "sheet" / "usersheet.py"
+SHEET_PYTHON = SHEET_TOOL = SHEET_WORKBOOK = SHEET_STATE = SHEET_ENV = SHEET_PENDING = None
+SHEET_MODE = ""   # "" none, "legacy" kol.py with the owner's layout, "mapped" usersheet.py with a column mapping
+SHEET_MAP: dict = {}
+SHEET_OWNER_FIXED = False  # legacy through the owner's own kol-sheet\kol.py: the settings page must not change it
+SHEET_GEN = 0              # bumped on every relink, so a read of the old sheet that finishes later is thrown away
+
+
+def sheet_state_dir(workbook: Path | None) -> Path:
+    """Queue, backups and the sync's memory of one linked file; another file starts clean."""
+    if workbook is None:
+        return DATA / "sheet"
+    return DATA / "sheet" / ("user-" + hashlib.sha1(os.path.normcase(str(workbook)).encode("utf-8")).hexdigest()[:12])
+
+
+def configure_sheet():
+    """(Re)read the sheet settings; called at start and whenever the settings page links, remaps or unlinks."""
+    global SHEET_PYTHON, SHEET_TOOL, SHEET_WORKBOOK, SHEET_STATE, SHEET_ENV, SHEET_PENDING, SHEET_MODE, SHEET_MAP
+    global SHEET_OWNER_FIXED, SHEET_GEN
+    SHEET_GEN += 1
+    tool = _path("sheet_tool", "KOL_SHEET_TOOL")
+    SHEET_WORKBOOK = _path("sheet_workbook", "KOL_SHEET_PATH")
+    SHEET_MAP = dict(CFG.get("sheet_map") or {})
+    # kol.py means its own fixed layout: the owner's kol-sheet\kol.py, a sheet an earlier installer built from that
+    # template with our copy of kol.py, and the Mac Google sheet (gsheet:<id>). Only usersheet.py uses a mapping.
+    # The settings page may move our own installs over to a mapping, never the owner's.
+    in_app = tool is not None and tool.parent.resolve() == (BASE / "sheet").resolve()
+    gsheet = str(SHEET_WORKBOOK or "").startswith("gsheet:")
+    SHEET_OWNER_FIXED = tool is not None and not in_app
+    if tool is not None and (not in_app or tool.name == "kol.py" or gsheet):
+        SHEET_MODE, SHEET_TOOL = "legacy", tool
+        SHEET_PYTHON = os.environ.get("KOL_SHEET_PYTHON", CFG["paths"]["sheet_python"] or "")  # a Python with pywin32
+    else:
+        SHEET_MODE = "mapped" if SHEET_WORKBOOK else ""
+        SHEET_TOOL = USER_SHEET_TOOL if SHEET_WORKBOOK else DATA / "no-sheet-tool" / "kol.py"
+        SHEET_PYTHON = os.environ.get("KOL_SHEET_PYTHON") or CFG["paths"]["sheet_python"] or sys.executable
+    # kol.py finds the workbook and keeps its queue and backups next to itself unless told otherwise.
+    if SHEET_MODE == "mapped":
+        SHEET_STATE = sheet_state_dir(SHEET_WORKBOOK)
+    else:
+        SHEET_STATE = DATA / "sheet" if SHEET_WORKBOOK else SHEET_TOOL.parent
+    SHEET_ENV = None
+    if SHEET_WORKBOOK:
+        SHEET_STATE.mkdir(parents=True, exist_ok=True)
+        SHEET_ENV = dict(os.environ, KOL_SHEET_PATH=str(SHEET_WORKBOOK), KOL_SHEET_STATE=str(SHEET_STATE))
+        if SHEET_MODE == "mapped":
+            SHEET_ENV["KOL_SHEET_MAP"] = json.dumps(SHEET_MAP, ensure_ascii=False)
+    SHEET_PENDING = SHEET_STATE / "pending.jsonl"
+
+
+configure_sheet()
 SHEET_SEEN = DATA / "sheet_seen.json"      # INBOX message ids already reported, so a rescan never reports twice
 SHEET_FAILED = DATA / "sheet_failed.jsonl"  # batches given up on after SHEET_MAX_TRIES; a human has to look
 SHEET_SEEN_MAX = 3000
@@ -1063,6 +1106,8 @@ sheet_seen: dict[str, str] | None = None  # message_id -> "seed" (was there befo
 
 
 def sheet_enabled() -> bool:
+    if SHEET_MODE == "mapped" and not ((SHEET_MAP.get("columns") or {}).get("email") and SHEET_WORKBOOK.is_file()):
+        return False  # linked but not mapped yet (or the file is gone): the settings page says so
     return bool(SHEET_PYTHON) and SHEET_TOOL.exists() and Path(SHEET_PYTHON).exists()
 
 
@@ -1142,7 +1187,8 @@ def sheet_note_incoming(emails: list[dict]):
         subject = strip_hidden(re.sub(r"[\r\n]+", " ", meta.get("subject") or "")).strip()[:150]
         sheet_post({"op": "event", "dir": "in", "email": sender_address(meta.get("sender") or ""),
                     "subject": subject or "（无主题）", "time": when.isoformat() if when else None,
-                    "message_id": meta["message_id"]})
+                    "message_id": meta["message_id"],
+                    "name": strip_hidden(email.utils.parseaddr(meta.get("sender") or "")[0])[:80]})  # a new row's name
     if new:
         save_sheet_seen()
 
@@ -1151,9 +1197,13 @@ def sheet_note_translation(message_id: str, msg: dict, body_zh: str):
     """Once the Chinese translation exists, the log row of that mail gets its gist instead of the bare subject."""
     if sheet_seen and sheet_seen.get(message_id) == "posted" and (body_zh or "").strip():
         when = parse_date(msg.get("date"))
-        sheet_post({"op": "event", "dir": "in", "email": sender_address(msg.get("sender") or ""),
-                    "summary": "对方回信：" + gist(body_zh), "message_id": message_id,
-                    "subject": msg.get("subject") or "", "time": when.isoformat() if when else None})
+        op = {"op": "event", "dir": "in", "email": sender_address(msg.get("sender") or ""),
+              "summary": "对方回信：" + gist(body_zh), "message_id": message_id,
+              "subject": msg.get("subject") or "", "time": when.isoformat() if when else None}
+        links = channel_links([msg.get("body") or ""])
+        if links:  # fills an empty 频道链接 cell of a colleague's sheet (usersheet.py; kol.py ignores it)
+            op["channel_url"] = links[0]["url"]
+        sheet_post(op)
 
 
 async def sheet_note_sent(address: str, subject: str, summary: str, etype: str, sent_at: datetime):
@@ -1245,6 +1295,9 @@ async def sheet_loop():
                     continue
             await asyncio.sleep(3)  # several mails from one scan go out as one batch
             batch = [sheet_ops.popleft() for _ in range(len(sheet_ops))]
+            if not sheet_enabled():  # unlinked (or unmapped) meanwhile: nowhere to write these
+                tries = 0
+                continue
             if await run_sheet(["batch", "-", "--skip-invalid", "--source", "kol-mail"], batch):
                 tries = 0
                 continue
@@ -2634,6 +2687,236 @@ async def api_setup(request: Request):
     return JSONResponse({"ok": True})
 
 
+# ---------------------------------------------------------------- linking a colleague's own KOL sheet (settings page)
+
+SHEET_PICK_LOCK = asyncio.Lock()
+sheet_channels_wake = asyncio.Event()
+WIN_PICK = r"""
+[Console]::OutputEncoding = New-Object Text.UTF8Encoding $false
+Add-Type -AssemblyName System.Windows.Forms
+$owner = New-Object Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false; Opacity = 0;
+    StartPosition = "Manual"; Location = New-Object Drawing.Point(-2000, -2000); Size = New-Object Drawing.Size(1, 1) }
+$owner.Show(); $owner.Activate()
+if ($env:KM_PICK_SAVE) {
+    $dlg = New-Object Windows.Forms.SaveFileDialog -Property @{ FileName = "KOL总表.xlsx"; OverwritePrompt = $true }
+    $dlg.Title = "新总表存在哪里"
+} else {
+    $dlg = New-Object Windows.Forms.OpenFileDialog
+    $dlg.Title = "选择你的 KOL 总表"
+}
+$dlg.Filter = "Excel 表格 (*.xlsx)|*.xlsx"
+$dlg.InitialDirectory = [Environment]::GetFolderPath("MyDocuments")
+if ($dlg.ShowDialog($owner) -eq [Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dlg.FileName) }
+$owner.Close()
+"""
+MAC_PICK_OPEN = 'POSIX path of (choose file with prompt "选择你的 KOL 总表" of type {"org.openxmlformats.spreadsheetml.sheet"})'
+MAC_PICK_SAVE = 'POSIX path of (choose file name with prompt "新总表存在哪里" default name "KOL总表.xlsx")'
+
+
+async def user_sheet_tool(args: list[str], timeout: int = 120, mapping: dict | None = None,
+                          workbook: Path | None = None) -> tuple[int, dict]:
+    """Run sheet/usersheet.py and return (exit code, its JSON). Reading and linking only; the writes go through
+    sheet_loop like every other sheet change."""
+    state_dir = sheet_state_dir(workbook)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ, KOL_SHEET_STATE=str(state_dir), PYTHONIOENCODING="utf-8")
+    if workbook is not None:
+        env["KOL_SHEET_PATH"] = str(workbook)
+    if mapping is not None:
+        env["KOL_SHEET_MAP"] = json.dumps(mapping, ensure_ascii=False)
+    proc = await asyncio.create_subprocess_exec(
+        os.environ.get("KOL_SHEET_PYTHON") or CFG["paths"]["sheet_python"] or sys.executable,
+        str(USER_SHEET_TOOL), *args, cwd=str(USER_SHEET_TOOL.parent), env=env,
+        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return 9, {"error": f"超过 {timeout} 秒没有完成"}
+    try:
+        data = json.loads((out or b"").decode("utf-8", "replace"))
+    except ValueError:
+        tail = ((err or b"") + (out or b"")).decode("utf-8", "replace").strip()[-300:]
+        data = {"error": tail or f"退出码 {proc.returncode}"}
+    return proc.returncode, data if isinstance(data, dict) else {"error": str(data)[:300]}
+
+
+def sheet_link_path(raw) -> Path:
+    """A path the colleague picked or pasted: an existing .xlsx on this computer."""
+    value = strip_hidden(str(raw or "")).strip().strip('"').strip("'")
+    if not value:
+        raise ValueError("先选一个总表文件")
+    path = Path(os.path.expanduser(value))
+    if not path.is_absolute():
+        raise ValueError("要完整路径，比如 C:\\Users\\你\\Documents\\KOL总表.xlsx")
+    if path.suffix.lower() != ".xlsx":
+        raise ValueError("只支持 .xlsx 格式的表格（.xls、.csv、Numbers 请先在 Excel 里另存为 .xlsx）")
+    return path
+
+
+def sheet_info() -> dict:
+    mapped = bool((SHEET_MAP.get("columns") or {}).get("email"))
+    queued = 0
+    with contextlib.suppress(OSError, ValueError):
+        if SHEET_PENDING and SHEET_PENDING.exists():
+            queued = sum(len(json.loads(line).get("ops", [])) for line in
+                         SHEET_PENDING.read_text(encoding="utf-8").splitlines() if line.strip())
+    return {"mode": SHEET_MODE, "owner_fixed": SHEET_OWNER_FIXED,
+            "path": str(SHEET_WORKBOOK or ""), "map": SHEET_MAP if SHEET_MODE == "mapped" else {},
+            "exists": bool(SHEET_WORKBOOK and SHEET_WORKBOOK.is_file()),
+            "needs_map": SHEET_MODE == "mapped" and not mapped, "enabled": sheet_enabled(), "queued": queued,
+            "error": state.get("sheet_error"), "mac": MACOS}
+
+
+def sheet_relinked():
+    """Forget what was read from the old sheet and read the new one now."""
+    global sheet_status
+    configure_sheet()
+    sheet_channels.clear()
+    sheet_rows.clear()
+    sheet_filled.clear()
+    sheet_status = None
+    state["sheet_channels_read"] = False
+    state["sheet_error"] = None
+    sheet_channels_wake.set()
+
+
+async def api_sheet(request: Request):
+    return JSONResponse(sheet_info())
+
+
+async def api_sheet_pick(request: Request):
+    """The system's own file window, on the colleague's screen (the page itself cannot see full paths)."""
+    body = await request.json()
+    save = body.get("save") is True
+    if SHEET_PICK_LOCK.locked():
+        return bad("选文件的窗口已经开着了，可能在浏览器后面")
+    async with SHEET_PICK_LOCK:
+        if MACOS:
+            cmd = ["osascript", "-e", MAC_PICK_SAVE if save else MAC_PICK_OPEN]
+            env = None
+        else:
+            script = base64.b64encode(WIN_PICK.encode("utf-16-le")).decode()
+            cmd = ["powershell.exe", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-EncodedCommand", script]
+            env = dict(os.environ, KM_PICK_SAVE="1" if save else "")
+        proc = await asyncio.create_subprocess_exec(*cmd, env=env, stdin=asyncio.subprocess.DEVNULL,
+                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), 600)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return bad("选文件的窗口开了 10 分钟没有选，已经关掉")
+    path = (out or b"").decode("utf-8", "replace").strip()
+    if save and path and not path.lower().endswith(".xlsx"):
+        path += ".xlsx"
+    return JSONResponse({"path": path, "cancelled": not path})
+
+
+async def api_sheet_inspect(request: Request):
+    body = await request.json()
+    try:
+        path = sheet_link_path(body.get("path"))
+    except ValueError as e:
+        return bad(str(e))
+    args = ["inspect", "--path", str(path)]
+    if body.get("sheet"):
+        args += ["--sheet", str(body["sheet"])[:100]]
+    if str(body.get("header_row") or "").isdigit():
+        args += ["--header-row", str(int(body["header_row"]))]
+    code, data = await user_sheet_tool(args)
+    if code != 0:
+        return bad(data.get("error") or "读不了这个文件")
+    return JSONResponse(data)
+
+
+def save_sheet_link(path: Path, mapping: dict):
+    config.update(["paths", "sheet_workbook"], str(path))
+    config.update(["paths", "sheet_tool"], str(USER_SHEET_TOOL))
+    config.update(["sheet_map"], mapping)
+    CFG["paths"]["sheet_workbook"], CFG["paths"]["sheet_tool"], CFG["sheet_map"] = str(path), str(USER_SHEET_TOOL), mapping
+    sheet_relinked()
+
+
+async def api_sheet_save(request: Request):
+    """POST {path, sheet, header_row, columns}: link this file with this column mapping."""
+    if SHEET_OWNER_FIXED:
+        return bad("这台电脑用的是固定格式的总表（kol.py），在 settings.json 里改")
+    body = await request.json()
+    try:
+        path = sheet_link_path(body.get("path"))
+    except ValueError as e:
+        return bad(str(e))
+    columns = {k: strip_hidden(str(v)).strip()[:100] for k, v in (body.get("columns") or {}).items()
+               if isinstance(k, str) and str(v or "").strip()}
+    mapping = {"sheet": strip_hidden(str(body.get("sheet") or "")).strip()[:100],
+               "header_row": int(body["header_row"]) if str(body.get("header_row") or "").isdigit() else 1,
+               "columns": columns}
+    if not columns.get("email"):
+        return bad("“邮箱”这一项必须对上一列：同步要靠邮箱找到对应的那一行")
+    if len(set(columns.values())) < len(columns):
+        return bad("同一列对应了两项，请改一下")
+    code, data = await user_sheet_tool(["inspect", "--path", str(path), "--sheet", mapping["sheet"],
+                                        "--header-row", str(mapping["header_row"])])
+    if code != 0:
+        return bad(data.get("error") or "读不了这个文件")
+    if data.get("sheet") != mapping["sheet"]:
+        return bad(f"文件里没有叫“{mapping['sheet']}”的工作表")
+    headers = {c["header"] for c in data.get("columns", [])}
+    missing = [v for v in columns.values() if v not in headers]
+    if missing:
+        return bad(f"第 {mapping['header_row']} 行的表头里没有：{'、'.join(missing)}")
+    try:
+        save_sheet_link(path, mapping)
+    except OSError as e:
+        return bad(f"设置保存失败：{err_text(e)}", 500)
+    log("sheet linked", path.name, ",".join(columns))
+    return JSONResponse({"ok": True, **sheet_info()})
+
+
+async def api_sheet_create(request: Request):
+    """POST {path}: a new, simple KOL sheet there, linked and mapped."""
+    if SHEET_OWNER_FIXED:
+        return bad("这台电脑用的是固定格式的总表（kol.py），在 settings.json 里改")
+    body = await request.json()
+    try:
+        path = sheet_link_path(body.get("path"))
+    except ValueError as e:
+        return bad(str(e))
+    code, data = await user_sheet_tool(["create", "--path", str(path)])
+    if code != 0:
+        return bad(data.get("error") or "新建失败")
+    try:
+        save_sheet_link(path, data["map"])
+    except OSError as e:
+        return bad(f"设置保存失败：{err_text(e)}", 500)
+    log("sheet created", path.name)
+    return JSONResponse({"ok": True, **sheet_info()})
+
+
+async def api_sheet_check(request: Request):
+    """Read the linked sheet the way the sync does (through Excel on Windows) and say what was found."""
+    if SHEET_MODE != "mapped" or not SHEET_WORKBOOK:
+        return bad("还没有连接总表")
+    code, data = await user_sheet_tool(["check"], timeout=240, mapping=SHEET_MAP, workbook=SHEET_WORKBOOK)
+    if code == 0:
+        return JSONResponse(data)
+    return bad(data.get("error") or data.get("reason") or "读不了总表", 502)
+
+
+async def api_sheet_unlink(request: Request):
+    if SHEET_OWNER_FIXED:
+        return bad("这台电脑用的是固定格式的总表（kol.py），在 settings.json 里改")
+    try:
+        config.update(["paths", "sheet_workbook"], "")
+        config.update(["sheet_map"], {})
+    except OSError as e:
+        return bad(f"设置保存失败：{err_text(e)}", 500)
+    CFG["paths"]["sheet_workbook"], CFG["sheet_map"] = "", {}
+    sheet_relinked()
+    log("sheet unlinked")
+    return JSONResponse({"ok": True, **sheet_info()})
+
+
 AI_CHECK_SCHEMA = {"type": "object", "properties": {"ok": {"type": "string"}}, "required": ["ok"]}
 
 
@@ -2704,6 +2987,7 @@ async def api_status(request: Request):
     tg_error = (state["telegram_error"] or tg.error) if cfg and cfg.telegram_enabled and telegram_session() else None
     return JSONResponse({**state, "queue": len(jobs), "claude_bin": AI.binary(), "ai_backend": AI.label(),
                          "feedback_ready": feedback_ready(), "setup_needed": not SETUP_DONE,
+                         "sheet": {"mode": SHEET_MODE, "needs_map": SHEET_MODE == "mapped" and not sheet_enabled()},
                          "self_address": SELF_ADDRESS, "version": config.version(), "dev": DEV, "telegram_error": tg_error,
                          "mail_error": mail.error or bg.error, "autoreply": autoreply_info, "koc": koc_summary(),
                          "unread_counts": unread_counts()})
@@ -3197,6 +3481,8 @@ async def sheet_channels_loop():
     global sheet_status, sheet_status_at
     while True:
         ok = False
+        sheet_channels_wake.clear()  # before reading: a relink while this read runs wakes the next one at once
+        gen = SHEET_GEN
         if sheet_enabled():
             try:
                 proc = await asyncio.create_subprocess_exec(
@@ -3212,6 +3498,8 @@ async def sheet_channels_loop():
                 # A failed read must never look like "every cell is empty": that would unlock overwrites below.
                 if proc.returncode != 0 or not isinstance(rows, list):
                     raise ValueError(f"kol.py list exit {proc.returncode}: {str(data)[:200]}")
+                if gen != SHEET_GEN:
+                    continue  # the sheet was relinked while reading: these rows belong to the old one
                 found, everyone, status = {}, set(), {}
                 for row in rows:
                     url = str(row.get("频道链接") or "").strip()
@@ -3235,7 +3523,8 @@ async def sheet_channels_loop():
             except Exception as e:  # noqa: BLE001  links are a convenience; never break the app over them
                 log("sheet channel links not read", err_text(e))
         # kol.py holds a lock while it writes into Excel, which can outlast our 120 s wait: retry soon after a miss.
-        await asyncio.sleep(SHEET_CHANNELS_EVERY if ok else 60)
+        with contextlib.suppress(asyncio.TimeoutError):  # a sheet linked in the settings page is read at once
+            await asyncio.wait_for(sheet_channels_wake.wait(), SHEET_CHANNELS_EVERY if ok else 60)
 
 
 def known_channels(address: str, texts: list[str]) -> list[dict]:
@@ -4176,6 +4465,13 @@ routes = [
     Route("/api/reply/unupload", api_reply_unupload, methods=["POST"]),
     Route("/api/feedback", api_feedback, methods=["POST"]),
     Route("/api/setup", api_setup, methods=["GET", "POST"]),
+    Route("/api/sheet", api_sheet),
+    Route("/api/sheet/pick", api_sheet_pick, methods=["POST"]),
+    Route("/api/sheet/inspect", api_sheet_inspect, methods=["POST"]),
+    Route("/api/sheet/save", api_sheet_save, methods=["POST"]),
+    Route("/api/sheet/create", api_sheet_create, methods=["POST"]),
+    Route("/api/sheet/check", api_sheet_check, methods=["POST"]),
+    Route("/api/sheet/unlink", api_sheet_unlink, methods=["POST"]),
     Route("/api/ai/check", api_ai_check, methods=["POST"]),
     Route("/api/update", api_update, methods=["GET", "POST"]),
     Route("/api/mobile", api_mobile),

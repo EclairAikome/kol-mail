@@ -338,9 +338,45 @@ case "$CURRENT_SHEET" in
                         warn "  Google 总表没接上，先不用。以后重新运行安装命令可以再接。"
                     fi ;;
             esac
+        fi
+        # 同事自己的 xlsx 总表，格式各不相同：这里只记下文件，第一次打开页面时核对各列对应什么，对好之前不往表里写。
+        # 新建的是程序自己的简单模板，列对应直接定好。
+        if [ -z "$KM_SHEET" ] && [ "$YES" != 1 ]; then
+            say "  KOL 总表：连上你自己的 xlsx 总表后，打开邮件会显示 KOL 的频道链接，收发信的进展会记进表里（只写对得上的列，不改你的格式）。"
+            say "  写表要用 Microsoft Excel。第一次写表时系统会问是否允许 KOL Mail 控制 Excel，请点“好”。"
+            while true; do
+                ask "总表文件的完整路径（可以把文件拖进这个窗口），输入 new 新建一张，不用就直接回车（以后在页面上方的 KOL 总表按钮里也能接）" ""
+                # 拖进“终端”的文件路径带引号，或者空格前带反斜杠
+                SHEET_PATH="$(printf '%s' "$REPLY" | sed -e "s/^'\(.*\)'\$/\1/" -e 's/^"\(.*\)"$/\1/' -e 's/\\\(.\)/\1/g')"
+                [ -z "$SHEET_PATH" ] && break
+                CREATE=0
+                if [ "$SHEET_PATH" = "new" ]; then CREATE=1; SHEET_PATH="$HOME/Documents/KOL总表.xlsx"; fi
+                case "$SHEET_PATH" in "~/"*) SHEET_PATH="$HOME/${SHEET_PATH#??}" ;; esac
+                case "$SHEET_PATH" in
+                    *.xlsx|*.XLSX) ;;
+                    *) warn "  只支持 .xlsx 格式（.xls、.csv、Numbers 请先在 Excel 里另存为 .xlsx）"; continue ;;
+                esac
+                if [ -f "$SHEET_PATH" ]; then
+                    [ "$CREATE" = 1 ] && warn "  $SHEET_PATH 已经有文件了，直接用它"
+                    KM_SHEET="$SHEET_PATH"
+                    say "  第一次打开页面时会请你核对表里各列对应什么，对好之后才开始同步。"
+                    break
+                fi
+                if [ "$CREATE" != 1 ]; then
+                    ask "  这个文件不存在。输入 y 在这里新建一张，直接回车重新输入" ""
+                    [ "$REPLY" = "y" ] || [ "$REPLY" = "Y" ] || continue
+                fi
+                if MADE="$("$PY" -I "$APP/sheet/usersheet.py" create --path "$SHEET_PATH" 2>/dev/null)"; then
+                    KM_SHEET="$SHEET_PATH"
+                    KM_SHEET_MAP="$(printf '%s' "$MADE" | "$PY" -I -c 'import json, sys; print(json.dumps(json.loads(sys.stdin.read())["map"], ensure_ascii=False))')"
+                    say "  新建了 $SHEET_PATH，已经连上"
+                    break
+                fi
+                warn "  新建失败：$MADE"
+            done
         fi ;;
 esac
-export KM_TITLE KM_COMPANY KM_EXTRA KM_SITE KM_PLAYBOOK KM_KNOWLEDGE KM_RECORD KM_SHEET KM_APP="$APP" KM_PY="$PY"
+export KM_TITLE KM_COMPANY KM_EXTRA KM_SITE KM_PLAYBOOK KM_KNOWLEDGE KM_RECORD KM_SHEET KM_SHEET_MAP KM_APP="$APP" KM_PY="$PY"
 ANSWERS="$STAGING/answers.json"
 "$PY" -I - "$ANSWERS" <<'PYEOF'
 import json, os, sys
@@ -365,8 +401,11 @@ for key, env in (("playbook", "KM_PLAYBOOK"), ("koc_knowledge", "KM_KNOWLEDGE"),
     if e(env):
         answers["paths"][key] = e(env)
 if e("KM_SHEET"):
-    answers["paths"].update(sheet_workbook=e("KM_SHEET"), sheet_tool=os.path.join(e("KM_APP"), "sheet", "kol.py"),
+    tool = "kol.py" if e("KM_SHEET").startswith("gsheet:") else "usersheet.py"  # own xlsx: mapped columns
+    answers["paths"].update(sheet_workbook=e("KM_SHEET"), sheet_tool=os.path.join(e("KM_APP"), "sheet", tool),
                             sheet_python=e("KM_PY"))
+if e("KM_SHEET_MAP"):
+    answers["sheet_map"] = json.loads(e("KM_SHEET_MAP"))
 if e("KM_REPO"):
     answers["update"]["repo"] = e("KM_REPO")
 if e("KM_MIRROR"):
