@@ -51,6 +51,7 @@ import updater  # noqa: E402
 import outgoing  # noqa: E402
 import replyflow  # noqa: E402
 import onboarding  # noqa: E402
+from sheet import popogrid  # noqa: E402  (a POPO 在线表格 as the KOL sheet)
 
 # ---------------------------------------------------------------- config
 
@@ -1087,6 +1088,8 @@ def configure_sheet():
         SHEET_ENV = dict(os.environ, KOL_SHEET_PATH=str(SHEET_WORKBOOK), KOL_SHEET_STATE=str(SHEET_STATE))
         if SHEET_MODE == "mapped":
             SHEET_ENV["KOL_SHEET_MAP"] = json.dumps(SHEET_MAP, ensure_ascii=False)
+            if popogrid.is_popo(SHEET_WORKBOOK):
+                SHEET_ENV["KOL_POPO_CLI"] = popo_cli()
     SHEET_PENDING = SHEET_STATE / "pending.jsonl"
 
 
@@ -1106,7 +1109,8 @@ sheet_seen: dict[str, str] | None = None  # message_id -> "seed" (was there befo
 
 
 def sheet_enabled() -> bool:
-    if SHEET_MODE == "mapped" and not ((SHEET_MAP.get("columns") or {}).get("email") and SHEET_WORKBOOK.is_file()):
+    linked = popogrid.is_popo(SHEET_WORKBOOK) or (SHEET_WORKBOOK is not None and SHEET_WORKBOOK.is_file())
+    if SHEET_MODE == "mapped" and not ((SHEET_MAP.get("columns") or {}).get("email") and linked):
         return False  # linked but not mapped yet (or the file is gone): the settings page says so
     return bool(SHEET_PYTHON) and SHEET_TOOL.exists() and Path(SHEET_PYTHON).exists()
 
@@ -2719,7 +2723,7 @@ async def user_sheet_tool(args: list[str], timeout: int = 120, mapping: dict | N
     sheet_loop like every other sheet change."""
     state_dir = sheet_state_dir(workbook)
     state_dir.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, KOL_SHEET_STATE=str(state_dir), PYTHONIOENCODING="utf-8")
+    env = dict(os.environ, KOL_SHEET_STATE=str(state_dir), PYTHONIOENCODING="utf-8", KOL_POPO_CLI=popo_cli())
     if workbook is not None:
         env["KOL_SHEET_PATH"] = str(workbook)
     if mapping is not None:
@@ -2741,11 +2745,46 @@ async def user_sheet_tool(args: list[str], timeout: int = 120, mapping: dict | N
     return proc.returncode, data if isinstance(data, dict) else {"error": str(data)[:300]}
 
 
+def popo_cli() -> str:
+    """popo-cli's full path (kept in the settings once found: the background service starts with a bare PATH)."""
+    found = popogrid.find_popo_cli(CFG["paths"].get("popo_cli") or "")
+    if found and found != CFG["paths"].get("popo_cli"):
+        with contextlib.suppress(OSError):
+            config.update(["paths", "popo_cli"], found)
+            CFG["paths"]["popo_cli"] = found
+    return found
+
+
+popo_links: dict[str, str] = {}  # pasted link -> popo:<docId>[:<teamSpaceId>], so a link is looked up once
+
+
+async def sheet_target(raw) -> str:
+    """What the colleague picked or pasted: a POPO 在线表格 link (-> popo:...) or an existing .xlsx path."""
+    value = strip_hidden(str(raw or "")).strip().strip('"').strip("'")
+    if value.startswith("popo:"):
+        return value
+    if value.lower().startswith(("http://", "https://")):
+        if value in popo_links:
+            return popo_links[value]
+        cli = popo_cli()
+        if not cli:
+            raise ValueError("要先在这台电脑上装好 popo-cli 并登录，才能连接 POPO 表格（见设置里的说明）")
+        try:
+            setting = await asyncio.to_thread(popogrid.resolve_link, value, cli)
+        except popogrid.PopoError as e:
+            raise ValueError(str(e)) from None
+        except (OSError, subprocess.SubprocessError) as e:
+            raise ValueError(f"popo-cli 运行失败：{err_text(e)}") from None
+        popo_links[value] = setting
+        return setting
+    return str(sheet_link_path(value))
+
+
 def sheet_link_path(raw) -> Path:
     """A path the colleague picked or pasted: an existing .xlsx on this computer."""
     value = strip_hidden(str(raw or "")).strip().strip('"').strip("'")
     if not value:
-        raise ValueError("先选一个总表文件")
+        raise ValueError("先选一个总表文件，或者粘贴 POPO 在线表格的链接")
     path = Path(os.path.expanduser(value))
     if not path.is_absolute():
         raise ValueError("要完整路径，比如 C:\\Users\\你\\Documents\\KOL总表.xlsx")
@@ -2763,7 +2802,8 @@ def sheet_info() -> dict:
                          SHEET_PENDING.read_text(encoding="utf-8").splitlines() if line.strip())
     return {"mode": SHEET_MODE, "owner_fixed": SHEET_OWNER_FIXED,
             "path": str(SHEET_WORKBOOK or ""), "map": SHEET_MAP if SHEET_MODE == "mapped" else {},
-            "exists": bool(SHEET_WORKBOOK and SHEET_WORKBOOK.is_file()),
+            "exists": bool(SHEET_WORKBOOK and (popogrid.is_popo(SHEET_WORKBOOK) or SHEET_WORKBOOK.is_file())),
+            "popo": popogrid.is_popo(SHEET_WORKBOOK), "popo_link": SHEET_MAP.get("popo_link", ""),
             "needs_map": SHEET_MODE == "mapped" and not mapped, "enabled": sheet_enabled(), "queued": queued,
             "error": state.get("sheet_error"), "mac": MACOS}
 
@@ -2815,7 +2855,7 @@ async def api_sheet_pick(request: Request):
 async def api_sheet_inspect(request: Request):
     body = await request.json()
     try:
-        path = sheet_link_path(body.get("path"))
+        path = await sheet_target(body.get("path"))
     except ValueError as e:
         return bad(str(e))
     args = ["inspect", "--path", str(path)]
@@ -2829,7 +2869,7 @@ async def api_sheet_inspect(request: Request):
     return JSONResponse(data)
 
 
-def save_sheet_link(path: Path, mapping: dict):
+def save_sheet_link(path, mapping: dict):
     config.update(["paths", "sheet_workbook"], str(path))
     config.update(["paths", "sheet_tool"], str(USER_SHEET_TOOL))
     config.update(["sheet_map"], mapping)
@@ -2843,7 +2883,7 @@ async def api_sheet_save(request: Request):
         return bad("这台电脑用的是固定格式的总表（kol.py），在 settings.json 里改")
     body = await request.json()
     try:
-        path = sheet_link_path(body.get("path"))
+        path = await sheet_target(body.get("path"))
     except ValueError as e:
         return bad(str(e))
     columns = {k: strip_hidden(str(v)).strip()[:100] for k, v in (body.get("columns") or {}).items()
@@ -2861,6 +2901,10 @@ async def api_sheet_save(request: Request):
         return bad(data.get("error") or "读不了这个文件")
     if data.get("sheet") != mapping["sheet"]:
         return bad(f"文件里没有叫“{mapping['sheet']}”的工作表")
+    if popogrid.is_popo(path):
+        mapping["sheet_id"] = data.get("sheet_id") or ""
+        link = strip_hidden(str(body.get("path") or "")).strip()
+        mapping["popo_link"] = link if link.lower().startswith("https://") else ""
     headers = {c["header"] for c in data.get("columns", [])}
     missing = [v for v in columns.values() if v not in headers]
     if missing:
@@ -2869,7 +2913,7 @@ async def api_sheet_save(request: Request):
         save_sheet_link(path, mapping)
     except OSError as e:
         return bad(f"设置保存失败：{err_text(e)}", 500)
-    log("sheet linked", path.name, ",".join(columns))
+    log("sheet linked", "POPO" if popogrid.is_popo(path) else Path(path).name, ",".join(columns))
     return JSONResponse({"ok": True, **sheet_info()})
 
 
@@ -2891,6 +2935,28 @@ async def api_sheet_create(request: Request):
         return bad(f"设置保存失败：{err_text(e)}", 500)
     log("sheet created", path.name)
     return JSONResponse({"ok": True, **sheet_info()})
+
+
+async def api_sheet_popo(request: Request):
+    """GET: is popo-cli there and logged in. POST: open a terminal window that runs `popo-cli auth login`."""
+    cli = await asyncio.to_thread(popo_cli)
+    if request.method == "GET":
+        return JSONResponse({"cli": cli, **(await asyncio.to_thread(popogrid.auth_status, cli))})
+    if not cli:
+        return bad("这台电脑上还没有 popo-cli，先按设置里的说明装好")
+    if MACOS:
+        cmd = ["osascript", "-e", "on run argv", "-e", 'tell application "Terminal"', "-e", "activate", "-e",
+               'do script (quoted form of (item 1 of argv)) & " auth login"', "-e", "end tell", "-e", "end run", cli]
+    else:
+        inner = "& '" + cli.replace("'", "''") + "' auth login"
+        q = chr(34)
+        script = "Start-Process powershell.exe -ArgumentList @('-NoExit', '-Command', " + q + inner.replace(q, "`" + q) + q + ")"
+        cmd = ["powershell.exe", "-NoProfile", "-EncodedCommand", base64.b64encode(script.encode("utf-16-le")).decode()]
+    try:
+        await asyncio.to_thread(subprocess.run, cmd, capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        return bad(f"打不开登录窗口：{err_text(e)}")
+    return JSONResponse({"ok": True})
 
 
 async def api_sheet_check(request: Request):
@@ -4471,6 +4537,7 @@ routes = [
     Route("/api/sheet/save", api_sheet_save, methods=["POST"]),
     Route("/api/sheet/create", api_sheet_create, methods=["POST"]),
     Route("/api/sheet/check", api_sheet_check, methods=["POST"]),
+    Route("/api/sheet/popo", api_sheet_popo, methods=["GET", "POST"]),
     Route("/api/sheet/unlink", api_sheet_unlink, methods=["POST"]),
     Route("/api/ai/check", api_ai_check, methods=["POST"]),
     Route("/api/update", api_update, methods=["GET", "POST"]),

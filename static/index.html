@@ -145,6 +145,7 @@
   #sheetDlg { width: min(680px, 94vw); }
   #sheetDlg input[type=text], #sheetDlg input[type=number], #sheetDlg select { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
   #sheetPath { flex: 1; min-width: 240px; }
+  #sheetPopoRow[hidden] { display: none; }
   #sheetMap { border-collapse: collapse; width: 100%; font-size: 13px; }
   #sheetMap td { padding: 4px 6px; border-top: 1px solid var(--line); vertical-align: middle; }
   #sheetMap td:first-child { white-space: nowrap; font-weight: 600; }
@@ -232,10 +233,13 @@
   <h3>KOL 总表</h3>
   <p class="note">连上以后，打开 KOL 的邮件会显示表里记的频道链接；每收到或发出一封 KOL 邮件，会把最近联系时间、轮到谁回和一句话进展写进你的表。只写下面对上的列，不加列、不加工作表、不改你的格式；格子里是你自己写的字不会被覆盖，只改空格子和程序自己写过的格子。表里还没有的 KOL 会在下面第一个整行都空的地方加一行，格式照抄上一行。</p>
   <div class="note" id="sheetState"></div>
-  <div class="row2"><input type="text" id="sheetPath" placeholder="总表文件的完整路径（.xlsx），也可以点右边的按钮选" autocomplete="off">
+  <div class="row2"><input type="text" id="sheetPath" placeholder="总表文件的完整路径（.xlsx），或者 POPO 在线表格的链接" autocomplete="off">
     <button class="act" id="sheetPick" type="button">选择文件…</button>
     <button class="act" id="sheetRead" type="button">读取</button>
     <button class="act" id="sheetNew" type="button">新建一张</button></div>
+  <div class="row2" id="sheetPopoRow" hidden><span class="note" id="sheetPopoNote"></span>
+    <button class="act" id="sheetPopoLogin" type="button" hidden>登录 POPO</button>
+    <button class="act" id="sheetPopoRecheck" type="button">重新检测</button></div>
   <div id="sheetMapBox" hidden>
     <div class="row2"><label>工作表 <select id="sheetSheet"></select></label>
       <label>表头在第 <input type="number" id="sheetHeaderRow" min="1" max="50" style="width:4.5em"> 行</label>
@@ -1351,15 +1355,28 @@ function showSheetState(info) {
     : info.mode === "legacy" ? `现在用的是旧的固定格式同步（kol.py）${info.path ? "：" + info.path : ""}。重新选表、对应好列并保存后，会改用按列对应的同步。`
     : !info.path ? "还没有连接总表。"
     : !info.exists ? `连接的总表找不到了：${info.path}（被移动或改名了？重新选一下）`
-    : info.needs_map ? `已选 ${info.path}，还没对应好列，同步没有开始。`
-    : `已连接 ${info.path}` + (info.queued ? `，有 ${info.queued} 条改动排队等写入` : "") + "。";
-  if (info.mac && info.mode === "mapped" && info.path) text += " Mac 上第一次写表时系统会问是否允许 KOL Mail 控制 Excel，点“好”；点了“不允许”的话，在 系统设置 → 隐私与安全性 → 自动化 里打开。";
+    : info.needs_map ? `已选 ${sheetLabel(info)}，还没对应好列，同步没有开始。`
+    : `已连接 ${sheetLabel(info)}` + (info.queued ? `，有 ${info.queued} 条改动排队等写入` : "") + "。";
+  if (info.mac && info.mode === "mapped" && info.path && !info.popo) text += " Mac 上第一次写表时系统会问是否允许 KOL Mail 控制 Excel，点“好”；点了“不允许”的话，在 系统设置 → 隐私与安全性 → 自动化 里打开。";
   el.className = info.error || (info.path && !info.exists) ? "note err" : "note";
   el.textContent = text + (info.error ? " 最近的问题：" + info.error : "");
   for (const id of ["sheetPick", "sheetRead", "sheetNew", "sheetSave"]) $("#" + id).hidden = legacy;
   $("#sheetPath").disabled = legacy;
   $("#sheetCheck").hidden = !(info.mode === "mapped" && info.path);
   $("#sheetUnlink").hidden = legacy || !info.path;
+}
+function sheetLabel(info) { return info.popo ? "POPO 表格 " + (info.popo_link || info.path) : info.path; }
+const isPopoLink = v => /^https?:\/\/docs\.popo\./i.test(v.trim()) || v.trim().startsWith("popo:");
+async function showPopoState() {
+  const row = $("#sheetPopoRow"), note = $("#sheetPopoNote");
+  row.hidden = false; note.className = "note"; note.textContent = "正在检查 popo-cli…";
+  let s;
+  try { s = await api("/api/sheet/popo"); } catch (e) { note.className = "note err"; note.textContent = e.message; return; }
+  $("#sheetPopoLogin").hidden = !s.installed || s.logged_in;
+  note.className = s.installed && s.logged_in ? "note" : "note err";
+  note.textContent = !s.installed ? "这台电脑还没有 popo-cli：按公司的 POPO CLI 使用说明装好（需要 Node.js 20 以上），装好后点“重新检测”。"
+    : !s.logged_in ? "popo-cli 还没登录：点“登录 POPO”，在弹出的窗口里登录，再到 POPO 里确认授权卡片，然后点“重新检测”。"
+    : `popo-cli 已登录（${s.user || "当前账号"}），写表会用这个账号，请确认它能编辑这张表。`;
 }
 function renderSheetMap(d, preset) {
   st.sheetInspect = d;
@@ -1387,7 +1404,8 @@ function renderSheetMap(d, preset) {
 }
 async function readSheet(opts = {}) {
   const path = $("#sheetPath").value.trim();
-  if (!path) { sheetNote("先选一个总表文件", true); return; }
+  if (!path) { sheetNote("先选一个总表文件，或者粘贴 POPO 在线表格的链接", true); return; }
+  if (isPopoLink(path)) showPopoState();
   sheetBusy(true); sheetNote("读取中…");
   try { renderSheetMap(await post("/api/sheet/inspect", { path, sheet: opts.sheet, header_row: opts.header_row }), opts.preset); sheetNote(""); }
   catch (e) { $("#sheetMapBox").hidden = true; sheetNote(e.message, true); }
@@ -1398,6 +1416,8 @@ async function openSheet() {
   showSheetState(info); sheetNote(""); $("#sheetMapBox").hidden = true;
   $("#sheetPath").value = info.owner_fixed || String(info.path || "").startsWith("gsheet:") ? "" : info.path || "";
   if (!$("#sheetDlg").open) $("#sheetDlg").showModal();
+  $("#sheetPopoRow").hidden = true;
+  if (info.popo) { $("#sheetPath").value = info.popo_link || info.path; showPopoState(); }
   if (info.mode === "mapped" && info.path && info.exists) {
     const m = info.map || {};
     const preset = m.columns ? { ...Object.fromEntries(Object.keys(SHEET_FIELD_HINT).map(f => [f, ""])), ...m.columns } : null;
@@ -1409,6 +1429,12 @@ $("#sheetClose").onclick = () => $("#sheetDlg").close();
 $("#sheetRead").onclick = safe(() => readSheet());
 $("#sheetSheet").onchange = safe(() => readSheet({ sheet: $("#sheetSheet").value }));
 $("#sheetHeaderRow").onchange = safe(() => readSheet({ sheet: $("#sheetSheet").value, header_row: $("#sheetHeaderRow").value }));
+$("#sheetPopoRecheck").onclick = safe(showPopoState);
+$("#sheetPopoLogin").onclick = safe(async () => {
+  try { await post("/api/sheet/popo", {}); $("#sheetPopoNote").textContent = "登录窗口已经打开（可能在浏览器后面）。登录并在 POPO 里确认授权后，点“重新检测”。"; }
+  catch (e) { $("#sheetPopoNote").className = "note err"; $("#sheetPopoNote").textContent = e.message; }
+});
+$("#sheetPath").addEventListener("change", () => { if (isPopoLink($("#sheetPath").value)) showPopoState(); else $("#sheetPopoRow").hidden = true; });
 $("#sheetPick").onclick = safe(async () => {
   sheetBusy(true); sheetNote("在弹出的窗口里选你的总表（窗口可能在浏览器后面）…");
   try {
@@ -1445,10 +1471,10 @@ $("#sheetSave").onclick = safe(async () => {
   finally { sheetBusy(false); }
 });
 $("#sheetCheck").onclick = safe(async () => {
-  sheetBusy(true); sheetNote("正在经 Excel 按对应好的列读一遍总表，约半分钟…");
+  sheetBusy(true); sheetNote(`正在经 ${st.sheetInfo && st.sheetInfo.popo ? "POPO" : "Excel"} 按对应好的列读一遍总表，约半分钟…`);
   try {
     const r = await post("/api/sheet/check", {});
-    const how = r.mode === "live" ? "从开着的 Excel 窗口读的" : "在后台打开读的";
+    const how = r.mode === "popo" ? "从 POPO 读的" : r.mode === "live" ? "从开着的 Excel 窗口读的" : "在后台打开读的";
     sheetNote(`读到了：${r.rows} 行，其中 ${r.emails} 行有邮箱、${r.links} 行有频道链接（${how}）。同步的列：${Object.values(r.columns).join("、")}`);
   } catch (e) { sheetNote(e.message, true); }
   finally { sheetBusy(false); }

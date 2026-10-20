@@ -349,6 +349,11 @@ case "$CURRENT_SHEET" in
                 # 拖进“终端”的文件路径带引号，或者空格前带反斜杠
                 SHEET_PATH="$(printf '%s' "$REPLY" | sed -e "s/^'\(.*\)'\$/\1/" -e 's/^"\(.*\)"$/\1/' -e 's/\\\(.\)/\1/g')"
                 [ -z "$SHEET_PATH" ] && break
+                case "$SHEET_PATH" in
+                    http://docs.popo.*|https://docs.popo.*)
+                        say "  POPO 在线表格要先在这台 Mac 上装好并登录 popo-cli。装好 KOL Mail 后，在页面上方的“KOL 总表”里粘贴这个链接连接。"
+                        break ;;
+                esac
                 CREATE=0
                 if [ "$SHEET_PATH" = "new" ]; then CREATE=1; SHEET_PATH="$HOME/Documents/KOL总表.xlsx"; fi
                 case "$SHEET_PATH" in "~/"*) SHEET_PATH="$HOME/${SHEET_PATH#??}" ;; esac

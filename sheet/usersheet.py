@@ -31,7 +31,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))  # kol.py (the Excel COM helpers) sits next to this file
-WORKBOOK = Path(os.environ.get("KOL_SHEET_PATH") or "")
+RAW_WORKBOOK = os.environ.get("KOL_SHEET_PATH") or ""  # a file path, or popo:<docId>[:<teamSpaceId>] (popogrid.py)
+WORKBOOK = Path(RAW_WORKBOOK)
+POPO_CLI = os.environ.get("KOL_POPO_CLI") or ""
 STATE_DIR = Path(os.environ.get("KOL_SHEET_STATE") or HERE)
 PENDING = STATE_DIR / "pending.jsonl"
 FAILED = STATE_DIR / "pending.failed.jsonl"
@@ -157,7 +159,10 @@ def load_map(raw: str | None = None) -> dict:
         header_row = int(m.get("header_row") or 1)
     except (TypeError, ValueError):
         header_row = 1
-    return {"sheet": str(m["sheet"]), "header_row": max(1, header_row), "columns": cols}
+    out = {"sheet": str(m["sheet"]), "header_row": max(1, header_row), "columns": cols}
+    if m.get("sheet_id"):  # a POPO sheet: its id survives a rename
+        out["sheet_id"] = str(m["sheet_id"])
+    return out
 
 
 def find_header_row(rows: list[list], limit: int = 15) -> int:
@@ -458,8 +463,19 @@ class ExcelGrid(Grid):
                 f.unlink()
 
 
+def popo_grid(setting: str, mapping: dict | None = None):
+    from popogrid import PopoGrid
+    ids = {mapping["sheet"]: mapping["sheet_id"]} if mapping and mapping.get("sheet_id") else {}
+    return PopoGrid(setting, Unavailable, UsageError, cli=POPO_CLI, sheet_ids=ids, backups=BACKUPS,
+                    keep_backups=KEEP_BACKUPS)
+
+
 @contextlib.contextmanager
 def open_grid(write: bool = True):
+    if RAW_WORKBOOK.startswith("popo:"):
+        with popo_grid(RAW_WORKBOOK, load_map()) as g:
+            yield g
+        return
     if sys.platform == "win32":
         with ExcelGrid(WORKBOOK, write) as g:
             yield g
@@ -816,8 +832,9 @@ def run(ops: list[dict], source: str, mapping: dict, grid_factory=open_grid) -> 
 
 # ---------------------------------------------------------------- reading without Excel
 
-def read_file_rows(path: Path, sheet: str | None = None) -> tuple[list[str], str, list[list]]:
-    g = XlsxGrid(path)
+def read_file_rows(path, sheet: str | None = None, mapping: dict | None = None) -> tuple[list[str], str, list[list]]:
+    """An .xlsx file through openpyxl, or a POPO sheet (popo:...) through popo-cli."""
+    g = popo_grid(str(path), mapping).__enter__() if str(path).startswith("popo:") else XlsxGrid(Path(path))
     names = g.sheet_names()
     chosen = sheet if sheet in names else None
     if chosen is None:  # the sheet with the most e-mail addresses
@@ -827,22 +844,23 @@ def read_file_rows(path: Path, sheet: str | None = None) -> tuple[list[str], str
             n = sum(1 for r in rows[:500] for v in r if split_emails(v))
             if n > best:
                 chosen, best = name, n
-    return names, chosen, g.rows(chosen)
+    return names, chosen, g.rows(chosen), dict(getattr(g, "ids", {}))
 
 
-def inspect(path: Path, sheet: str | None, header_row: int | None) -> dict:
-    names, chosen, rows = read_file_rows(path, sheet)
+def inspect(path, sheet: str | None, header_row: int | None) -> dict:
+    names, chosen, rows, ids = read_file_rows(path, sheet)
     hr = header_row or find_header_row(rows)
     headers = rows[hr - 1] if hr - 1 < len(rows) else []
     cols = [{"col": c + 1, "header": text(h), **column_profile(rows, hr, c + 1)}
             for c, h in enumerate(headers) if text(h)]
-    return {"sheets": names, "sheet": chosen, "header_row": hr, "rows": max(0, len(rows) - hr), "columns": cols,
+    return {"sheets": names, "sheet": chosen, "sheet_id": ids.get(chosen, ""), "header_row": hr,
+            "rows": max(0, len(rows) - hr), "columns": cols,
             "guess": guess_map(rows, hr), "fields": FIELDS, "required": list(REQUIRED)}
 
 
 def list_rows(mapping: dict, fields: list[str]) -> list[dict]:
     """Rows for app.py, keyed like kol.py's list (邮箱, 频道链接, 阶段, 意向); unmapped ones are empty."""
-    _, _, rows = read_file_rows(WORKBOOK, mapping["sheet"])
+    _, _, rows, _ = read_file_rows(RAW_WORKBOOK, mapping["sheet"], mapping)
     hr = mapping["header_row"]
     headers = rows[hr - 1] if hr - 1 < len(rows) else []
     by_text = {norm_header(h): i for i, h in reversed(list(enumerate(headers))) if text(h)}
@@ -923,12 +941,13 @@ def main(argv=None):
     a = ap.parse_args(argv)
     try:
         if a.cmd == "inspect":
-            emit({"status": "ok", **inspect(Path(a.path), a.sheet, a.header_row)})
+            emit({"status": "ok", **inspect(a.path, a.sheet, a.header_row)})
         if a.cmd == "create":
             emit(create(Path(a.path)))
         if a.cmd == "status":
             pending = sum(len(e.get("ops", [])) for e in read_pending()[0])
-            emit({"workbook": str(WORKBOOK), "exists": WORKBOOK.is_file(), "queued_ops": pending})
+            emit({"workbook": RAW_WORKBOOK, "exists": RAW_WORKBOOK.startswith("popo:") or WORKBOOK.is_file(),
+                  "queued_ops": pending})
         mapping = load_map()
         if a.cmd == "list":
             fields = [f.strip() for f in a.fields.split(",") if f.strip()]

@@ -563,6 +563,10 @@ if (-not ((Has $old "paths") -and (Has $old.paths "sheet_workbook"))) {
         $ans = Ask "总表文件的完整路径（可以把文件拖进这个窗口），输入 new 新建一张，不用就直接回车（以后在页面上方的 KOL 总表按钮里也能接）" ""
         $ans = "$ans".Trim().Trim('"').Trim("'")
         if (-not $ans) { break }
+        if ($ans -match '^https?://docs\.popo\.') {
+            Say "  POPO 在线表格要先在这台电脑上装好并登录 popo-cli。装好 KOL Mail 后，在页面上方的“KOL 总表”里粘贴这个链接连接。"
+            break
+        }
         $create = $ans -eq "new"
         if ($create) { $ans = Join-Path ([Environment]::GetFolderPath("MyDocuments")) "KOL总表.xlsx" }
         if ($ans -notmatch '\.xlsx$') { Warn "  只支持 .xlsx 格式（.xls、.csv 请先在 Excel 里另存为 .xlsx）"; continue }

@@ -186,7 +186,7 @@ def test_busy_workbook_queues_and_flush_writes_later(tmp_path):
 
 
 def test_list_gives_app_the_addresses_and_links(tmp_path, monkeypatch):
-    monkeypatch.setattr(us, "WORKBOOK", english_sheet(tmp_path / "a.xlsx"))
+    monkeypatch.setattr(us, "RAW_WORKBOOK", str(english_sheet(tmp_path / "a.xlsx")))
     rows = us.list_rows(MAP, ["邮箱", "频道链接", "阶段"])
     assert rows == [{"邮箱": "ana@gmail.com", "频道链接": "https://www.youtube.com/@ana", "阶段": ""},
                     {"邮箱": "bo@x.com; bo2@x.com", "频道链接": "", "阶段": ""}]
