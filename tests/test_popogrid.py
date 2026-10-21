@@ -170,3 +170,15 @@ def test_a_failed_sync_writes_nothing(tmp_path):
     g = grid(fake)
     g.set_text("KOLs", 2, 5, "x")
     assert not [c for c in fake.commands if c["type"] == "sheet.batchSetCells"]  # nothing sent before save()
+
+
+def test_a_hanging_popo_cli_is_ended_with_everything_it_started():
+    """popo-cli's node children keep the output pipes open; a timeout must end them too and return at once."""
+    import subprocess
+    import time
+    hang = ("import subprocess, sys, time; "
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)']); time.sleep(120)")
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        pg.run_cli([sys.executable, "-c", hang], timeout=3)
+    assert time.monotonic() - started < 30

@@ -369,7 +369,11 @@ def watchdog():  # whatever hangs, the installer gets an answer and the colleagu
     os._exit(1)
 
 
-threading.Timer(660, watchdog).start()  # the slowest honest run: two model lookups (120 s) and two calls (180 s)
+# The slowest honest run: two model lookups (120 s) and two calls (180 s). A daemon thread: a normal exit must never
+# wait for it (it did in v0.3.1: every "version" check sat out the 11 minutes and then read as "CodeMaker not found").
+_dog = threading.Timer(660, watchdog)
+_dog.daemon = True
+_dog.start()
 
 app, backend, mode = sys.argv[1], sys.argv[2], sys.argv[3]
 claude_bin = sys.argv[4] if len(sys.argv) > 4 else ""
@@ -393,8 +397,8 @@ if mode == "version":
             out["version"] = (r.stdout or r.stderr).strip()[:200]
         except (OSError, subprocess.SubprocessError):
             out["version"] = ""
-    print(json.dumps(out))
-    sys.exit(0)
+    print(json.dumps(out), flush=True)
+    os._exit(0)
 schema = {"type": "object", "properties": {"ok": {"type": "string"}}, "required": ["ok"]}
 for role in llm.ROLES:
     try:
@@ -464,6 +468,12 @@ function Connect-AI {
             continue
         }
         $bin = $v.Data.binary
+        if (-not $bin -and $v.Data.errors) {  # the check itself failed (timed out, crashed): say that, not "not found"
+            Warn "  检测 $label 时出错："
+            @($v.Data.errors) | ForEach-Object { Warn "    $($_[1])" }
+            if (-not (Wait-Retry "  ")) { return $false }
+            continue
+        }
         if (-not $bin) {
             if ($backend -eq "claude") {
                 if ((Ask "  没找到 Claude Code。现在用官方安装器装上吗？(Y/n)" "Y") -match "^[Yy]") { Install-ClaudeCode; continue }

@@ -85,6 +85,34 @@ class PopoError(Exception):
     pass
 
 
+def run_cli(argv: list[str], timeout: int, env: dict | None = None) -> tuple[int, bytes, bytes]:
+    """Run popo-cli and give up after `timeout` seconds, ending the whole process tree. popo-cli is a .cmd (Windows) or
+    shell shim that starts node, which starts more node: killing only the shim leaves them holding the output pipes,
+    and a plain subprocess.run then waits for them for good (seen on 2026-10-21 when POPO stopped answering)."""
+    kwargs = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {"start_new_session": True}
+    p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, **kwargs)
+    try:
+        out, err = p.communicate(timeout=timeout)
+        return p.returncode, out, err
+    except subprocess.TimeoutExpired:
+        if sys.platform == "win32":
+            try:
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True, timeout=30)
+            except (OSError, subprocess.SubprocessError):
+                pass  # the kill below still ends the shim; the caller sees the timeout either way
+        else:
+            import signal
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        try:
+            p.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+        raise
+
+
 def unwrap(out: str) -> dict:
     """popo-cli wraps the document service's answer several times; return its innermost data, or raise PopoError with
     what to do."""
@@ -153,14 +181,14 @@ class PopoGrid:
         if not cli:
             raise self.Unavailable("这台电脑上没有 popo-cli：装好并运行 popo-cli auth login 登录后，会自动补写排队的改动")
         try:
-            r = subprocess.run([cli, *args], capture_output=True, timeout=CALL_TIMEOUT, env=cli_env(cli))
+            _, stdout, stderr = run_cli([cli, *args], CALL_TIMEOUT, cli_env(cli))
         except subprocess.TimeoutExpired:
-            raise self.Unavailable("popo-cli 两分钟没有返回（网络慢或 POPO 服务忙）") from None
+            raise self.Unavailable("popo-cli 两分钟没有返回（网络慢或 POPO 服务忙），稍后自动重试") from None
         except OSError as e:
             raise self.Unavailable(f"popo-cli 启动不了：{e}") from None
-        out = r.stdout.decode("utf-8", "replace")
+        out = stdout.decode("utf-8", "replace")
         if not out.strip():
-            raise self.Unavailable(f"popo-cli 出错：{r.stderr.decode('utf-8', 'replace').strip()[-200:]}")
+            raise self.Unavailable(f"popo-cli 出错：{stderr.decode('utf-8', 'replace').strip()[-200:]}")
         return out
 
     def call(self, command: dict) -> dict:
@@ -294,8 +322,13 @@ def resolve_link(link: str, cli: str, run=None) -> str:
         raise PopoError("不是 POPO 在线表格的链接（在 POPO 里打开那张表，复制浏览器地址栏里的链接）")
     if "/team/" not in urlparse(link).path:
         return f"popo:{doc}"
-    runner = run or (lambda args: subprocess.run([cli, *args], capture_output=True, timeout=CALL_TIMEOUT,
-                                                 env=cli_env(cli)).stdout.decode("utf-8", "replace"))
+    def runner(args):
+        if run:
+            return run(args)
+        try:
+            return run_cli([cli, *args], CALL_TIMEOUT, cli_env(cli))[1].decode("utf-8", "replace")
+        except subprocess.TimeoutExpired:
+            raise PopoError("popo-cli 两分钟没有返回（网络慢或 POPO 服务忙），稍后再试") from None
     u = urlparse(link.strip())
     clean = urlunparse((u.scheme, u.netloc, u.path, "", "", ""))  # no query: an "&" would split the command in cmd.exe
     data = unwrap(runner(["popo", "doc_get_folder_path", f"url={clean}"]))
@@ -308,8 +341,8 @@ def auth_status(cli: str) -> dict:
     if not cli:
         return {"installed": False, "logged_in": False, "user": ""}
     try:
-        r = subprocess.run([cli, "auth", "status"], capture_output=True, timeout=60, env=cli_env(cli))
-        obj = json.loads(r.stdout.decode("utf-8", "replace"))
+        _, stdout, _ = run_cli([cli, "auth", "status"], 60, cli_env(cli))
+        obj = json.loads(stdout.decode("utf-8", "replace"))
         data = obj.get("data") or {}
         return {"installed": True, "logged_in": bool(obj.get("ok") and data.get("has_access_token")),
                 "user": str(data.get("uid") or "")}

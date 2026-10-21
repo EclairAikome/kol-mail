@@ -4,13 +4,13 @@
   ".github/workflows/test.yml": "16fc10a49137f41f0f3ce5c042b222df206c873331784dade44cafaaa174c39d",
   ".gitignore": "fda225b90576b3ac12290237432cc59ce4344dd9beaafa95846bad849e9d735a",
   "README.md": "a220dd7cf8d85bc27892377ca6de4778f2051e4c14eade57a7fdf31585098457",
-  "VERSION": "511a100eedfb9ea66441e5d506392dba2d8aa290f98c4c544c70ae75ec3c3396",
+  "VERSION": "a0dc8325e2fbe558e09bf7d61260ca378151b0a3f875dd8b46ecd3693e34c10b",
   "app.py": "d90fee06ea77acb6e8ea77e827a2b46d9f5d16a6c7f6002ae5df86ef8381b008",
   "autoreply.example.json": "edb9dfc884b466773254b6dafc1618d0babd49ca4b7b052fe0879749b3e5e5d1",
   "autoreply.py": "06a44152a398d4678eb51cd33e679dfc4b5fa7f0a2c952b50d5dbfc7cb0f1376",
   "config.py": "03b060259df7bf6dac8083180a883e82f3eae52b604926c5308f3e0968480b47",
   "feedback.py": "e8f7995e323292f4d425f913beded70cf133453b2e1d6410e0819b30b189796c",
-  "install.ps1": "30951dd103d8351a274138f471f2a97a715e61f5d3d755c8ac8be356415b4ad0",
+  "install.ps1": "9b785de441e723aad3d4fdc16f0a9ef6df9e0f46069a19d7769d8b75b6934236",
   "install.sh": "0f780fee5ff59a43ee34387b935e11245701cf537477d09e18659a3603eaeaff",
   "koc.py": "2a0597f13138ac2ee7dbe34003c3ba1f03d8667f2993f57d2b83011ef7fb5eab",
   "llm.py": "52197fcaedb22a3035a496a7bcca767631f7511cf86765e439e3e85187ec828e",
@@ -28,7 +28,7 @@
   "sheet/gsheet.py": "b487841daece6fa440ec09a402607742fcf0f7f7481cdb321844eb29692206aa",
   "sheet/kol.py": "cb6343bcc2838f0aa356fc1a6d9aaf4408b02b807e59180d5e883dfd4bb8fbae",
   "sheet/macexcel.py": "ccb9c04cdeb84226cfb040f32330a376b0f0edb0e313ff1676615d107ad0b72e",
-  "sheet/popogrid.py": "a680de14b883baad5009c6d12b47c411187dca99f7fccb0cb060494f1b19c53a",
+  "sheet/popogrid.py": "3a9db285879a352f752a3a5c1c19ab8ae6b5a1e92763f1d15e6fa4ce78c4e93c",
   "sheet/usersheet.py": "181475f006b15cc78db7f5e164c9dc3ab3dec1c972242257ec7ea228adc4ee5d",
   "start-kol-mail.cmd": "321d8ea7748791268ebc7c88febea80afbecb3225c352a1965edf3150d3c5f7c",
   "static/index.html": "28b4cf0e6f45f12779694771fb9283bb4f49e28af37f73f7c07eb927cc9a8a24",
@@ -39,6 +39,7 @@
   "tests/test_commands.py": "7b4c9d00750b687f0b84a6a1d093d3e128a1fd1bcb2d23dcb72ec9764981eff7",
   "tests/test_feedback.py": "358f78d7597c11165147bbf93a4803dec2b9ad4db2aed07146ea8cf342a14476",
   "tests/test_gsheet.py": "4cfe67cdf05c5fb8a9656501cb82cf650de60be4a0f9f0d5fc40dc7c48a13f67",
+  "tests/test_install_aicheck.py": "f23016aa725b87706b89cefcbafc0ab7e5bba5500f231f21883064bba03b7a76",
   "tests/test_koc.py": "7899057b9cac2b3255c1b58176d94b5b4d7281dd143699f356f9fc435ad5bc89",
   "tests/test_llm.py": "30138af42b30d8307d4700bfd32ee00eb4978c74910df51024ba92e81a887c06",
   "tests/test_macexcel.py": "818ee28431dd43af20903ebabc0e02794aff365ea85345b6852bfe20f7aabcc4",
@@ -47,7 +48,7 @@
   "tests/test_offhours_switch.py": "ae9b8dd2cf8e3a9e84e68b5136f6916ae2a815263dc35c542245fbdd53aedfb9",
   "tests/test_onboarding.py": "dc616bd4104cb9cfe1b2885813d7e48e6127c10eabb3e137b35468b73dd0e06d",
   "tests/test_outgoing.py": "bc06d4b3d07acd62b7e3cd40e424116fa9a7504949c916b9eac15ad0bd4e8825",
-  "tests/test_popogrid.py": "ce8317987828823c44684c7c6d992e6cb902cbd5e495b7a0b5f12de6d6fb5a3d",
+  "tests/test_popogrid.py": "77e3f627f392bf15441ae72b54fb8cd663a04b305e73445b25d812fd24eeab88",
   "tests/test_replyflow.py": "070f6896e2c83d54494f59e40f7a83cc19f28fef4d4aade1b9844e62fd3c18f7",
   "tests/test_sheet_link.py": "d0c7a74b5dae33932037ba075fc551a2e292a117f748c5ba475441a0d4238e17",
   "tests/test_update_check.py": "e9c1f3e92a9a8757f33d4f58e7e2cabc37f6e020e96b57141ba59b67698040c1",
@@ -57,5 +58,5 @@
   "tools/publish.py": "b125f29399e7bc1a6c2ec1d176b17159cc237a65925fa3fb63213169d655fc3d",
   "updater.py": "0c95084b5871fc5b71fcc6e7c46a321b23e0cc6d946c6ef8bf3bfa082c75b6f6"
  },
- "version": "0.3.2"
+ "version": "0.3.3"
 }
