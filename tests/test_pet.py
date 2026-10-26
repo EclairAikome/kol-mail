@@ -1,0 +1,590 @@
+"""The desktop pet: what it decides to show, its settings, its pictures, and the app's side (/api/pet)."""
+
+import asyncio
+import ctypes
+import json
+import struct
+import sys
+import zlib
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import app  # noqa: E402
+import petfeed  # noqa: E402
+from pet import brain, sprites  # noqa: E402
+from starlette.testclient import TestClient  # noqa: E402
+
+PET_DIR = Path(__file__).resolve().parents[1] / "pet" / "whale-girl"
+KOL_STATES = ["idle", "mail", "notify", "waiting", "sleeping", "failed", "thinking", "sending", "drag-left",
+              "drag-right", "hop"]
+TOUCH_STATES = ["pat", "poke", "giggle", "spout"]
+
+
+class Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+def make_brain(boot="b1"):
+    clock, wall = Clock(), Clock()
+    b = brain.Brain(lambda s: 1000, boot, now=clock, wall=wall)
+    return b, clock, wall
+
+
+def poll(b, wall, **kw):
+    data = {"boot": "b1", "seq": 0, "events": [], "unread": 0, "busy": None, "error": None, "off_hours": False,
+            "settings": {"enabled": True, "muted": False}, "url": "http://127.0.0.1:8765/"}
+    data.update(kw)
+    b.on_poll(data)
+
+
+def mail(seq, at, **kw):
+    return {"seq": seq, "at": at, "kind": "mail", "title": "新邮件 · Ana", "line1": "合作", "line2": "",
+            "link": f"http://127.0.0.1:8765/#open=INBOX/{seq}", **kw}
+
+
+# ---------------------------------------------------------------- brain
+
+def test_a_new_mail_hops_then_holds_up_the_envelope_with_a_bubble():
+    b, clock, wall = make_brain()
+    poll(b, wall)
+    poll(b, wall, events=[mail(1, wall.t)])
+    assert b.state() == "mail"
+    assert b.bubble().title == "新邮件 · Ana"
+    clock.t += 1.5
+    assert b.state() == "notify"
+    clock.t += brain.BUBBLE_FOR
+    assert b.bubble() is None
+    clock.t += brain.NOTIFY_FOR
+    assert b.state() == "idle"
+
+
+def test_clicking_opens_the_mail_in_the_bubble_otherwise_the_app():
+    b, clock, wall = make_brain()
+    poll(b, wall)
+    assert b.on_click() == "http://127.0.0.1:8765/"
+    clock.t += 5
+    poll(b, wall, events=[mail(2, wall.t)])
+    assert b.on_click() == "http://127.0.0.1:8765/#open=INBOX/2"
+    assert b.bubble() is None and b.state() == "hop"
+
+
+def test_muted_changes_the_move_but_shows_no_bubble():
+    b, clock, wall = make_brain()
+    poll(b, wall, settings={"enabled": True, "muted": True})
+    poll(b, wall, settings={"enabled": True, "muted": True}, events=[mail(1, wall.t)])
+    assert b.state() == "mail" and b.bubble() is None
+
+
+def test_a_second_mail_updates_the_bubble_and_counts_it():
+    b, clock, wall = make_brain()
+    poll(b, wall)
+    poll(b, wall, events=[mail(1, wall.t)])
+    poll(b, wall, events=[mail(2, wall.t, title="新邮件 · Bob")])
+    assert b.bubble().title == "新邮件 · Bob" and b.bubble().more == 1
+
+
+def test_on_start_older_mail_is_not_announced_again():
+    b, clock, wall = make_brain()
+    poll(b, wall, events=[mail(1, wall.t - 300), mail(2, wall.t - 5)])
+    assert b.bubble().link.endswith("/2")
+
+
+def test_precedence_drag_over_oneshot_over_error_over_busy_over_unread():
+    b, clock, wall = make_brain()
+    poll(b, wall, unread=3)
+    assert b.state() == "waiting"
+    poll(b, wall, unread=3, busy="thinking")
+    assert b.state() == "thinking"
+    poll(b, wall, unread=3, busy="sending", error="收信出错")
+    assert b.state() == "failed"
+    b.on_drag(-3)
+    assert b.state() == "drag-left"
+    b.on_drag(5)
+    assert b.state() == "drag-right"
+    b.on_drop()
+    assert b.state() == "hop"
+
+
+def test_falls_asleep_off_hours_or_when_left_alone():
+    b, clock, wall = make_brain()
+    poll(b, wall, off_hours=True)
+    assert b.state() == "sleeping"
+    poll(b, wall)
+    assert b.state() == "idle"
+    clock.t += brain.DOZE_AFTER + 1
+    assert b.state() == "sleeping"
+    b.on_hover()
+    assert b.state() == "idle"
+
+
+def test_leaves_when_switched_off_restarted_or_the_app_is_gone():
+    b, clock, wall = make_brain()
+    poll(b, wall, settings={"enabled": False})
+    assert b.quit_reason == "switched off"
+    b, clock, wall = make_brain()
+    poll(b, wall, boot="b2")
+    assert b.quit_reason and "restarted" in b.quit_reason
+    b, clock, wall = make_brain()
+    poll(b, wall)
+    clock.t += brain.OFFLINE_EXIT - 1
+    b.on_offline()
+    assert b.quit_reason is None
+    clock.t += 2
+    b.on_offline()
+    assert b.quit_reason == "the app stopped answering"
+
+
+def test_only_the_app_s_own_page_is_ever_opened():
+    from pet.client import own_page
+    assert own_page("http://127.0.0.1:8765/#open=INBOX/7/me_163", 8765)
+    assert own_page("http://127.0.0.1:8765/", 8765)
+    for bad in ("http://127.0.0.1:1@evil.io/", "http://127.0.0.1:9999/", "https://127.0.0.1:8765/",
+                "http://127.0.0.1:8765/../x", "http://127.0.0.1:8765/?q=1", "file:///C:/x", "http://127.0.0.1:8765@x/"):
+        assert not own_page(bad, 8765), bad
+
+
+def test_only_the_letter_opens_kol_mail_and_a_touch_gets_a_reaction():
+    b, clock, wall = make_brain()
+    b.pick = lambda lines: lines[0]
+    poll(b, wall)
+    assert b.on_touch("head") is None
+    assert b.state() == "pat" and b.bubble().say and b.bubble().title == brain.REACTIONS["head"][1][0]
+    clock.t += brain.SAY_FOR + 0.1
+    assert b.bubble() is None
+    for part, state in (("face", "poke"), ("body", "giggle"), ("tail", "spout"), ("feet", "hop")):
+        assert b.on_touch(part) is None and b.state() == state, part
+    assert b.on_touch("") is None  # nothing there
+    assert b.on_touch("mail") == "http://127.0.0.1:8765/"
+    poll(b, wall, events=[mail(3, wall.t), mail(4, wall.t, link="")])  # the newest has no link: the app at least
+    assert b.on_touch("mail") == "http://127.0.0.1:8765/"
+
+
+def test_small_talk_never_covers_a_new_mail_bubble():
+    b, clock, wall = make_brain()
+    poll(b, wall)
+    b.on_touch("head")
+    poll(b, wall, events=[mail(1, wall.t)])
+    assert not b.bubble().say  # the mail took the bubble over
+    b.on_touch("face")
+    assert b.bubble().title == "新邮件 · Ana" and b.state() == "poke"
+    assert b.on_touch("mail").endswith("/#open=INBOX/1")
+    b.on_touch("body")
+    assert b.bubble().say and b.on_bubble_click() is None and b.bubble() is None  # a click just closes it
+
+
+def test_muted_she_still_reacts_but_says_nothing():
+    b, clock, wall = make_brain()
+    poll(b, wall, settings={"enabled": True, "muted": True})
+    b.on_touch("tail")
+    assert b.state() == "spout" and b.bubble() is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows window code")
+def test_dragging_works_again_after_a_click(monkeypatch):
+    """A first click once left the drag direction as None, and every later drag failed."""
+    from pet import win
+    w = win.PetWindow.__new__(win.PetWindow)
+    w.brain = brain.Brain(lambda s: 1000, "b")
+    w.sprites = sprites.Sprites((10, 10), {}, "x")  # no part map: a click anywhere opens KOL Mail
+    w.press, w.dragging, w.last_x, w.pos = None, False, None, (500, 500)
+    w.client = type("C", (), {"save": lambda self, **k: None})()
+    moved, cursor = [], [0, 0]
+    monkeypatch.setattr(win, "GetCursorPos", lambda p: (setattr(p._obj, "x", cursor[0]), setattr(p._obj, "y", cursor[1])))
+    monkeypatch.setattr(win, "SetCapture", lambda h: None)
+    monkeypatch.setattr(win, "ReleaseCapture", lambda: None)
+    w.move = lambda x, y: (moved.append((x, y)), setattr(w, "pos", (x, y)))
+    w.render = w.update_bubble = lambda *a, **k: None
+    w.dpi = lambda: 1.0
+    w.open = lambda url: None
+    for drag in range(3):  # click, drag, drag again
+        cursor[:] = [100, 100]
+        w._handle(None, win.WM_LBUTTONDOWN, 0, 0)
+        if drag:
+            cursor[:] = [140, 110]
+            w._handle(None, win.WM_MOUSEMOVE, win.MK_LBUTTON, 0)
+        w._handle(None, win.WM_LBUTTONUP, 0, 0)
+    assert len(moved) == 2
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows window code")
+def test_a_click_counts_what_was_under_the_cursor_when_pressed(monkeypatch):
+    """At 60 frames a second her tail may have swung away by the time the button comes up."""
+    from pet import win
+    w = win.PetWindow.__new__(win.PetWindow)
+    w.brain = brain.Brain(lambda s: 1000, "b")
+    w.sprites = sprites.load(PET_DIR)
+    w.press, w.dragging, w.last_x, w.pos = None, False, None, (0, 0)
+    w.render = w.update_bubble = lambda *a, **k: None
+    w.open = lambda url: None
+    under = iter(["tail", ""])  # the tail at the press, nothing a moment later
+    w.part_at = lambda x, y: next(under)
+    monkeypatch.setattr(win, "GetCursorPos", lambda p: None)
+    monkeypatch.setattr(win, "SetCapture", lambda h: None)
+    monkeypatch.setattr(win, "ReleaseCapture", lambda: None)
+    w._handle(None, win.WM_LBUTTONDOWN, 0, 0)
+    w._handle(None, win.WM_LBUTTONUP, 0, 0)
+    assert w.brain.state() == "spout"
+
+
+# ---------------------------------------------------------------- sprites
+
+def png_size(path: Path) -> tuple[int, int]:
+    raw = path.read_bytes()
+    assert raw.startswith(b"\x89PNG"), path.name
+    return struct.unpack(">II", raw[16:24])
+
+
+def test_whale_girl_has_every_state_at_60_frames_a_second_inside_her_pictures():
+    s = sprites.load(PET_DIR)
+    assert set(KOL_STATES + TOUCH_STATES) <= set(s.states)
+    assert s.get("idle").durations[0] == pytest.approx(1000 / 60) and s.touchable
+    cw, ch = s.cell
+    pw, ph = cw // s.part_scale, ch // s.part_scale
+    assert ch % s.part_scale == 0  # no half rows in the part maps
+    for name, st in s.states.items():
+        assert st.loop_ms > 0 and st.durations[0] <= 34, name  # never below 30 frames a second
+        layers = [(st.layer, [st.base_frame(i) for i in range(st.frames)])]
+        if st.overlay:
+            layers.append((st.overlay, [st.over_frame(i) for i in range(st.frames)]))
+        for layer, frames in layers:
+            for i in frames:
+                band, j = divmod(i, layer.per)
+                w, h = png_size(layer.bands[band])
+                assert w == cw and (j + 1) * ch <= h, name
+                w, h = png_size(layer.parts[band])
+                assert w == pw and (j + 1) * ph <= h, name
+        if st.overlay:
+            x0, y0, x1, y1 = st.overlay.box
+            assert 0 <= x0 < x1 <= cw and 0 <= y0 < y1 <= ch, name
+    pictures = list(PET_DIR.glob("*.png"))
+    for p in pictures:
+        w, h = png_size(p)
+        assert h <= 5 * ch, p.name  # small enough for Tk to decode quickly
+    assert sum(p.stat().st_size for p in pictures) < 10 * 1024 * 1024
+
+
+def v2_pet(folder: Path, **state) -> Path:
+    """A made-up pet: a 6-frame clip in bands of 3, and an idle state of 4 steps with 2 frames of props."""
+    for name in ("c.0.png", "c.0.parts.png", "c.1.png", "c.1.parts.png", "o.0.png", "o.0.parts.png"):
+        (folder / name).write_bytes(b"")
+    idle = {"clip": "sway", "frames": 4, "fps": 60, "pick": [0, 2, 4, 5],
+            "overlay": {"bands": [["o.0.png", "o.0.parts.png"]], "per": 5, "frames": 2, "pick": [0, 0, 1, 1],
+                        "box": [10, 20, 30, 40]}}
+    meta = {"kolmail": {"version": 2, "cell": [100, 200],
+                        "clips": {"sway": {"bands": [["c.0.png", "c.0.parts.png"], ["c.1.png", "c.1.parts.png"]],
+                                           "per": 3, "frames": 6}},
+                        "states": {"idle": {**idle, **state}}, "parts": {"scale": 2, "names": ["", "head", "mail"]}}}
+    (folder / "pet.json").write_text(json.dumps(meta), encoding="utf-8")
+    return folder
+
+
+def test_a_click_reads_the_props_on_top_first_then_the_clip_frame_shown(tmp_path):
+    s = sprites.load(v2_pet(tmp_path))
+    st = s.get("idle")
+    assert [st.base_frame(i) for i in range(4)] == [0, 2, 4, 5] and st.loop_ms == pytest.approx(4000 / 60)
+    assert st.layer.at(4, s.cell) == (tmp_path.resolve() / "c.1.png", 0, 200) and st.overlay.box == (10, 20, 30, 40)
+    (over, ox, oy), (clip, cx, cy) = s.part_lookups("idle", 2, 31, 41)
+    assert over.name == "o.0.parts.png" and (ox, oy) == (15, 1 * 100 + 20)  # props frame 1
+    assert clip.name == "c.1.parts.png" and (cx, cy) == (15, 1 * 100 + 20)  # clip frame 4: band 1, second down
+    assert s.part_lookups("idle", 0, 50, 199.5)[0][2] == 99  # the last row stays inside its frame
+    assert s.part_lookups("idle", 0, 150, 10) == []  # outside her cell
+    assert s.part_name(80) == "mail" and s.part_name(40) == "head" and s.part_name(0) == ""
+
+
+@pytest.mark.parametrize("change", [
+    {"pick": [0, 2, 4, 6]}, {"pick": [0, 1]}, {"pick": None, "frames": 7}, {"frames": 0}, {"frames": -3},
+    {"frames": True}, {"fps": 0.5}, {"fps": "60"}, {"clip": "nowhere"},
+    {"overlay": {"bands": [["o.0.png"]], "per": 5, "frames": 9, "pick": [0, 0, 0, 0]}},
+    {"overlay": {"bands": [["gone.png"]], "per": 5, "frames": 1, "pick": [0, 0, 0, 0]}},
+    {"overlay": {"bands": [["../x.png"]], "per": 5, "frames": 1, "pick": [0, 0, 0, 0]}},
+    {"overlay": {"bands": [["o.0.png"]], "per": 5, "frames": 1, "pick": [0, 0, 0, 0], "box": [1, 2]}},
+    {"overlay": "props"},
+])
+def test_a_pet_json_that_does_not_add_up_is_refused_at_once(tmp_path, change):
+    state = {k: v for k, v in change.items() if v is not None}
+    folder = v2_pet(tmp_path, **state)
+    if change.get("pick", 0) is None:
+        meta = json.loads((folder / "pet.json").read_text(encoding="utf-8"))
+        meta["kolmail"]["states"]["idle"].pop("pick")
+        (folder / "pet.json").write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises(ValueError):
+        sprites.load(folder)
+
+
+def test_a_newer_or_broken_pet_format_is_refused(tmp_path):
+    for meta in ({"kolmail": {"version": 3}}, {"kolmail": {"version": 2}}, {"kolmail": {"version": 2, "cell": [0, 9],
+                 "states": {}}}, {"kolmail": "v2"}):
+        (tmp_path / "pet.json").write_text(json.dumps(meta), encoding="utf-8")
+        with pytest.raises(ValueError):
+            sprites.load(tmp_path)
+
+
+def test_a_plain_codex_pet_maps_our_states_onto_its_rows(tmp_path):
+    (tmp_path / "spritesheet.webp").write_bytes(b"")
+    (tmp_path / "pet.json").write_text('{"id": "x", "displayName": "X", "spritesheetPath": "spritesheet.webp"}',
+                                       encoding="utf-8")
+    s = sprites.load(tmp_path)
+    assert s.cell == (192, 208) and not s.touchable
+    assert s.resolve("mail") == "jumping" and s.resolve("sleeping") == "idle" and s.resolve("drag-left") == "running-left"
+    assert s.resolve("thinking") == "review" and s.resolve("whatever") == "idle" and s.resolve("pat") == "waving"
+    assert s.get("drag-left").layer.at(2, s.cell) == (tmp_path.resolve() / "spritesheet.webp", 384, 2 * 208)
+
+
+def test_a_sheet_outside_the_pet_folder_is_refused(tmp_path):
+    (tmp_path / "pet.json").write_text('{"spritesheetPath": "../../secret.png"}', encoding="utf-8")
+    with pytest.raises(ValueError):
+        sprites.load(tmp_path)
+
+
+@pytest.fixture
+def gdiplus():
+    from pet import win
+    token = ctypes.c_size_t()
+    win.check(win.GdiplusStartup(ctypes.byref(token), ctypes.byref(win.GdiplusStartupInput(1, None, False, False)),
+                                 None), "Startup")
+    return win
+
+
+def stub_window(win, size=None):
+    s = sprites.load(PET_DIR)
+    w = win.PetWindow.__new__(win.PetWindow)
+    w.sprites, w.size, w.mix, w.scale, w.own_dpi = s, size or s.cell, None, 1.0, lambda: 1.0
+    w.strips = win.Cache(lambda path: win.Strip(path, s.cell, w.size), budget=win.STRIP_BUDGET)
+    w.part_maps = win.Cache(win.PartMap, budget=16 << 20)
+    return w
+
+
+def pixel(bits, width: int, x: int, y: int) -> int:
+    return ctypes.cast(bits, ctypes.POINTER(ctypes.c_uint32))[y * width + x]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows drawing code")
+def test_her_letter_her_head_her_tail_and_the_air_around_her(gdiplus):
+    w = stub_window(gdiplus)
+    w.shown_state, w.frame = "idle", 0
+    try:
+        assert w.part_at(191, 220) == "mail"   # the letter in her right hand
+        assert w.part_at(110, 115) == "head"   # her hat
+        assert w.part_at(3, 3) == ""           # the air: nothing to touch
+        cw, ch = w.sprites.cell
+        seen = {w.part_at(x, y) for x in range(0, cw, 4) for y in range(0, ch, 4)}
+        assert {"head", "face", "body", "tail", "feet", "mail"} <= seen
+        w.shown_state = "sleeping"  # facing front: the tail's fin to her left, below the skirt
+        assert {w.part_at(x, y) for x in range(150, 200, 2) for y in range(290, 315, 2)} & {"tail"}
+    finally:
+        w.part_maps.close()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows drawing code")
+def test_the_letter_is_blended_over_her_turn(gdiplus):
+    win = gdiplus
+    w = stub_window(win)
+    cw, ch = w.sprites.cell
+    st = w.sprites.get("idle")
+    try:
+        dc, x, y = w.picture(st, 0)
+        assert (dc, x, y) == (w.mix.dc, 0, 0)
+        base = w.strips.get(st.layer.at(0, (cw, ch))[0])
+        over = w.strips.get(st.overlay.at(0, (cw, ch))[0])
+        assert pixel(w.mix.bits, cw, 191, 220) == pixel(over.bits, cw, 191, 220) != 0  # the letter, on top
+        assert pixel(w.mix.bits, cw, 110, 115) == pixel(base.bits, cw, 110, 115) != 0  # her hat, from the clip
+        assert pixel(w.mix.bits, cw, 3, 3) == 0  # still see-through
+        assert w.picture(w.sprites.get("pat"), 7)[1:] == (0, 2 * ch)  # her own frames: straight from the band
+    finally:
+        w.strips.close()
+        w.mix.close()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows drawing code")
+def test_at_the_small_and_big_sizes_each_frame_is_scaled_once_and_alone(gdiplus):
+    win = gdiplus
+    s = sprites.load(PET_DIR)
+    cw, ch = s.cell
+    for size in ((165, 268), (275, 448)):
+        strip = win.Strip(s.get("pat").layer.bands[0], s.cell, size)
+        try:
+            assert (strip.w, strip.h) == (size[0], 5 * size[1])
+            assert pixel(strip.bits, strip.w, size[0] // 2, size[1] * 115 // ch) >> 24 >= 250  # her hat, opaque
+            for frame in range(1, 5):  # the air above her head: nothing of the frame before seeps in
+                assert all(pixel(strip.bits, strip.w, x, frame * size[1]) == 0 for x in range(size[0]))
+        finally:
+            strip.close()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows drawing code")
+def test_a_picture_that_cannot_be_read_is_said_once_and_not_retried_every_frame(gdiplus, capsys):
+    win = gdiplus
+    calls = []
+
+    def broken(path):
+        calls.append(path)
+        raise OSError("locked")
+
+    cache = win.Cache(broken, budget=1)
+    for _ in range(3):
+        with pytest.raises(OSError):
+            cache.get(PET_DIR / "pat.0.png")
+    assert len(calls) == 1 and capsys.readouterr().out.count("pat.0.png") == 1
+    w = stub_window(win)
+    w.strips, w.part_maps = cache, cache
+    w.shown_state, w.frame, w.started, w.shown_key, w.hidden_for_fullscreen = "idle", 7, 0.0, ("idle", None), False
+    w.brain = brain.Brain(lambda s: 1000, "b")
+    w.render(force=True)  # nothing to show yet: the window keeps its last frame, no exception
+    assert w.frame == 7 and w.part_at(110, 115) == ""
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows window code")
+def test_the_same_reaction_twice_plays_from_the_start_again(monkeypatch):
+    from pet import win
+    clock, tick = Clock(), [0.0]
+    monkeypatch.setattr(win.time, "perf_counter", lambda: tick[0])
+    w = win.PetWindow.__new__(win.PetWindow)
+    w.sprites = sprites.load(PET_DIR)
+    w.brain = brain.Brain(lambda s: w.sprites.get(s).loop_ms, "b", now=clock)
+    w.shown_state, w.frame, w.started, w.shown_key = "", -1, 0.0, None
+    w.brain.on_touch("head")
+    assert w.current()[0] == "pat" and w.current()[2] == 0
+    tick[0] += 1.0
+    clock.t += 1.0
+    assert w.current()[2] > 50
+    w.brain.on_touch("head")  # patted again before the first one ended
+    assert w.current()[0] == "pat" and w.current()[2] == 0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows window code")
+def test_a_codex_pet_s_beat_keeps_up_with_its_shortest_frame(tmp_path):
+    from pet import win
+    (tmp_path / "spritesheet.png").write_bytes(b"")
+    (tmp_path / "pet.json").write_text("{}", encoding="utf-8")
+    w = win.PetWindow.__new__(win.PetWindow)
+    w.sprites = sprites.load(tmp_path)
+    w.brain = brain.Brain(lambda s: 1000, "b")
+    w.shown_state, w.frame, w.started, w.shown_key, w.hidden_for_fullscreen = "", 0, 0.0, None, False
+    w.picture = lambda st, step: (_ for _ in ()).throw(OSError("not drawn here"))
+    w.render()
+    assert w.tick_hz == pytest.approx(2000 / 110)  # idle's shortest frame, not its first (280 ms)
+
+
+# ---------------------------------------------------------------- petfeed
+
+def test_settings_are_cleaned_and_only_known_keys_kept(tmp_path):
+    path = tmp_path / "pet.json"
+    assert petfeed.load_settings(path) == petfeed.DEFAULTS
+    s = petfeed.save_settings(path, {"scale": 1.3, "muted": "yes", "x": 120.7, "y": True, "evil": 1,
+                                     "pet": "../x"})
+    assert s["scale"] == 1.25 and s["muted"] is False and s["x"] == 120 and s["y"] is None
+    assert "evil" not in petfeed.load_settings(path) and s["pet"] == "whale-girl"
+    assert petfeed.save_settings(path, {"enabled": False})["scale"] == 1.25  # the rest is kept
+    path.write_text("not json", encoding="utf-8")
+    assert petfeed.load_settings(path) == petfeed.DEFAULTS
+
+
+def test_feed_keeps_recent_events_and_counts_busy_work(monkeypatch):
+    f = petfeed.Feed()
+    first = f.push("mail", title="a")
+    f.push("mail", title="b")
+    assert [e["title"] for e in f.since(0)] == ["a", "b"]
+    assert [e["title"] for e in f.since(first)] == ["b"]
+    f.events[0]["at"] -= petfeed.EVENT_TTL + 1
+    assert [e["title"] for e in f.since(0)] == ["b"]
+    assert f.current_busy() is None
+    with f.working("thinking"):
+        with f.working("sending"):
+            assert f.current_busy() == "sending"
+        assert f.current_busy() == "thinking"
+    assert f.current_busy() is None
+    assert not f.alive()
+    f.polled()
+    assert f.alive()
+
+
+def test_keeper_starts_the_pet_with_this_app_s_boot_id(tmp_path):
+    k = petfeed.Keeper(Path("/app"), tmp_path, 8765, tmp_path / "pet.json", print)
+    cmd = k.command()
+    assert cmd[-6:] == ["--port", "8765", "--data", str(tmp_path), "--boot", petfeed.BOOT]
+    assert cmd[1:4] == ["-I", "-X", "utf8"]
+
+
+# ---------------------------------------------------------------- the app's side
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    monkeypatch.setattr(app, "PET_SETTINGS", tmp_path / "pet.json")
+    monkeypatch.setattr(app, "feed", petfeed.Feed())
+    monkeypatch.setattr(app, "MACOS", False)
+    return TestClient(app.starlette_app)
+
+
+def test_a_notice_waits_while_the_pet_is_on_but_not_running(client, tmp_path, monkeypatch):
+    assert asyncio.run(app.deliver_notice("t", "a", "", "INBOX", "1")) is False and app.feed.seq == 0
+    import petfeed as pf
+    pf.save_settings(app.PET_SETTINGS, {"enabled": False})  # switched off on purpose: nothing to wait for
+    assert asyncio.run(app.deliver_notice("t", "a", "", "INBOX", "1")) is True
+
+
+def test_a_new_mail_reaches_the_pet(client):
+    app.feed.polled()
+    asyncio.run(app.deliver_notice("新邮件 · Ana", "合作 <b>", "", "INBOX", "42"))
+    d = client.get("/api/pet?after=0").json()
+    assert d["boot"] == petfeed.BOOT and d["seq"] == 1 and d["settings"]["enabled"] is True
+    (e,) = d["events"]
+    assert e["link"].endswith("/#open=INBOX/42") and e["line1"] == "合作 <b>"
+    assert client.get("/api/pet?after=1").json()["events"] == []
+    assert client.get("/api/pet?after=junk").json()["seq"] == 1
+
+
+def test_a_mac_without_a_running_pet_still_gets_notification_center(monkeypatch):
+    monkeypatch.setattr(app, "MACOS", True)
+    monkeypatch.setattr(app, "feed", petfeed.Feed())
+    shown = []
+
+    async def banner(*args):
+        shown.append(args)
+        return True
+
+    monkeypatch.setattr(app, "show_mac_notification", banner)
+    assert asyncio.run(app.deliver_notice("t", "a", "b", "INBOX", "1"))
+    assert shown == [("t", "a", "b")] and app.feed.seq == 0
+
+
+def test_pet_settings_from_the_page_and_the_demo(client):
+    d = client.post("/api/pet/settings", json={"scale": 0.75, "muted": True, "unknown": 1}).json()
+    assert d["scale"] == 0.75 and d["muted"] is True and "unknown" not in d and d["running"] is False
+    assert client.get("/api/pet/settings").json()["scale"] == 0.75
+    assert client.post("/api/pet/settings", json=["no"]).status_code == 400
+    assert client.post("/api/pet/demo", json={}).json()["ok"] is True
+    assert client.get("/api/pet").json()["events"][0]["title"].startswith("新邮件")
+
+
+def test_new_mail_notices_never_show_a_windows_toast():
+    assert not hasattr(app, "show_toast") and not hasattr(app, "TOAST_APP_ID")
+
+
+# ---------------------------------------------------------------- publishing the pictures
+
+def test_publish_lets_only_bare_pictures_through():
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    import publish
+
+    def chunk(kind, body):
+        import struct
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+
+    head, end = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", b"\0" * 13), chunk(b"IEND", b"")
+    assert publish.png_problem(head + chunk(b"IDAT", b"x") + end) is None
+    assert "tEXt" in publish.png_problem(head + chunk(b"tEXt", b"Author\0C:\\Users\\alex") + end)
+    assert "eXIf" in publish.png_problem(head + chunk(b"eXIf", b"MM") + end)
+    assert "后面" in publish.png_problem(head + end + b"PK\3\4 hidden zip")
+    broken = bytearray(head + end)
+    broken[-1] ^= 1
+    assert "校验" in publish.png_problem(bytes(broken))
+    assert publish.png_problem(b"GIF89a") == "不是 PNG"
+    for picture in PET_DIR.glob("*.png"):
+        assert publish.png_problem(picture.read_bytes()) is None, picture.name

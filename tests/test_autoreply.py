@@ -200,10 +200,10 @@ def test_switches_can_be_flipped_without_touching_the_rest(tmp_path):
     import json
     import pytest
     path = write_config(tmp_path)
-    assert not autoreply.load_config(path).koc_enabled
-    autoreply.set_switch(path, "koc_enabled", True)
+    assert not autoreply.load_config(path).telegram_enabled
+    autoreply.set_switch(path, "telegram_enabled", True)
     cfg = autoreply.load_config(path)
-    assert cfg.koc_enabled and cfg.email_enabled
+    assert cfg.telegram_enabled and cfg.email_enabled
     assert json.loads(path.read_text(encoding="utf-8"))["holidays"] == ["2026-10-19"]
     with pytest.raises(ValueError):
         autoreply.set_switch(path, "templates", True)
@@ -212,3 +212,30 @@ def test_switches_can_be_flipped_without_touching_the_rest(tmp_path):
 def test_missing_config_keeps_everything_off(tmp_path):
     cfg = autoreply.load_config(tmp_path / "nope.json")
     assert not cfg.email_enabled and not cfg.telegram_enabled
+
+
+def test_mechanical_off_hours_reply_is_off_unless_chosen(tmp_path):
+    assert autoreply.load_config(write_config(tmp_path)).offhours_mode == "off"
+    assert autoreply.load_config(tmp_path / "nope.json").offhours_mode == "off"
+    example = Path(__file__).resolve().parents[1] / "autoreply.example.json"
+    assert autoreply.load_config(example).offhours_mode == "off"
+
+
+def test_off_hours_mode_accepts_off_template_and_ai_only(tmp_path):
+    import pytest
+    for mode in ("off", "template", "ai"):
+        assert autoreply.load_config(write_config(tmp_path, offhours_mode=mode)).offhours_mode == mode
+    with pytest.raises(ValueError):
+        autoreply.load_config(write_config(tmp_path, offhours_mode="auto"))
+
+
+def test_template_reply_can_be_switched_on_and_off_again(tmp_path):
+    import pytest
+    path = write_config(tmp_path)
+    autoreply.set_switch(path, "offhours_mode", "template")
+    assert autoreply.load_config(path).offhours_mode == "template"
+    autoreply.set_switch(path, "offhours_mode", "off")
+    cfg = autoreply.load_config(path)
+    assert cfg.offhours_mode == "off" and cfg.email_enabled  # the channel switches stay as they were
+    with pytest.raises(ValueError):
+        autoreply.set_switch(path, "offhours_mode", "auto")

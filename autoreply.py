@@ -146,13 +146,17 @@ class ReplyLog:
         return [dict(r) for r in rows]
 
 
+MODES = ("off", "template", "ai")  # what happens to KOL messages that arrive off hours
+
+
 @dataclass(frozen=True)
 class Config:
     schedule: Schedule = field(default_factory=Schedule)
     email_enabled: bool = False
     telegram_enabled: bool = False
-    koc_enabled: bool = False  # work-hours KOC chatbot (koc.py)
-    offhours_mode: str = "template"  # template: send the fixed text; ai: draft with AI, owner approves on the phone
+    # off (default): nothing is sent off hours; template: send the fixed text; ai: draft with AI, owner approves on
+    # the phone. The channel switches above still decide which channels "template" and "ai" act on.
+    offhours_mode: str = "off"
     templates: dict = field(default_factory=dict)  # {"email": {"en": "...", "es": "..."}, "telegram": {...}}
 
     def reply_text(self, channel: str, language: str) -> str:
@@ -178,9 +182,9 @@ def load_config(path: Path) -> Config:
     holidays = raw.get("holidays") or []
     if not isinstance(holidays, list) or not all(isinstance(d, str) for d in holidays):
         raise ValueError('autoreply.json 的 holidays 应为日期字符串列表，例如 ["2026-10-19"]')
-    mode = raw.get("offhours_mode", "template")
-    if mode not in ("template", "ai"):
-        raise ValueError('autoreply.json 的 offhours_mode 只能是 "template" 或 "ai"')
+    mode = raw.get("offhours_mode", "off")
+    if mode not in MODES:
+        raise ValueError('autoreply.json 的 offhours_mode 只能是 "off"、"template" 或 "ai"')
     for channel in ("email", "telegram"):
         if mode == "template" and raw.get(f"{channel}_enabled") and not (templates.get(channel) or {}).get("en"):
             raise ValueError(f"autoreply.json: {channel} 已开启，但缺少英文文案 templates.{channel}.en")
@@ -188,14 +192,12 @@ def load_config(path: Path) -> Config:
         schedule=Schedule(holidays=frozenset(date.fromisoformat(d) for d in holidays)),
         email_enabled=raw.get("email_enabled") is True,
         telegram_enabled=raw.get("telegram_enabled") is True,
-        koc_enabled=raw.get("koc_enabled") is True,
         offhours_mode=mode,
         templates=templates,
     )
 
 
-SWITCHES = ("email_enabled", "telegram_enabled", "koc_enabled")
-MODES = ("template", "ai")
+SWITCHES = ("email_enabled", "telegram_enabled")
 
 
 def change_holidays(path: Path, days: list[date], add: bool) -> list[date]:

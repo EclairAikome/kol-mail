@@ -6,20 +6,23 @@
              reply text. Models are named without their provider here; the full provider/model id is looked up once
              in `codemaker models`.
 
-Either way the model only ever sees text and can only answer with text. Both CLIs add their own context to the user
-turn (Claude Code appends reminders such as <ip_reminder>); answers are scrubbed of those tags, and callers that show
-model text as a translation must still check it (see looks_chinese).
+The model sees text, plus the image or PDF files a caller passes (what a KOL sent, already checked by kol-mail),
+and can only answer with text. Both CLIs add their own context to the user turn (Claude Code appends reminders such
+as <ip_reminder>); answers are scrubbed of those tags, and callers that show model text as a translation must still
+check it (see looks_chinese).
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import glob
 import json
 import os
 import re
 import secrets
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -27,11 +30,27 @@ from pathlib import Path
 ROLES = ("translate", "draft")
 MODELS = {
     "claude": {"translate": "claude-sonnet-5-5", "draft": "claude-opus-5-5"},
-    "codemaker": {"translate": "claude-sonnet-5-5", "draft": "claude-opus-5-5"},
+    "codemaker": {"translate": "gpt-5.6-terra", "draft": "gpt-6.1-sol"},  # CodeMaker offers no Claude models
 }
 _codemaker_ids: dict[str, str] = {}  # bare model name -> provider/model, from `codemaker models`
 UNAVAILABLE_MARKERS = ("log in", "login", "/login", "limit", "credit", "overloaded", "authenticat", "quota",
-                       "登录", "额度")
+                       "登录", "额度", "版本太旧")
+# What a colleague should do about the errors the CLIs commonly give; the raw message stays in brackets.
+LOGIN_HINT = {
+    "claude": "Claude Code 没登录或登录已过期：打开 PowerShell 运行 claude，输入 /login 登录，然后在页面上点“重新检测 AI”",
+    "codemaker": "CodeMaker 没登录或登录已过期：打开 PowerShell 运行 codemaker auth login，然后在页面上点“重新检测 AI”",
+}
+OLD_CLI = re.compile(r"or newer is required|No context found for instance", re.IGNORECASE)  # the second: old CodeMaker
+LOGGED_OUT = re.compile(r"authenticat|API Error: 401|oauth (access )?token|not logged in|\blog ?in\b|/login\b|"
+                        r"unauthori[sz]ed", re.IGNORECASE)
+OLD_CLI_HINT = {
+    "claude": "Claude Code 版本太旧，不支持现在用的模型：打开 PowerShell 运行 claude update（不行就重新运行 KOL Mail 安装命令）",
+    "codemaker": "CodeMaker 版本太旧：打开 PowerShell 运行 codemaker upgrade，更新好后在页面上点“重新检测 AI”（不行就按公司指引重装 CodeMaker）",
+}
+# CodeMaker may run git in the background (plugins, skill repositories): it must fail quietly, never pop up a
+# Git Credential Manager window in front of a colleague.
+NO_GIT_PROMPTS = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+QUOTA = re.compile(r"quota|credit|rate limit|usage limit|overloaded|额度", re.IGNORECASE)
 # Context the CLIs inject into the user turn. A model that copies its input (a lazy "translation") copies these too.
 INJECTED_TAG = re.compile(r"<(system-reminder|ip_reminder|user-prompt-submit-hook|env|context)\b[^>]*>.*?</\1>\s*",
                           re.DOTALL | re.IGNORECASE)
@@ -189,22 +208,88 @@ def unavailable(message: str) -> bool:
     return any(m in low for m in UNAVAILABLE_MARKERS)
 
 
+def explain(message: str, backend: str) -> str:
+    """The CLI's error with what to do about it in front, for the errors a colleague can fix themselves."""
+    if not message:
+        return message
+    if OLD_CLI.search(message):
+        hint = OLD_CLI_HINT.get(backend, OLD_CLI_HINT["claude"])
+    elif LOGGED_OUT.search(message):
+        hint = LOGIN_HINT.get(backend, LOGIN_HINT["claude"])
+    elif QUOTA.search(message):
+        hint = "AI 额度用完或服务繁忙，稍后再试"
+    else:
+        return message
+    return f"{hint}（原始信息：{message}）"
+
+
+MODEL_ID = re.compile(r"[\w.-]+/[\w.:-]+")
+
+
+def _key(model: str) -> str:
+    return re.sub(r"[\s_-]", "", model.lower())
+
+
+def match_models(listing: str, model: str) -> list[str]:
+    """provider/model ids from `codemaker models` whose model part is `model`, ignoring case, spaces, dashes and
+    underscores ("gpt6.1 sol" finds "openai/gpt-6.1-sol", but "gpt-5.6" never "gpt-56"); CodeMaker's own provider
+    first. Lines that are not a bare provider/model id are not ids."""
+    want = _key(model)
+    ids = [line.strip() for line in listing.splitlines()
+           if MODEL_ID.fullmatch(line.strip()) and _key(line.strip().rsplit("/", 1)[1]) == want]
+    return sorted(ids, key=lambda i: "codemaker" not in i.split("/", 1)[0])
+
+
 # ---------------------------------------------------------------- the call
 
+def _fail(message: str, backend: str):
+    """Raise the CLI's error, explained; LLMUnavailable when the backend itself cannot run (logged out, too old)."""
+    explained = explain(message, backend)
+    raise (LLMUnavailable if unavailable(explained) else LLMError)(explained)
+
+
+FILE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+              ".webp": "image/webp", ".pdf": "application/pdf"}
+
+
+def file_type(path: Path) -> str:
+    """The media type of a file the model may be shown; ValueError for anything else."""
+    kind = FILE_TYPES.get(Path(path).suffix.lower())
+    if not kind:
+        raise ValueError(f"AI 只能看图片和 PDF：{Path(path).name}")
+    return kind
+
+
+def claude_message(user_text: str, files: list[Path]) -> bytes:
+    """One stream-json user turn: the text, then each file as an image or a PDF document block."""
+    content = [{"type": "text", "text": user_text}]
+    for f in files:
+        kind = file_type(f)
+        data = base64.b64encode(Path(f).read_bytes()).decode("ascii")
+        content.append({"type": "document" if kind == "application/pdf" else "image",
+                        "source": {"type": "base64", "media_type": kind, "data": data}})
+    line = {"type": "user", "message": {"role": "user", "content": content}}
+    return (json.dumps(line, ensure_ascii=False) + "\n").encode("utf-8")
+
+
 async def complete(settings: Settings, system_prompt: str, user_text: str, schema: dict, role: str,
-                   timeout: int) -> dict:
-    """Run one call and return the JSON object the schema describes, scrubbed of injected reminder blocks."""
+                   timeout: int, files: list[Path] | None = None) -> dict:
+    """Run one call and return the JSON object the schema describes, scrubbed of injected reminder blocks.
+    files: images or PDFs shown to the model along with user_text."""
     if role not in ROLES:
         raise ValueError(role)
+    files = [Path(f) for f in files or []]
+    for f in files:
+        file_type(f)
     binary = settings.binary()
     if not binary:
         raise LLMUnavailable(f"找不到 {settings.label()} 命令行")
     model = settings.models[role]
     settings.workdir.mkdir(parents=True, exist_ok=True)
     if settings.backend == "claude":
-        result = await _claude(binary, model, system_prompt, user_text, schema, settings.workdir, timeout)
+        result = await _claude(binary, model, system_prompt, user_text, schema, settings.workdir, timeout, files)
     else:
-        result = await _codemaker(binary, model, system_prompt, user_text, schema, settings.workdir, timeout)
+        result = await _codemaker(binary, model, system_prompt, user_text, schema, settings.workdir, timeout, files)
     return check_required(scrub(result), schema)
 
 
@@ -220,12 +305,16 @@ async def _communicate(proc, data: bytes, timeout: int, label: str) -> tuple[byt
 
 
 async def _claude(binary: str, model: str, system_prompt: str, user_text: str, schema: dict, cwd: Path,
-                  timeout: int) -> dict:
+                  timeout: int, files: list[Path] | None = None) -> dict:
     # The prompt (with the whole playbook) goes through a private file: a command line is readable by other local
     # processes and Windows caps it at 32K characters.
     prompt_file = cwd / f"prompt-{secrets.token_hex(6)}.md"
     prompt_file.write_text(system_prompt, encoding="utf-8")
     env = dict(os.environ, CLAUDE_CODE_DISABLE_AUTO_MEMORY="1")  # mail text must never meet personal memories
+    # Plain stdin carries text only; files go as content blocks of one stream-json turn, still with every tool off.
+    streamed = ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose"] if files else \
+        ["--output-format", "json"]
+    stdin = claude_message(user_text, files) if files else user_text.encode("utf-8")
     try:
         proc = await asyncio.create_subprocess_exec(
             binary, "-p",
@@ -233,7 +322,7 @@ async def _claude(binary: str, model: str, system_prompt: str, user_text: str, s
             "--tools", "",
             "--disallowedTools", "mcp__*",
             "--strict-mcp-config",
-            "--output-format", "json",
+            *streamed,
             "--json-schema", json.dumps(schema, ensure_ascii=False),
             "--system-prompt-file", str(prompt_file),
             "--setting-sources", "local",
@@ -242,23 +331,34 @@ async def _claude(binary: str, model: str, system_prompt: str, user_text: str, s
             cwd=str(cwd), env=env,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        out, err = await _communicate(proc, user_text.encode("utf-8"), timeout, "Claude Code")
+        out, err = await _communicate(proc, stdin, timeout, "Claude Code")
     finally:
         try:
             prompt_file.unlink()
         except OSError:
             pass
     try:
-        obj = json.loads(out.decode("utf-8", "replace"))
-    except ValueError:
-        raise LLMError((err or out).decode("utf-8", "replace")[:300] or "Claude Code 输出无法解析")
+        obj = stream_result(out) if files else json.loads(out.decode("utf-8", "replace"))
+    except ValueError:  # not the CLI's JSON at all: a broken call, not proof the backend is unavailable
+        raise LLMError(explain((err or out).decode("utf-8", "replace")[:300] or "Claude Code 输出无法解析", "claude"))
     if obj.get("is_error"):
-        msg = str(obj.get("result") or obj.get("terminal_reason") or "Claude Code 调用失败")[:300]
-        raise (LLMUnavailable if unavailable(msg) else LLMError)(msg)
+        _fail(str(obj.get("result") or obj.get("terminal_reason") or "Claude Code 调用失败")[:300], "claude")
     structured = obj.get("structured_output")
     if isinstance(structured, dict):
         return structured
     return parse_json_text(str(obj.get("result", "")))
+
+
+def stream_result(out: bytes) -> dict:
+    """The final "result" event of a stream-json run (the same object --output-format json prints)."""
+    for line in reversed(out.decode("utf-8", "replace").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        event = json.loads(line)
+        if isinstance(event, dict) and event.get("type") == "result":
+            return event
+    raise ValueError("no result event")
 
 
 CODEMAKER_FORMAT = """
@@ -276,27 +376,33 @@ async def codemaker_model_id(binary: str, model: str) -> str:
     if model in _codemaker_ids:
         return _codemaker_ids[model]
     proc = await asyncio.create_subprocess_exec(binary, "models", stdin=asyncio.subprocess.DEVNULL,
+                                                env={**os.environ, **NO_GIT_PROMPTS},
                                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     out, err = await _communicate(proc, b"", 120, "CodeMaker")
-    ids = [line.strip() for line in out.decode("utf-8", "replace").splitlines() if line.strip().endswith("/" + model)]
+    ids = match_models(out.decode("utf-8", "replace"), model)
     if not ids:
         msg = (err or b"").decode("utf-8", "replace").strip()[-200:]
-        raise (LLMUnavailable if unavailable(msg) else LLMError)(f"CodeMaker 里没有模型 {model}" + (f"：{msg}" if msg else ""))
-    ids.sort(key=lambda i: "codemaker" not in i.split("/", 1)[0])
+        if unavailable(msg):
+            raise LLMUnavailable(explain(msg, "codemaker"))
+        raise LLMError(f"CodeMaker 里没有模型 {model}（在 PowerShell 运行 codemaker models 看看有哪些，"
+                       f"在 settings.json 的 llm.models 里改）" + (f"：{msg}" if msg else ""))
     _codemaker_ids[model] = ids[0]
     return ids[0]
 
 
 async def _codemaker(binary: str, model: str, system_prompt: str, user_text: str, schema: dict, workdir: Path,
-                     timeout: int) -> dict:
+                     timeout: int, files: list[Path] | None = None) -> dict:
     model = await codemaker_model_id(binary, model)
     # The agent (system prompt, no tools) is defined in a codemaker.json of a fresh folder per call, so parallel
-    # calls never share a prompt and nothing is left in a project folder.
+    # calls never share a prompt and nothing is left in a project folder. It replaces the default agent "build"
+    # instead of being picked with --agent: CodeMaker before 0.4 (1.15.x) crashes on run --agent with
+    # "No context found for instance", and colleagues do not always update CodeMaker.
     run_dir = workdir / f"cm-{secrets.token_hex(6)}"
     run_dir.mkdir(parents=True)
     agent = {
         "$schema": "https://opencode.ai/config.json",
-        "agent": {"kolmail": {
+        "default_agent": "build",  # even when the colleague's own config names another default
+        "agent": {"build": {
             "mode": "primary",
             "description": "kol-mail text task, no tools",
             "prompt": system_prompt + CODEMAKER_FORMAT.format(schema=json.dumps(schema, ensure_ascii=False)),
@@ -308,8 +414,10 @@ async def _codemaker(binary: str, model: str, system_prompt: str, user_text: str
     session_id = None
     try:
         proc = await asyncio.create_subprocess_exec(
-            binary, "run", "--pure", "--agent", "kolmail", "-m", model, "--format", "json", "--dir", str(run_dir),
-            cwd=str(run_dir),
+            binary, "run", "--pure", "-m", model, "--format", "json", "--dir", str(run_dir),
+            # --file=PATH, never "--file PATH": the option takes several values and would swallow a message.
+            *[f"--file={Path(f).resolve()}" for f in files or []],
+            cwd=str(run_dir), env={**os.environ, **NO_GIT_PROMPTS},
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         out, err = await _communicate(proc, user_text.encode("utf-8"), timeout, "CodeMaker")
@@ -328,24 +436,25 @@ async def _codemaker(binary: str, model: str, system_prompt: str, user_text: str
             elif event.get("type") == "error":
                 errors.append(json.dumps(event.get("error"), ensure_ascii=False))
         if errors:
-            msg = errors[0][:300]
-            raise (LLMUnavailable if unavailable(msg) else LLMError)(f"CodeMaker 调用失败：{msg}")
+            _fail(f"CodeMaker 调用失败：{errors[0][:300]}", "codemaker")
         if not texts:
             detail = (err or b"").decode("utf-8", "replace").strip().splitlines()
-            msg = detail[-1][:300] if detail else "CodeMaker 没有返回内容"
-            raise (LLMUnavailable if unavailable(msg) else LLMError)(msg)
+            known = [line for line in detail if OLD_CLI.search(line)]  # a crash may end with a stack frame
+            _fail((known or detail)[-1][:300] if detail else "CodeMaker 没有返回内容", "codemaker")
         return parse_json_text(texts[-1])
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
         if session_id:  # CodeMaker keeps every session locally; mail text should not pile up there
-            asyncio.ensure_future(_forget(binary, session_id))
+            _forget(binary, session_id)
 
 
-async def _forget(binary: str, session_id: str):
+def _forget(binary: str, session_id: str):
+    """Delete the session in a process of its own, never as a task of the event loop: the installer's AI check
+    ends its asyncio.run right after the call, and cancelling a task that is starting or waiting for a subprocess
+    hangs asyncio.run for good on Python 3.12 for Windows (seen on a colleague's PC)."""
     try:
-        proc = await asyncio.create_subprocess_exec(
-            binary, "session", "delete", session_id, stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-        await asyncio.wait_for(proc.wait(), 60)
-    except Exception:  # noqa: BLE001  housekeeping only
+        subprocess.Popen([binary, "session", "delete", session_id], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={**os.environ, **NO_GIT_PROMPTS},
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except OSError:  # housekeeping only
         pass

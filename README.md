@@ -1,6 +1,6 @@
 # KOL Mail
 
-给做海外 KOL 合作的同学用的本机网页邮箱。外语来信自动翻成中文，左右对照着看。回信时 AI 按你们团队的谈判手册先给出两三种回法，你挑一种，它起草，你提意见它再改，每一段都附中文回译，你核对无误才发得出去。下班时间来的消息，AI 起草后推到你手机上的 Telegram，你在手机上和它商量、批准，才会发出。
+给做海外 KOL 合作的同学用的本机网页邮箱。外语来信自动翻成中文，左右对照着看。回信时 AI 按你自己的谈判方式先给出两三种回法，你挑一种，它起草，你提意见它再改，每一段都附中文回译，你核对无误才发得出去。下班时间来的消息，AI 起草后推到你手机上的 Telegram，你在手机上和它商量、批准，才会发出。
 
 AI 可以用 CodeMaker，也可以用 Claude Code，安装时选一个。程序只在你自己电脑上运行，网页地址是 http://127.0.0.1:8765/ ，别的电脑打不开。
 
@@ -9,12 +9,18 @@ AI 可以用 CodeMaker，也可以用 Claude Code，安装时选一个。程序�
 维护者会在 POPO 群里发一条带参数的安装命令，复制到 PowerShell 里运行就行。大致是这样
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/<owner>/kol-mail/main/install.ps1 -OutFile $env:TEMP\kolmail-install.ps1; & $env:TEMP\kolmail-install.ps1 -Repo <owner>/kol-mail -ImapHost <收信服务器> -SmtpHost <发信服务器> -Feedback <反馈地址>"
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/<owner>/kol-mail/main/install.ps1 -OutFile $env:TEMP\kolmail-install.ps1; & $env:TEMP\kolmail-install.ps1 -Repo <owner>/kol-mail -Feedback <反馈地址>"
 ```
 
-脚本会一步步问你几件事，邮箱、署名、用哪个 AI、谈判手册放在哪。邮箱密码只在邮件组件自己的提示里输入，安装脚本看不到。装完桌面上会多一个“KOL Mail”图标，以后开机自动在后台运行，双击图标打开网页。
+脚本只问几件事：用哪个 AI、要不要接 KOL 总表（不用就回车）。装完浏览器会打开 KOL Mail 的登录页，在那里登录邮箱：填工作邮箱（只填 @lootbar.com 前面的部分也行）、密码和对外署名（默认用邮箱前缀）。公司邮箱的收发信服务器已经是默认值，不用填；163、126、QQ 填网页版设置里生成的授权码，Gmail 用应用专用密码。登录前会先测收信和发信，密码不对会当场说明。密码直接交给邮件组件存进 Windows 凭据管理器，页面和安装脚本都不保存。装完桌面上会多一个“KOL Mail”图标，以后开机自动在后台运行，双击图标打开网页。重新运行安装命令时，已经登录的邮箱密码要是不对了，会弹出一个小窗口让你重输（先点一下输入框再 Ctrl+V 粘贴）。
 
-用 CodeMaker 的话，先确认命令行版装好并登录过（在终端运行 `codemaker auth login`）。用 Claude Code 的话，先装好并登录一次。
+接着脚本会连接 AI，连不上会停下来带你处理：
+
+- CodeMaker：没装会告诉你去装，装好按回车重新检测。没登录会自动弹出一个窗口运行 `codemaker auth login`，登录好回到安装窗口按回车。
+- Claude Code：没装或者版本太旧（起草用的模型要 2.1.280 以上），会问你要不要用官方安装器装最新版。没登录会弹出窗口，输入 `/login` 登录。
+- 最后用翻译和起草两个模型各真调一次，都通过才算连上。实在处理不了可以输入 `s` 跳过，以后在页面上方点“重新检测 AI”。
+
+第一次登录后会弹出“设置”，请你写两样东西：自己的签名（每个人格式不一样，照你平时的写），和“我的谈判方式”（用自己的话说个大概：默认推什么合作、固定费大概给多少、哪些不能答应）。AI 出策略和起草都照它来，以后在右上角“设置”里随时改。
 
 公司网络装依赖慢，可以在命令后面加 `-PipIndex https://mirrors.aliyun.com/pypi/simple`。
 
@@ -26,7 +32,7 @@ macOS 13 以上，Apple 芯片和 Intel 都行。维护者发的 Mac 命令复�
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/<owner>/kol-mail/main/install.sh)" -- --repo <owner>/kol-mail --imap-host <收信服务器> --smtp-host <发信服务器> --feedback <反馈地址>
 ```
 
-问的问题和 Windows 一样。电脑上没有 Python 3.11 以上时，脚本会用 Homebrew 装，没有 Homebrew 就从 python.org 下载安装包，这一步要输一次开机密码。邮箱密码存进 Mac 的钥匙串，第一次收信时系统可能弹窗问是否允许访问钥匙串，点“始终允许”。装完“应用程序”里会多一个“KOL Mail”，点开就是网页。后台服务开机自动运行，程序退出后 15 秒内会自己重启。
+问的问题和 Windows 一样，邮箱也是装完在浏览器打开的登录页里登录。电脑上没有 Python 3.11 以上时，脚本会用 Homebrew 装，没有 Homebrew 就从 python.org 下载安装包，这一步要输一次开机密码。邮箱密码存进 Mac 的钥匙串，第一次收信时系统可能弹窗问是否允许访问钥匙串，点“始终允许”。装完“应用程序”里会多一个“KOL Mail”，点开就是网页。后台服务开机自动运行，程序退出后 15 秒内会自己重启。
 
 Mac 版和 Windows 版的区别
 
@@ -50,7 +56,11 @@ Mac 版和 Windows 版的区别
 6. 写好了完整中文回复的话，点“翻译我写的中文”，跳过选方案这一步。
 7. 要带附件，点草稿下面的“添加附件”，或者把文件拖进回复区。截图直接在正文框里 Ctrl+V 粘贴，会自动变成一个图片附件。单个附件和全部附件加起来都最多 15 MB，一封最多 10 个，程序、脚本、带宏的 Office 文件和网页文件不能发。邮件组件不支持把图片嵌进正文，图片都作为附件发出，对方的 Gmail、Outlook 会直接显示缩略图。
 
-## 下班时间用手机审稿
+## 下班时间
+
+默认下班时间什么都不自动回。想让下班来的消息自动收到一段固定的“我现在下班了”（比如休长假），在右上角“设置”里勾上“下班时间自动回复固定模板”；想让 AI 起草、你在手机上批准再发，按下面配手机审稿。
+
+### 手机审稿
 
 点页面上方的“手机审稿”。
 
@@ -63,11 +73,11 @@ Mac 版和 Windows 版的区别
 
 在机器人那里还可以发几个固定指令，点输入框旁的菜单就能选：`/template` 改发固定模板自动回复（适合休长假），`/ai` 改回 AI 起草、手机审批，`/status` 看现在的开关和等你处理的来信，`/holiday 10-25 11-02` 把这几天设成假期（假期全天算下班），`/unholiday 10-25 11-02` 去掉。也可以直接打中文“模板”“状态”“休假 10-25 11-02”。这些指令由程序直接执行，不经过 AI，只认配对过的你。
 
-工作时间是周一到周五 10:00 到 18:00（GMT+8），法定假日在 `data\autoreply.json` 的 holidays 里，按需要补。
+“手机审稿”窗口里的“下班回复方式”可以在 AI 起草、固定模板和不自动回复之间切换。工作时间是周一到周五 10:00 到 18:00（GMT+8），法定假日在 `data\autoreply.json` 的 holidays 里，按需要补。
 
 ## 右下角的反馈按钮
 
-想吐槽或者想要新功能，点右下角“反馈”。内容直接推到维护者的 POPO，不带你的名字、邮箱和电脑信息。
+想吐槽或者想要新功能，点右下角“反馈”。内容直接推到维护者的 POPO，不带你的名字、邮箱和电脑信息。按钮是灰的，说明安装命令里没带反馈地址，直接找维护者。
 
 ## 设置在哪
 
@@ -76,31 +86,35 @@ Mac 版和 Windows 版的区别
 | 设置 | 作用 |
 |---|---|
 | `llm.backend` | `codemaker` 或 `claude` |
-| `llm.models` | 不填就用默认的，翻译用 Sonnet 5.5，策略和起草用 Opus 5.5 |
-| `identity.signature` | 每封回信末尾的签名，一字不差 |
-| `paths.playbook` | 谈判手册，AI 的策略和草稿都照它来，改了立刻生效 |
-| `paths.koc_knowledge` | KOC 机器人能用的全部知识 |
-| `paths.sheet_workbook` | KOL 总表，不用就留空 |
-| `koc` | KOC 机器人回复里允许出现的数字、比例和网站 |
+| `llm.models` | 不填就用默认的。CodeMaker：翻译 GPT-5.6 Terra，策略和起草 GPT-6.1 Sol；Claude Code：翻译 Sonnet 5.5，策略和起草 Opus 5.5。写法如 `{"translate": "gpt-5.6-terra", "draft": "gpt-6.1-sol"}`，大小写、空格、点和横线都不讲究 |
+| `identity.signature` | 每封回信末尾的签名，一字不差。在页面“设置”里改，立刻生效 |
+| `paths.playbook` | 谈判手册，最前面一节“我的谈判方式”是你在页面“设置”里写的，AI 的策略和草稿都照它来，改了立刻生效 |
+| `paths.sheet_workbook` | KOL 总表，不用就留空（在右上角 设置 → KOL 总表 里连，不用手改） |
+| `google.client_id`、`google.client_secret` | Google Cloud 里“桌面应用”类型的 OAuth 客户端，有了它同事才能把自己的 Google 表格连成 KOL 总表（安装命令的 `-GoogleClientId`、`-GoogleClientSecret`，Mac 是 `--google-client-id`、`--google-client-secret`） |
 
 改完 settings.json 要重启一次程序。在 PowerShell 里运行 `Stop-ScheduledTask kol-mail`，再双击桌面图标。Mac 上设置在 `~/Library/Application Support/kol-mail/app/data/settings.json`，改完在终端运行 `launchctl kickstart -k gui/$(id -u)/local.kolmail` 重启。
 
 Mac 上要卸载的话，在终端依次运行 `launchctl bootout gui/$(id -u)/local.kolmail`、`rm ~/Library/LaunchAgents/local.kolmail.plist`，再删掉“应用程序”里的 KOL Mail 和 `~/Library/Application Support/kol-mail` 文件夹。
 
-谈判手册和 KOC 知识卡的模板在 `templates` 文件夹。团队的正式版本找维护者要，不要传到网上。
+谈判手册的模板在 `templates` 文件夹。团队没有统一的谈判手册，每个人的打法写在自己的“我的谈判方式”里；模板里其余各节想补就补，没填的 AI 按常识处理。
+
+AI 出错时，页面顶部会用中文说明怎么处理（比如没登录要运行什么命令），处理好后点旁边的“重新检测 AI”。
 
 ## 其他功能
 
-- 收件箱进来 KOL 的新邮件，屏幕右下角弹 Windows 通知，点一下打开那封信。
-- 工作时间的 KOC 机器人。只回 KOL 总表里、不在重点名单上、只问联盟计划标准问题的人，回复内容只能来自知识卡，数字和链接还要过白名单检查。顶栏“KOC 机器人”按钮开关。
-- KOL 总表联动。收信、回信自动记进总表的沟通记录，Excel 开着也能写。
+- 桌宠。收件箱进来 KOL 的新邮件，桌面右下角的鲸鱼娘会跳一下、举起信封，冒出气泡写着谁来信、中文主题和大意，点气泡打开那封信。AI 起草时头上冒思考泡泡，发信时放纸飞机，收信出错时冒汗，下班时间或者很久没动时会睡觉。她手里一直拿着一封小信（有未读邮件时信上有个小红点），单击小信打开 KOL Mail（有新邮件的气泡时打开那封信）；摸摸头、戳戳脸、挠挠身子、碰尾巴、碰脚，她各有反应（眯眼冒爱心、鼓脸、扭着笑、头顶喷水、蹦一下），还会冒一句话，这句话不会盖住来信的气泡。动作是 60 帧的。可以拖到任意位置；右键可以静音（只换动作不弹气泡）、调大小、先藏起来。页面上方“外观”里能开关、调大小、让她演示一次。别的程序全屏时她会自己躲起来。Windows 不再弹系统通知。
+  - Mac 上桌宠要用带 Tk 的 Python（python.org 的安装包自带；Homebrew 的要再 `brew install python-tk@3.13`）。没有 Tk 时来信继续用系统通知。
+  - 桌宠素材在 `pet/whale-girl`，由 `tools/make_pet.py` 从一张 GIF 生成（开发用，需要 Pillow、numpy、scipy；再给它 [rife-ncnn-vulkan](https://github.com/nihui/rife-ncnn-vulkan) 的路径，就用 RIFE 在原图的 15 帧之间补帧，补到每秒 60 帧）。也能直接放 Codex 宠物的精灵图，只是那样没有分部位的互动，点哪里都打开 KOL Mail。
+- 多个邮箱。点左上角的邮箱名，下拉菜单里能切换邮箱、添加邮箱（填地址和密码，163、126、QQ 填授权码，Gmail 用应用专用密码；常见邮箱和公司同域名的邮箱不用填服务器；加之前会先测收信和发信，收信不通就不加）和管理邮箱（改备注名、设为主邮箱，会自动重启一次）。别的邮箱有未读时，邮箱名旁边会显示数字；每个邮箱来新邮件桌宠都会提醒（气泡里注明是哪个邮箱）。邮箱名右边的“退出”退出当前这个邮箱，删掉这台电脑上存的密码、缓存、译文和附件，服务器上的邮件不动：退出主邮箱时先选一个邮箱接任；退出最后一个邮箱就回到登录页。下班自动回复、手机审稿和 KOL 总表只跟主邮箱走；签名和谈判方式所有邮箱共用。Outlook / Hotmail 现在只能用微软 OAuth 登录，暂时接不了。
+- 换肤。“外观”里选配色（经典、深海鲸鱼、樱花、抹茶），明暗可以跟随系统或固定浅色、深色。还能放一张自己的图片当壁纸：点缩略图选最想露出来的地方，拖“透出”调面板透明度，可选毛玻璃和“主色跟着壁纸走”（从图里取主色，自动保证文字看得清）。设置存在 `data/skin.json`，壁纸在 `data/skin/`，更新不会动它们。
+- KOL 总表联动。在右上角 设置 → KOL 总表 里连你自己的总表：本机的 xlsx（Excel 开着也能写）、POPO 在线表格，或者 Google 表格（Windows 和 Mac 都行，第一次用自己的 Google 账号授权一次）。对应好列以后，收信、回信自动记进去。
 - 附件防护。只收常见文档、图片和视频，逐个检查内容和宏，再用 Windows Defender 扫描。
 
 ## 安全
 
 - 只监听 127.0.0.1，并检查请求来源，别的网站调用不了它。
 - 调用 AI 时关掉所有工具，邮件内容只能当作文字处理。来信内容用随机标记隔开，AI 被要求不执行里面的任何指令，回复里不透露手册内容。
-- 每一封信都要你本人点确认才会发出，自动化的部分只有 KOC 机器人和固定模板的下班回复，两者都可以关。
+- 每一封信都要你本人点确认才会发出，自动化的部分只有固定模板的下班回复，默认是关的。
 
 ## 开发
 
@@ -108,5 +122,9 @@ Mac 上要卸载的话，在终端依次运行 `launchctl bootout gui/$(id -u)/l
 python -m pytest tests
 $env:KOL_DEV = "1"; $env:KOL_MAIL_PORT = "8766"; python app.py   # 测试副本，不跑任何自动任务，也不会发信
 ```
+
+从 Claude Code 的会话里启动测试副本时，先去掉继承来的 `CLAUDE*`、`ANTHROPIC*` 环境变量，否则程序调用的 `claude` 会用那个会话的登录，报 401。
+
+试装安装脚本：`install.ps1 -Source <源码目录> -Dir <别的目录> -NoService`，装好的程序不注册开机任务、不放桌面图标、不启动（真服务在打开了下班自动回复时会自动回信），也不会停掉本机正在跑的 KOL Mail。邮件组件的配置是全机共用的（`%USERPROFILE%\.config\mcp-email-server`），试装用的是真的邮箱账户。
 
 有 `.git` 文件夹的副本被当作开发副本，不会自动更新。

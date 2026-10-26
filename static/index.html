@@ -5,24 +5,65 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KOL Mail</title>
 <style>
+  /* Colours come from a preset (data-skin) in its light or dark form (data-scheme, set by the script from the
+     外观 setting or the system). Large surfaces use the --surface/--card names, which turn translucent over a
+     wallpaper (data-wall); dialogs, inputs and badges keep the solid colours. */
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --line: #e3e6ea; --text: #1d2228; --muted: #6b7380;
     --accent: #2f6fde; --accent-soft: #e8f0fd; --warn: #b4540a; --ok: #1f8a4c; --bad: #c0392b;
-    --zh: #fbfaf4; --unread: #f2f7ff;
+    --zh: #fbfaf4; --unread: #f2f7ff; --on-accent: #ffffff;
+    --surface: var(--panel); --surface-bg: var(--bg); --card: var(--panel); --card-zh: var(--zh);
+    --row-bg: var(--panel); --row-unread: var(--unread);
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #15181c; --panel: #1d2126; --line: #2e343b; --text: #e6e9ed; --muted: #8d96a3;
-      --accent: #6c9cf0; --accent-soft: #24324a; --warn: #e39a52; --ok: #5cc48a; --bad: #e57368;
-      --zh: #22251f; --unread: #1f2a3a;
-    }
+  :root[data-scheme="dark"] {
+    --bg: #15181c; --panel: #1d2126; --line: #2e343b; --text: #e6e9ed; --muted: #8d96a3;
+    --accent: #6c9cf0; --accent-soft: #24324a; --warn: #e39a52; --ok: #5cc48a; --bad: #e57368;
+    --zh: #22251f; --unread: #1f2a3a; --on-accent: #ffffff;
   }
+  :root[data-skin="ocean"] {  /* 深海鲸鱼: navy and cream, like the pet */
+    --bg: #f4f1ea; --panel: #fffdf8; --line: #e2dccf; --text: #1c2340; --muted: #69708a;
+    --accent: #2c4aa0; --accent-soft: #e4e9f7; --zh: #f1f4fb; --unread: #eaf0fd; --on-accent: #ffffff;
+  }
+  :root[data-skin="ocean"][data-scheme="dark"] {
+    --bg: #0b1229; --panel: #121b38; --line: #24305a; --text: #e6ebf8; --muted: #8f9bc0;
+    --accent: #8eaefc; --accent-soft: #1d2a55; --zh: #16214a; --unread: #172552; --on-accent: #0b1229;
+  }
+  :root[data-skin="sakura"] {
+    --bg: #fdf6f8; --panel: #ffffff; --line: #f0dfe5; --text: #2b1d24; --muted: #8a6f7a;
+    --accent: #c03a6c; --accent-soft: #fbe7ef; --zh: #fff8fa; --unread: #fdeef4; --on-accent: #ffffff;
+  }
+  :root[data-skin="sakura"][data-scheme="dark"] {
+    --bg: #1b1317; --panel: #251a20; --line: #3a2a32; --text: #f3e7ec; --muted: #ad909c;
+    --accent: #ff8db5; --accent-soft: #40232f; --zh: #2a1d23; --unread: #36202a; --on-accent: #1b1317;
+  }
+  :root[data-skin="matcha"] {
+    --bg: #f5f6f0; --panel: #fffffb; --line: #dfe3d3; --text: #1f261c; --muted: #6c7563;
+    --accent: #3a7449; --accent-soft: #e3efe4; --zh: #f8f8ef; --unread: #eef5ec; --on-accent: #ffffff;
+  }
+  :root[data-skin="matcha"][data-scheme="dark"] {
+    --bg: #121612; --panel: #1a201a; --line: #2b342b; --text: #e4eadf; --muted: #8e9a88;
+    --accent: #7cc493; --accent-soft: #213325; --zh: #1e231b; --unread: #1f2d22; --on-accent: #121612;
+  }
+  /* over a wallpaper the script sets --glass* to the panel colours with the chosen transparency */
+  :root[data-wall] { --surface: var(--glass); --surface-bg: var(--glass-strong); --card: var(--glass-card);
+    --card-zh: var(--glass-zh); --row-bg: transparent; --row-unread: var(--glass-unread); }
+  :root[data-wall] body { background: transparent; }
+  :root[data-wall] #list, :root[data-wall] #reader { background: var(--glass); }
+  :root[data-wall][data-glass] header, :root[data-wall][data-glass] nav, :root[data-wall][data-glass] #list,
+  :root[data-wall][data-glass] #reader { backdrop-filter: blur(14px) saturate(120%); }
+  :root[data-wall] .note, :root[data-wall] #status, :root[data-wall] .empty, :root[data-wall] .listbar {
+    text-shadow: 0 0 4px var(--panel), 0 0 8px var(--panel); }  /* faint text stays legible over a bright spot */
+  #wall { position: fixed; inset: 0; z-index: -1; background: var(--bg) center / cover no-repeat; display: none; }
+  :root[data-wall] #wall { display: block; }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body { background: var(--bg); color: var(--text); font: 14px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
-  header { height: 44px; display: flex; align-items: center; gap: 16px; padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header { height: 44px; display: flex; align-items: center; gap: 16px; padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--surface);
+    position: relative; z-index: 10; }  /* above the panes: the mailbox menu drops down over them */
   header h1 { font-size: 15px; margin: 0; white-space: nowrap; }
-  #status { color: var(--muted); font-size: 12px; margin-left: auto; }
+  header button.act { white-space: nowrap; flex: none; }
+  #status { color: var(--muted); font-size: 12px; margin-left: auto; min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .acctbar { flex: none; }
   #searchForm { display: flex; gap: 6px; flex: 0 1 420px; min-width: 200px; }
   #searchForm input { flex: 1; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; }
   .badge.box { background: var(--line); color: var(--muted); }
@@ -42,22 +83,22 @@
   #status.err { color: var(--bad); }
   main { display: grid; grid-template-columns: 170px 380px 1fr; height: calc(100% - 44px); }
   nav, #list, #reader { overflow: auto; }
-  nav { border-right: 1px solid var(--line); background: var(--panel); padding: 8px 0; }
+  nav { border-right: 1px solid var(--line); background: var(--surface); padding: 8px 0; }
   nav button { display: block; width: 100%; text-align: left; border: 0; background: none; color: var(--text); padding: 7px 14px; cursor: pointer; font: inherit; }
   nav button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
   #list { border-right: 1px solid var(--line); }
-  .listbar { position: sticky; top: 0; background: var(--bg); padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); display: flex; gap: 10px; align-items: center; }
-  .row { padding: 9px 12px; border-bottom: 1px solid var(--line); cursor: pointer; background: var(--panel); }
+  .listbar { position: sticky; top: 0; background: var(--surface-bg); padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); display: flex; gap: 10px; align-items: center; }
+  .row { padding: 9px 12px; border-bottom: 1px solid var(--line); cursor: pointer; background: var(--row-bg); }
   .row:hover { background: var(--accent-soft); }
   .row.on { box-shadow: inset 3px 0 0 var(--accent); }
   .row .top { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--muted); }
   .row .from { font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .row .subj, .row .zh { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .row .zh { color: var(--muted); font-size: 13px; }
-  .row.unread { background: var(--unread); }
+  .row.unread { background: var(--row-unread); }
   .row.unread .from, .row.unread .subj { font-weight: 700; }
   .row.unread .from::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-right: 6px; vertical-align: 1px; }
-  nav button .n { float: right; font-size: 12px; font-weight: 600; color: #fff; background: var(--accent); border-radius: 9px; padding: 0 7px; line-height: 18px; margin-top: 2px; }
+  nav button .n { float: right; font-size: 12px; font-weight: 600; color: var(--on-accent); background: var(--accent); border-radius: 9px; padding: 0 7px; line-height: 18px; margin-top: 2px; }
   .badge { font-size: 11px; padding: 0 6px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); margin-left: 4px; }
   .badge.pending { color: var(--warn); background: transparent; border: 1px solid var(--warn); }
   .badge.failed { color: var(--bad); background: transparent; border: 1px solid var(--bad); }
@@ -69,17 +110,17 @@
   .meta b { color: var(--text); font-weight: 600; }
   h2 { font-size: 17px; margin: 0 0 6px; }
   .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-  .pane { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; min-width: 0; }
-  .pane.zhpane { background: var(--zh); }
+  .pane { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; min-width: 0; }
+  .pane.zhpane { background: var(--card-zh); }
   .pane h3 { font-size: 12px; color: var(--muted); margin: 0 0 8px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
   .body { white-space: pre-wrap; word-break: break-word; }
   .note { color: var(--muted); font-size: 13px; }
   .note.err { color: var(--bad); }
-  .reply { margin-top: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .reply { margin-top: 18px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
   textarea { width: 100%; min-height: 90px; resize: vertical; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
   .btns { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; align-items: center; }
   button.act { border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 6px; padding: 5px 12px; cursor: pointer; font: inherit; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
   button:disabled { opacity: .5; cursor: default; }
   .draft { display: none; margin-top: 10px; }
   .draft label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
@@ -87,7 +128,7 @@
   .hint { background: var(--accent-soft); border-radius: 6px; padding: 8px 10px; font-size: 13px; white-space: pre-wrap; }
   .hint.warn { background: transparent; border: 1px solid var(--warn); color: var(--warn); }
   .badge.count { background: var(--line); color: var(--text); }
-  details.msg { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); margin-bottom: 10px; }
+  details.msg { border: 1px solid var(--line); border-radius: 8px; background: var(--card); margin-bottom: 10px; }
   details.msg > summary { list-style: none; cursor: pointer; padding: 9px 14px; display: flex; gap: 10px; align-items: baseline; }
   details.msg > summary::-webkit-details-marker { display: none; }
   details.msg > summary .who { font-weight: 600; white-space: nowrap; }
@@ -97,23 +138,15 @@
   details.msg.own > summary .who { color: var(--accent); }
   details.msg .inner { padding: 0 14px 12px; }
   details.msg .cols .pane { border: 0; padding: 0; background: none; }
-  details.msg .cols .pane.zhpane { background: var(--zh); padding: 8px 10px; border-radius: 6px; }
+  details.msg .cols .pane.zhpane { background: var(--card-zh); padding: 8px 10px; border-radius: 6px; }
   .atts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
   .atts img { max-height: 160px; max-width: 240px; border: 1px solid var(--line); border-radius: 6px; cursor: zoom-in; background: #fff; }
   .atts .file { border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer; background: var(--bg); color: var(--text); }
   .atts .note { font-size: 12px; }
   .atts .file.blocked { cursor: help; color: var(--bad); border-color: var(--bad); background: transparent; }
-  .badge.koc-waiting { color: var(--warn); background: transparent; border: 1px dashed var(--warn); }
-  .badge.koc-sent { color: var(--accent); background: transparent; border: 1px solid var(--accent); }
-  .badge.koc-human, .badge.koc-uncertain { color: #fff; background: var(--bad); }
-  #kocBtn.human { border-color: var(--bad); color: var(--bad); }
-  #kocDlg:not([open]) { display: none; }
-  #kocDlg { width: min(900px, 92vw); max-height: 80vh; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); }
-  #kocDlg .kochead { display: flex; gap: 10px; align-items: center; }
-  #kocDlg .kochead b { flex: 1; }
-  #kocJobs .job { border-top: 1px solid var(--line); padding: 8px 0; font-size: 13px; }
-  #kocJobs .job .why { color: var(--bad); }
-  #kocJobs .job pre { white-space: pre-wrap; font: inherit; margin: 6px 0 0; padding: 6px 8px; background: var(--zh); border-radius: 6px; }
+  #setupBtn.human { border-color: var(--bad); color: var(--bad); }
+  #aiCheckBtn { white-space: nowrap; }
+  dialog.small label.blk { display: block; font-weight: 600; margin: 10px 0 4px; }
   .strategies { display: none; margin-top: 10px; }
   .situation { margin-bottom: 10px; }
   .opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
@@ -137,7 +170,90 @@
   dialog.small:not([open]) { display: none; }
   dialog.small { width: min(560px, 92vw); border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); }
   dialog.small h3 { margin: 0 0 8px; font-size: 15px; }
+  #version { cursor: pointer; border-bottom: 1px dotted var(--muted); }
+  #version:hover, #version:focus-visible { color: var(--accent); border-bottom-color: var(--accent); outline: none; }
+  #version.busy { cursor: progress; }
+  #setupDlg { width: min(680px, 94vw); }
+  #setupSheet input[type=text], #setupSheet input[type=number], #setupSheet select { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+  #sheetPath { flex: 1; min-width: 240px; }
+  #sheetPopoRow[hidden], #sheetGoogleRow[hidden], #sheetGoogleLink[hidden] { display: none; }
+  .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin: 0 0 10px; }
+  .tabs button { border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; background: none; color: var(--muted); padding: 6px 12px; cursor: pointer; font: inherit; }
+  .tabs button:hover { color: var(--text); }
+  .tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+  .tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .tabs button.need::after { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--bad); margin-left: 6px; vertical-align: 2px; }
+  [role=tabpanel][hidden] { display: none; }
+  #sheetMap { border-collapse: collapse; width: 100%; font-size: 13px; }
+  #sheetMap td { padding: 4px 6px; border-top: 1px solid var(--line); vertical-align: middle; }
+  #sheetMap td:first-child { white-space: nowrap; font-weight: 600; }
+  #sheetMap td.sample { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+  #sheetMap select { width: 100%; }
   dialog.small .row2 { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+  dialog.small select { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+  #lookDlg section + section { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 2px; }
+  .swatches { display: flex; gap: 8px; flex-wrap: wrap; }
+  .swatches button { display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 18px; padding: 4px 13px 4px 5px; cursor: pointer; font: inherit; transition: border-color .15s, box-shadow .15s; }
+  .swatches button i { width: 22px; height: 22px; border-radius: 50%; background: linear-gradient(135deg, var(--a) 50%, var(--b) 50%); box-shadow: inset 0 0 0 1px rgba(0,0,0,.14); }
+  .swatches button:hover { border-color: var(--accent); }
+  .swatches button.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); font-weight: 600; }
+  .swatches button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .wallthumb { position: relative; height: 130px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg) center / cover no-repeat; cursor: crosshair; margin: 6px 0 2px; }
+  .wallthumb b { position: absolute; width: 16px; height: 16px; margin: -8px 0 0 -8px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.55), 0 1px 4px rgba(0,0,0,.4); pointer-events: none; }
+  #wallOpts[hidden], #wallRemove[hidden] { display: none; }
+  #wallShow { flex: 1; accent-color: var(--accent); }
+  .acctbar { position: relative; display: flex; align-items: center; gap: 6px; min-width: 0; }
+  #acctBtn { display: flex; align-items: center; gap: 5px; max-width: 280px; min-width: 0; border: 1px solid transparent; background: none; color: var(--text); font: inherit; font-size: 13px; padding: 3px 8px; border-radius: 6px; cursor: pointer; }
+  #acctBtn:hover, #acctBtn[aria-expanded="true"] { border-color: var(--line); background: var(--panel); }
+  #acctBtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  #selfAddr { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #acctBtn .caret { color: var(--muted); font-size: 11px; }
+  #acctBtn .n { font-size: 11px; font-weight: 600; color: var(--on-accent); background: var(--accent); border-radius: 9px; padding: 0 6px; line-height: 16px; }
+  #logoutBtn { padding: 2px 10px; font-size: 12px; color: var(--muted); }
+  #logoutBtn:hover { color: var(--bad); border-color: var(--bad); }
+  #logoutBtn[hidden], #acctMenu[hidden] { display: none; }
+  #acctMenu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; min-width: 270px; max-width: 380px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 10px 28px rgba(0,0,0,.18); padding: 6px 0; }
+  #acctMenu button { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; border: 0; background: none; color: var(--text); padding: 7px 14px; cursor: pointer; font: inherit; }
+  #acctMenu button:hover, #acctMenu button:focus-visible { background: var(--accent-soft); outline: none; }
+  #acctMenu button.on .who b { color: var(--accent); }
+  #acctMenu .who { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  #acctMenu .who b, #acctMenu .who small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #acctMenu .who b { font-weight: 600; }
+  #acctMenu .who small { color: var(--muted); font-size: 11px; }
+  #acctMenu .n { font-size: 12px; font-weight: 600; color: var(--on-accent); background: var(--accent); border-radius: 9px; padding: 0 7px; line-height: 18px; }
+  #acctMenu .tag { font-size: 11px; color: var(--accent); border: 1px solid var(--accent); border-radius: 8px; padding: 0 6px; white-space: nowrap; }
+  #acctMenu .check { width: 14px; color: var(--accent); }
+  #acctMenu hr { border: 0; border-top: 1px solid var(--line); margin: 6px 0; }
+  #acctMenu button.extra { color: var(--muted); font-size: 13px; }
+  #logoutChoices label { display: flex; gap: 8px; align-items: center; padding: 5px 0; }
+  #loginView { position: fixed; inset: 0; z-index: 30; display: flex; padding: 24px; overflow: auto; background: var(--bg); }
+  :root[data-wall] #loginView { background: transparent; }
+  #loginView[hidden] { display: none; }
+  body.login header, body.login main, body.login #fbBtn { display: none; }
+  #loginForm { margin: auto; width: min(440px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 28px 30px 20px; box-shadow: 0 18px 50px rgba(0,0,0,.14); }
+  #loginForm h1 { font-size: 24px; margin: 0 0 6px; color: var(--accent); letter-spacing: .3px; }
+  #loginForm .lead { margin: 0 0 12px; }
+  #loginForm label.blk { display: block; font-weight: 600; margin: 12px 0 4px; }
+  #loginForm input[type=text], #loginForm input[type=password], #loginForm input[type=number], #loginForm select { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 7px 10px; }
+  #loginForm > input, #loginNameRow input { width: 100%; }
+  #loginForm input:focus, #loginForm select:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+  #loginForm .row2 { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+  #loginForm .row2 input[type=text] { flex: 1; min-width: 130px; }
+  #loginForm input[type=number] { width: 80px; }
+  #loginForm details { margin-top: 12px; }
+  #loginForm details summary { cursor: pointer; }
+  #loginForm .hintline { font-size: 12px; margin: 12px 0 0; }
+  #loginBtn { width: 100%; margin-top: 16px; padding: 9px 12px; font-size: 15px; }
+  #loginNote { min-height: 1.5em; margin: 10px 0 0; }
+  #acctDlg input[type=text], #acctDlg input[type=number], #acctDlg select { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+  #acctDlg .row2 input[type=text] { flex: 1; width: auto; min-width: 140px; }
+  #acctDlg input[type=number] { width: 80px; }
+  #acctDlg details { margin-top: 6px; }
+  #acctDlg details summary { cursor: pointer; }
+  #acctList .acct { display: flex; gap: 8px; align-items: center; padding: 7px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
+  #acctList .acct .who { flex: 1; min-width: 180px; overflow-wrap: anywhere; }
+  #acctList .acct .tag { font-size: 11px; color: var(--on-accent); background: var(--accent); border-radius: 8px; padding: 0 7px; margin-left: 6px; }
+  #acctList .acct button { padding: 2px 10px; font-size: 12px; }
   dialog.small input[type=password] { flex: 1; font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; min-width: 200px; }
   .code { font: 600 20px/1.2 Consolas, monospace; letter-spacing: 3px; color: var(--accent); }
   #mobileCases .job { border-top: 1px solid var(--line); padding: 6px 0; font-size: 13px; }
@@ -153,36 +269,44 @@
   .reply.dragging { outline: 2px dashed var(--accent); outline-offset: 4px; }
   @media (max-width: 1100px) { .cols { grid-template-columns: 1fr; } main { grid-template-columns: 140px 300px 1fr; } }
 </style>
+<script>
+// The last look this browser saw, set before the page draws so it never flashes the default colours. The full
+// version (wallpaper, transparency) runs with the rest of the script below.
+try {
+  const s = JSON.parse(localStorage.getItem("kolmail.skin") || "null") || {};
+  const r = document.documentElement, dark = matchMedia("(prefers-color-scheme: dark)").matches;
+  r.dataset.skin = s.preset || "classic";
+  r.dataset.scheme = s.mode === "dark" || (s.mode !== "light" && dark) ? "dark" : "light";
+} catch { document.documentElement.dataset.scheme = "light"; }
+</script>
 </head>
 <body>
+<div id="wall" aria-hidden="true"></div>
 <header>
   <h1>KOL Mail</h1>
-  <span class="note" id="selfAddr"></span>
+  <div class="acctbar">
+    <button type="button" id="acctBtn" aria-haspopup="menu" aria-expanded="false" title="切换邮箱、添加邮箱"><span id="selfAddr"></span><span class="caret" aria-hidden="true">▾</span></button>
+    <div id="acctMenu" role="menu" hidden></div>
+    <button class="act" id="logoutBtn" type="button" hidden>退出</button>
+  </div>
   <form id="searchForm" role="search">
     <input type="search" id="q" placeholder="搜索发件人、邮箱、主题、正文或中文译文" maxlength="200">
     <button class="act" type="submit">搜索</button>
   </form>
-  <button class="act" id="kocBtn" type="button">KOC 机器人</button>
   <button class="act" id="mobileBtn" type="button">手机审稿</button>
+  <button class="act" id="lookBtn" type="button" title="桌宠和界面主题">外观</button>
   <span id="status">连接中…</span>
-  <span class="note" id="version"></span>
+  <button class="act" id="aiCheckBtn" type="button" hidden>重新检测 AI</button>
+  <span class="note" id="version" role="button" tabindex="0" title="点一下马上检查更新"></span>
+  <button class="act" id="setupBtn" type="button" title="签名、谈判方式和 KOL 总表">设置</button>
 </header>
-<dialog id="kocDlg">
-  <div class="kochead">
-    <b>KOC 机器人（工作时间自动回复）</b>
-    <span id="kocState" class="note"></span>
-    <button class="act" id="kocToggle" type="button"></button>
-    <button class="act" id="kocClose" type="button">关闭</button>
-  </div>
-  <p class="note">只回复 KOL 总表里、不在重点名单上、只问流量联盟标准问题的人，收信后 15 到 30 分钟发出。机器人能说的话只来自 KOC 知识卡（settings.json 的 paths.koc_knowledge）。</p>
-  <div id="kocJobs"></div>
-</dialog>
 <dialog id="mobileDlg" class="small">
   <h3>下班时间：AI 起草，手机审批</h3>
   <p class="note">下班时间来的 KOL 邮件和 Telegram 私聊，不再发固定模板。AI 先给 2 到 3 个方案推到你的 Telegram，你选一个、看中文对照、打字提修改意见，点“发送”并再确认一次才会发出。没批的什么都不发，第二天在这里接着处理。</p>
   <div class="row2"><b>下班回复方式</b>
     <label><input type="radio" name="ohmode" value="ai"> AI 起草，手机审批</label>
-    <label><input type="radio" name="ohmode" value="template"> 固定模板自动回复</label></div>
+    <label><input type="radio" name="ohmode" value="template"> 固定模板自动回复</label>
+    <label><input type="radio" name="ohmode" value="off"> 不自动回复</label></div>
   <div class="row2"><b>Telegram 机器人</b><span id="botState" class="note"></span></div>
   <div class="row2"><input type="password" id="botToken" placeholder="在 Telegram 找 @BotFather，/newbot 建一个机器人，把它给的令牌粘贴到这里" autocomplete="off">
     <button class="act" id="botSave" type="button">保存</button></div>
@@ -194,6 +318,120 @@
   <div class="note" id="mobileNote"></div>
   <div id="mobileCases"></div>
   <div class="row2"><button class="act" id="mobileClose" type="button">关闭</button></div>
+</dialog>
+<dialog id="setupDlg" class="small">
+  <h3>设置</h3>
+  <div class="tabs" role="tablist" aria-label="设置分页">
+    <button type="button" role="tab" id="tabMain" data-tab="setupMain" aria-controls="setupMain" aria-selected="true">签名和谈判方式</button>
+    <button type="button" role="tab" id="tabSheet" data-tab="setupSheet" aria-controls="setupSheet" aria-selected="false">KOL 总表</button>
+  </div>
+  <section id="setupMain" role="tabpanel" aria-labelledby="tabMain">
+  <p class="note">第一次使用先填这两项，以后随时在右上角“设置”里改，保存后立刻生效。</p>
+  <label class="blk" for="setupSig">签名</label>
+  <textarea id="setupSig" maxlength="500" style="min-height:100px" placeholder="每封回信末尾原样附上，按你自己的格式写，比如名字、职位、公司、Discord、网址"></textarea>
+  <label class="blk" for="setupPrefs">我的谈判方式</label>
+  <textarea id="setupPrefs" maxlength="4000" style="min-height:180px" placeholder="用你自己的话说个大概，AI 出策略和起草都会照着来。可以写写：
+- 默认先推什么合作方式，佣金怎么给
+- 固定费一般给到多少，什么情况下可以加
+- 砍价时你习惯怎么说，语气偏正式还是轻松
+- 哪些事绝对不能答应（比如预付、声称官方授权）"></textarea>
+  <label class="blk"><input type="checkbox" id="setupOffhours"> 下班时间自动回复固定模板</label>
+  <p class="note" id="setupOffhoursNote" style="margin:0">不在工作时间（周一到周五 10:00 到 18:00，GMT+8）收到的 KOL 邮件和 Telegram 私聊，自动回一段固定的“我现在下班了，回来再回复你”。默认关，需要时（比如休长假）再打开。</p>
+  <div class="row2"><button class="act primary" id="setupSave" type="button">保存</button>
+    <button class="act" id="setupClose" type="button">稍后再说</button><span class="note" id="setupNote"></span></div>
+  </section>
+  <section id="setupSheet" role="tabpanel" aria-labelledby="tabSheet" hidden>
+  <p class="note">连上以后，打开 KOL 的邮件会显示表里记的频道链接；每收到或发出一封 KOL 邮件，会把最近联系时间、轮到谁回和一句话进展写进你的表。只写下面对上的列，不加列、不加工作表、不改你的格式；格子里是你自己写的字不会被覆盖，只改空格子和程序自己写过的格子。表里还没有的 KOL 会在下面第一个整行都空的地方加一行，格式照抄上一行。</p>
+  <div class="note" id="sheetState"></div>
+  <div class="row2"><input type="text" id="sheetPath" placeholder="总表文件的完整路径（.xlsx），或者 POPO / Google 在线表格的链接" autocomplete="off">
+    <button class="act" id="sheetPick" type="button">选择文件…</button>
+    <button class="act" id="sheetRead" type="button">读取</button>
+    <button class="act" id="sheetNew" type="button">新建一张</button></div>
+  <div class="row2" id="sheetPopoRow" hidden><span class="note" id="sheetPopoNote"></span>
+    <button class="act" id="sheetPopoLogin" type="button" hidden>登录 POPO</button>
+    <button class="act" id="sheetPopoRecheck" type="button">重新检测</button></div>
+  <div class="row2" id="sheetGoogleRow" hidden><span class="note" id="sheetGoogleNote"></span>
+    <button class="act" id="sheetGoogleAuth" type="button" hidden>用 Google 账号授权</button>
+    <a id="sheetGoogleLink" target="_blank" rel="noopener" hidden>打开 Google 授权页</a>
+    <button class="act" id="sheetGoogleRecheck" type="button">重新检测</button></div>
+  <div id="sheetMapBox" hidden>
+    <div class="row2"><label>工作表 <select id="sheetSheet"></select></label>
+      <label>表头在第 <input type="number" id="sheetHeaderRow" min="1" max="50" style="width:4.5em"> 行</label>
+      <span class="note" id="sheetRows"></span></div>
+    <p class="note" style="margin:4px 0">核对一下每一项对应你表里的哪一列。“邮箱”必须对上；没有的项选“不同步”。</p>
+    <table id="sheetMap"></table>
+  </div>
+  <div class="row2"><button class="act primary" id="sheetSave" type="button">保存</button>
+    <button class="act" id="sheetCheck" type="button">测试读取</button>
+    <button class="act" id="sheetUnlink" type="button">断开</button>
+    <button class="act" id="sheetClose" type="button">关闭</button></div>
+  <div class="note" id="sheetNote"></div>
+  </section>
+</dialog>
+<dialog id="lookDlg" class="small">
+  <h3>外观</h3>
+  <section id="skinSection">
+    <label class="blk">配色</label>
+    <div class="swatches" id="skinPresets">
+      <button type="button" data-preset="classic"><i style="--a:#2f6fde;--b:#f6f7f9"></i>经典</button>
+      <button type="button" data-preset="ocean"><i style="--a:#2c4aa0;--b:#f4f1ea"></i>深海鲸鱼</button>
+      <button type="button" data-preset="sakura"><i style="--a:#c03a6c;--b:#fdf6f8"></i>樱花</button>
+      <button type="button" data-preset="matcha"><i style="--a:#3a7449;--b:#f5f6f0"></i>抹茶</button>
+    </div>
+    <div class="row2"><span>明暗</span>
+      <select id="skinMode"><option value="auto">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></div>
+    <label class="blk">壁纸</label>
+    <div class="row2">
+      <button class="act" id="wallPick" type="button">选一张图片…</button>
+      <button class="act" id="wallRemove" type="button">去掉壁纸</button>
+      <input type="file" id="wallFile" accept="image/jpeg,image/png,image/webp" hidden>
+      <span class="note" id="skinNote">JPG、PNG 或 WebP，最大 10 MB</span>
+    </div>
+    <div id="wallOpts" hidden>
+      <div class="wallthumb" id="wallThumb" title="点一下图片上最想露出来的地方"><b id="wallDot"></b></div>
+      <div class="row2"><span>透出</span><input type="range" id="wallShow" min="0" max="80" step="5"><span class="note" id="wallShowVal"></span></div>
+      <div class="row2"><label><input type="checkbox" id="wallGlass"> 毛玻璃（更好看，稍微费电）</label>
+        <label><input type="checkbox" id="wallAccent"> 主色跟着壁纸走</label></div>
+    </div>
+  </section>
+  <section id="petSection">
+    <label class="blk"><input type="checkbox" id="petOn"> 桌宠（来新邮件时她会跳一下、举起信封，并冒出气泡）</label>
+    <div class="row2">
+      <span>大小</span>
+      <select id="petScale"><option value="0.75">小</option><option value="1">中</option><option value="1.25">大</option></select>
+      <label><input type="checkbox" id="petMuted"> 静音（只换动作，不弹气泡）</label>
+    </div>
+    <div class="row2"><button class="act" id="petDemo" type="button">让她演示一下来信</button><span class="note" id="petNote"></span></div>
+    <p class="note" style="margin:0">拖动可以挪位置；单击打开 KOL Mail（有气泡时打开那封信）；右键有更多选项。</p>
+  </section>
+  <div class="row2"><button class="act" id="lookClose" type="button">关闭</button></div>
+</dialog>
+<dialog id="acctDlg" class="small">
+  <h3>邮箱</h3>
+  <p class="note">可以同时放几个邮箱，点左上角的邮箱名切换，每个邮箱的新邮件都会让桌宠提醒你。下班自动回复、手机审稿和 KOL 总表只跟“主邮箱”走；其他邮箱的信只在你打开时才交给 AI 翻译。</p>
+  <div id="acctList"></div>
+  <label class="blk">添加邮箱</label>
+  <input type="text" id="acctEmail" placeholder="邮箱地址，比如 name@163.com" autocomplete="off" maxlength="254">
+  <div class="row2"><input type="password" id="acctPw" placeholder="密码或授权码" autocomplete="new-password" maxlength="512">
+    <input type="text" id="acctLabel" placeholder="备注名，可不填（比如“个人”）" maxlength="40"></div>
+  <details id="acctServers"><summary class="note">服务器设置（常见邮箱和公司同域名的邮箱不用填）</summary>
+    <div class="row2"><span>收信 IMAP</span><input type="text" id="acctImap" placeholder="imap.example.com">
+      <input type="number" id="acctImapPort" placeholder="993" min="1" max="65535">
+      <select id="acctImapSec"><option value="ssl">SSL</option><option value="starttls">STARTTLS</option></select></div>
+    <div class="row2"><span>发信 SMTP</span><input type="text" id="acctSmtp" placeholder="smtp.example.com">
+      <input type="number" id="acctSmtpPort" placeholder="465" min="1" max="65535">
+      <select id="acctSmtpSec"><option value="ssl">SSL</option><option value="starttls">STARTTLS</option></select></div>
+  </details>
+  <p class="note" style="margin:6px 0 0">163、126、QQ 邮箱要先在网页版“设置”里开通 IMAP/SMTP，再填那里生成的<b>授权码</b>，不是登录密码；Gmail 用应用专用密码。密码只存在这台电脑的系统凭据管理器里。</p>
+  <div class="row2"><button class="act primary" id="acctAdd" type="button">添加并测试</button><span class="note" id="acctNote"></span></div>
+  <div class="row2"><button class="act" id="acctClose" type="button">关闭</button></div>
+</dialog>
+<dialog id="logoutDlg" class="small">
+  <h3>退出邮箱</h3>
+  <p class="note" id="logoutText"></p>
+  <div id="logoutChoices"></div>
+  <div class="row2"><button class="act primary" id="logoutGo" type="button">退出</button>
+    <button class="act" id="logoutCancel" type="button">取消</button><span class="note" id="logoutNote"></span></div>
 </dialog>
 <dialog id="fbDlg" class="small">
   <h3>匿名反馈</h3>
@@ -207,8 +445,35 @@
     <button class="act" id="fbClose" type="button">关闭</button><span class="note" id="fbNote"></span></div>
 </dialog>
 <button class="act" id="fbBtn" type="button">反馈</button>
+<div id="loginView" hidden>
+  <form id="loginForm" novalidate>
+    <h1>KOL Mail</h1>
+    <p class="note lead">登录你的工作邮箱。KOL 的来信会自动翻成中文，回信由 AI 起草、你确认后才发出。</p>
+    <label class="blk" for="loginEmail">邮箱地址</label>
+    <input type="text" id="loginEmail" autocomplete="off" maxlength="254" spellcheck="false">
+    <label class="blk" for="loginPw">密码或授权码</label>
+    <input type="password" id="loginPw" autocomplete="new-password" maxlength="512">
+    <div id="loginNameRow">
+      <label class="blk" for="loginName">对外署名（英文名）</label>
+      <input type="text" id="loginName" maxlength="60" placeholder="比如 Alex Li，收信人会在你的邮箱地址旁边看到">
+    </div>
+    <details id="loginServers"><summary class="note">服务器设置（公司邮箱和 163、126、QQ、Gmail 等常见邮箱不用填）</summary>
+      <div class="row2"><span>收信 IMAP</span><input type="text" id="loginImap" placeholder="imap.example.com">
+        <input type="number" id="loginImapPort" placeholder="993" min="1" max="65535">
+        <select id="loginImapSec"><option value="ssl">SSL</option><option value="starttls">STARTTLS</option></select></div>
+      <div class="row2"><span>发信 SMTP</span><input type="text" id="loginSmtp" placeholder="smtp.example.com">
+        <input type="number" id="loginSmtpPort" placeholder="465" min="1" max="65535">
+        <select id="loginSmtpSec"><option value="ssl">SSL</option><option value="starttls">STARTTLS</option></select></div>
+    </details>
+    <p class="note hintline">163、126、QQ 邮箱先在网页版“设置”里开通 IMAP/SMTP，再填那里生成的<b>授权码</b>，不是登录密码；Gmail 用应用专用密码。密码只存在这台电脑的系统凭据管理器（Mac 上是钥匙串）里。</p>
+    <button class="act primary" id="loginBtn" type="submit">登录</button>
+    <p class="note" id="loginNote" role="status"></p>
+  </form>
+</div>
 <main>
-  <nav id="folders"></nav>
+  <nav>
+    <div id="folders"></div>
+  </nav>
   <section id="list">
     <div class="listbar">
       <span id="count"></span>
@@ -278,12 +543,22 @@
 
 <script>
 const $ = (s, r = document) => r.querySelector(s);
-const st = { mailbox: "INBOX", page: 1, total: 0, current: null, listSeq: 0, loadingMore: false, threads: new Map(), search: null };
+const st = { mailbox: "INBOX", page: 1, total: 0, current: null, listSeq: 0, loadingMore: false, threads: new Map(), search: null,
+  account: "", boxes: { sent: "Sent Items", drafts: "Drafts", junk: "Junk E-mail", trash: "Deleted Items" }, deal: [] };
+const ACCOUNT_KEY = "kolmail.account";  // the mailbox shown last on this computer
+try { st.account = localStorage.getItem(ACCOUNT_KEY) || ""; } catch { /* the primary one */ }
+// Every request names the mailbox it is about; the server falls back to the primary one for an unknown name.
+const kolHeaders = (extra = {}) => ({ "X-KOL-Mail": "1", "X-KOL-Account": st.account, ...extra });
 
 async function api(path, opts = {}) {
-  const init = { ...opts, headers: { "X-KOL-Mail": "1", ...(opts.body ? { "Content-Type": "application/json" } : {}) } };
+  const init = { ...opts, headers: kolHeaders(opts.body ? { "Content-Type": "application/json" } : {}) };
   const r = await fetch(path, init);
   const data = await r.json().catch(() => ({ error: "响应无法解析" }));
+  if (r.status === 409 && data.login_needed && !st.loginShown) location.reload();  // logged out in another tab
+  if (r.status === 409 && data.gone_account) {  // this mailbox was logged out (maybe in another tab): start over
+    try { localStorage.removeItem(ACCOUNT_KEY); } catch { /* the reload asks the server anyway */ }
+    location.reload();
+  }
   if (!r.ok) { const err = new Error(data.error || r.statusText); err.data = data; throw err; }
   return data;
 }
@@ -303,18 +578,41 @@ const STATUS = { pending: "翻译中", done: null, skipped: null, failed: "翻�
 
 async function loadStatus() {
   try {
+    const asked = st.account;  // an answer that arrives after a switch must not switch back
     const s = await api("/api/status");
+    if (s.login_needed) { showLogin(s.login || {}); return; }
+    if (asked !== st.account) return;
     showUnreadCounts(s.unread_counts || {});
     if (st.unreadRev !== undefined && s.unread_rev !== st.unreadRev && !st.loadingMore) {
       // Unread state changed (new mail, read elsewhere, or marked read here): repaint from the server cache.
       if (!st.search && st.page === 1) loadList(false, "cached", true).catch(() => {});  // search rows keep their flags
     }
     if (!st.loadingMore) st.unreadRev = s.unread_rev;  // otherwise repaint on the next poll, not never
-    if (s.self_address) $("#selfAddr").textContent = s.self_address;
+    if (s.accounts) {
+      if (s.account && s.account !== st.account) {  // first load, or the remembered mailbox is gone: the server's choice
+        st.account = s.account;
+        try { localStorage.setItem(ACCOUNT_KEY, s.account); } catch { /* fine */ }
+      }
+      renderAccounts(s.accounts);
+    }
     const el = $("#status");
     const parts = [];
     if (!s.claude_bin) parts.push("找不到 " + (s.ai_backend || "AI") + " 命令行");
-    if (s.claude_error) parts.push("翻译出错：" + s.claude_error);
+    if (s.claude_error) parts.push("AI 出错：" + s.claude_error);
+    $("#aiCheckBtn").hidden = !(s.claude_error || !s.claude_bin);
+    const sb = $("#setupBtn"), needMap = !!(s.sheet && s.sheet.needs_map);
+    sb.classList.toggle("human", !!s.setup_needed || needMap);
+    sb.title = s.setup_needed ? "签名和谈判方式还没填完，点这里填"
+      : needMap ? "KOL 总表已选好但列还没对应，同步没开始，点这里对应" : "签名、谈判方式和 KOL 总表";
+    for (const [tab, need, what] of [["#tabMain", !!s.setup_needed, "签名和谈判方式"], ["#tabSheet", needMap, "KOL 总表"]]) {
+      $(tab).classList.toggle("need", need);
+      $(tab).setAttribute("aria-label", what + (need ? "（需要处理）" : ""));
+    }
+    if (s.setup_needed && !st.setupOffered && !setupSnoozed()) { st.setupOffered = true; openSetup().catch(showError); }
+    if (needMap && !s.setup_needed && !st.sheetOffered && !$("#setupDlg").open) { st.sheetOffered = true; openSheet().catch(showError); }
+    const fb = $("#fbBtn");
+    fb.disabled = !s.feedback_ready;
+    fb.title = s.feedback_ready ? "" : "反馈地址还没配置（安装命令里缺 -Feedback），请直接联系维护者";
     if (s.mail_error) parts.push(s.mail_error);
     else if (s.scan_error) parts.push("收信出错：" + s.scan_error);
     if (s.autoreply_error) parts.push(s.autoreply_error);
@@ -322,25 +620,22 @@ async function loadStatus() {
     if (s.notify_error) parts.push(s.notify_error);
     if (s.telegram_error) parts.push("Telegram：" + s.telegram_error);
     if (s.autoreply_alert) parts.push("自动回复出过问题：" + s.autoreply_alert + "（详见 KOL邮件汇总\\自动回复记录.md）");
-    const kb = $("#kocBtn"), kc = s.koc;
-    if (kc) {
-      kb.textContent = "KOC 机器人 " + (kc.enabled ? "开" : "关") + (kc.waiting ? ` · 排队 ${kc.waiting}` : "") + (kc.human ? ` · 待你处理 ${kc.human}` : "");
-      kb.classList.toggle("human", !!kc.human);
-    }
     const a = s.autoreply;
     if (a && a.mode === "ai" && (a.email || a.telegram) && !a.phone_paired) parts.push("下班 AI 回复已开启，但手机审稿还没配对，点上方“手机审稿”设置");
     if (s.mobile_error) parts.push(s.mobile_error);
-    const auto = !a ? "" : ` · 下班${a.mode === "ai" ? "AI起草手机审批" : "自动回复"} 邮件${a.email ? "开" : "关"} Telegram${a.telegram ? (a.telegram_login ? "开" : "开（未登录）") : "关"}`
+    const auto = !a ? "" : a.mode === "off" ? " · 下班自动回复关" : ` · 下班${a.mode === "ai" ? "AI起草手机审批" : "自动回复"} 邮件${a.email ? "开" : "关"} Telegram${a.telegram ? (a.telegram_login ? "开" : "开（未登录）") : "关"}`
       + (a.off_hours ? " · 现在是非工作时间" : "");
     el.className = parts.length ? "err" : "";
+    el.title = parts.join("；");
     el.textContent = parts.length ? parts.join("；") :
       `上次检查新邮件 ${s.last_scan || "--"} · 待翻译 ${s.queue}${s.translating ? " · 正在翻译" : ""}${auto}`;
   } catch (e) { $("#status").className = "err"; $("#status").textContent = "后端未连接：" + e.message; }
 }
 
-const FOLDER_NAMES = { INBOX: "收件箱", "Sent Items": "已发送", Drafts: "草稿", "Junk E-mail": "垃圾邮件", "Deleted Items": "已删除" };
+// Folder names in Chinese, for the special folders of the mailbox shown now (each provider names them its own way).
+let FOLDER_NAMES = { INBOX: "收件箱", "Sent Items": "已发送", Drafts: "草稿", "Junk E-mail": "垃圾邮件", "Deleted Items": "已删除" };
 // Empty leftovers that some mail client created next to WorkMail's own "Deleted Items" and "Drafts".
-const HIDDEN_FOLDERS = new Set(["Outbox", "Trash"]);
+let HIDDEN_FOLDERS = new Set(["Outbox", "Trash"]);
 
 function showUnreadCounts(counts) {
   document.querySelectorAll("#folders button").forEach(b => {
@@ -354,8 +649,13 @@ function showUnreadCounts(counts) {
 }
 
 async function loadFolders() {
-  const { folders } = await api("/api/folders");
-  const order = ["INBOX", "纯固薪", "CPS+固薪", "纯CPS", "Sent Items", "Drafts"];
+  const { folders, roles, deal } = await api("/api/folders");
+  if (roles) {
+    st.boxes = roles; st.deal = deal || [];
+    FOLDER_NAMES = { INBOX: "收件箱", [roles.sent]: "已发送", [roles.drafts]: "草稿", [roles.junk]: "垃圾邮件", [roles.trash]: "已删除" };
+    HIDDEN_FOLDERS = new Set(["Outbox", ...(roles.trash === "Trash" ? [] : ["Trash"])]);
+  }
+  const order = ["INBOX", ...st.deal, st.boxes.sent, st.boxes.drafts];
   const shown = folders.filter(f => !HIDDEN_FOLDERS.has(f));
   shown.sort((a, b) => ((order.indexOf(a) + 1) || 99) - ((order.indexOf(b) + 1) || 99));
   const nav = $("#folders"); nav.textContent = "";
@@ -367,6 +667,188 @@ async function loadFolders() {
   }
 }
 
+// ---------------------------------------------------------------- mailboxes: the name at the top left, its menu, logging out
+// The mailbox shown is named at the top left; its menu lists every mailbox (unread INBOX mail counted) and leads to
+// adding and managing them. "退出" next to it logs out of the one shown.
+function renderAccounts(list) {
+  const key = JSON.stringify([st.account, list]);
+  if (key === st.accountsKey) return;  // unchanged: keep the buttons (a rebuild could swallow a click)
+  if (!$("#acctMenu").hidden) { st.accountsLater = list; return; }  // open: rebuilt when it closes
+  st.accountsKey = key; st.accounts = list;
+  const cur = list.find(a => a.name === st.account) || list[0];
+  const btn = $("#acctBtn");
+  $("#selfAddr").textContent = cur ? cur.label || cur.address : "";
+  btn.title = cur ? `${cur.address}${cur.primary ? "（主邮箱）" : ""} · 点一下切换或添加邮箱` : "添加邮箱";
+  btn.querySelector(".n") && btn.querySelector(".n").remove();
+  const elsewhere = list.filter(a => a !== cur).reduce((n, a) => n + (a.unread || 0), 0);
+  if (elsewhere) {  // new mail in a mailbox not shown: a hint on the name
+    const n = document.createElement("span"); n.className = "n"; n.textContent = elsewhere > 99 ? "99+" : elsewhere;
+    n.title = `其他邮箱有 ${elsewhere} 封未读`; btn.insertBefore(n, btn.querySelector(".caret"));
+  }
+  const out = $("#logoutBtn"); out.hidden = !cur;
+  out.title = cur ? `退出 ${cur.address}` : "";
+  const menu = $("#acctMenu"); menu.textContent = "";
+  for (const a of list) {
+    const b = document.createElement("button"); b.type = "button"; b.setAttribute("role", "menuitem");
+    b.className = a === cur ? "on" : "";
+    const check = document.createElement("span"); check.className = "check"; check.textContent = a === cur ? "✓" : "";
+    const who = document.createElement("span"); who.className = "who";
+    const main = document.createElement("b"); main.textContent = a.label || a.address; who.append(main);
+    if (a.label) { const sub = document.createElement("small"); sub.textContent = a.address; who.append(sub); }
+    b.append(check, who);
+    if (a.primary) { const t = document.createElement("span"); t.className = "tag"; t.textContent = "主邮箱"; b.append(t); }
+    if (a.unread) { const n = document.createElement("span"); n.className = "n"; n.textContent = a.unread > 99 ? "99+" : a.unread; b.append(n); }
+    b.onclick = safe(() => { closeAccountMenu(); return switchAccount(a.name); });
+    menu.append(b);
+  }
+  menu.append(document.createElement("hr"));
+  const extra = (text, fn) => {
+    const b = document.createElement("button"); b.type = "button"; b.className = "extra"; b.setAttribute("role", "menuitem");
+    b.textContent = text; b.onclick = safe(() => { closeAccountMenu(); return fn(); }); menu.append(b);
+  };
+  extra("＋ 添加邮箱…", () => openAccounts(true));
+  if (list.length > 1) extra("管理邮箱（备注名、主邮箱）…", () => openAccounts(false));
+}
+function closeAccountMenu() {
+  const menu = $("#acctMenu"), focused = menu.contains(document.activeElement);
+  menu.hidden = true; $("#acctBtn").setAttribute("aria-expanded", "false");
+  if (focused) $("#acctBtn").focus();
+  if (st.accountsLater) { const later = st.accountsLater; st.accountsLater = null; renderAccounts(later); }
+}
+$("#acctMenu").addEventListener("keydown", e => {  // up and down between the entries
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+  e.preventDefault();
+  const items = [...$("#acctMenu").querySelectorAll("button")], i = items.indexOf(document.activeElement);
+  items[(i + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length].focus();
+});
+$("#acctMenu").addEventListener("focusout", e => { if (e.relatedTarget && !e.relatedTarget.closest(".acctbar")) closeAccountMenu(); });
+$("#acctBtn").onclick = e => {
+  e.stopPropagation();
+  const menu = $("#acctMenu"), open = menu.hidden;
+  menu.hidden = !open; $("#acctBtn").setAttribute("aria-expanded", String(open));
+  if (open) { const first = menu.querySelector("button"); if (first) first.focus(); }
+};
+document.addEventListener("click", e => { if (!$("#acctMenu").hidden && !e.target.closest(".acctbar")) closeAccountMenu(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#acctMenu").hidden) { closeAccountMenu(); $("#acctBtn").focus(); } });
+$("#logoutBtn").onclick = safe(() => {
+  const a = (st.accounts || []).find(x => x.name === st.account) || (st.accounts || [])[0];
+  if (a) openLogout(a);
+});
+async function switchAccount(name, mailbox = "INBOX") {
+  if (name === st.account && !st.search) return showFolder(mailbox);
+  st.account = name;
+  try { localStorage.setItem(ACCOUNT_KEY, name); } catch { /* remembered for this page only */ }
+  if (st.current) { clearInterval(st.current.poll); st.current.urls.forEach(u => URL.revokeObjectURL(u)); st.current = null; }
+  $("#reader").innerHTML = '<div class="empty">选择一封邮件</div>';
+  st.search = null; $("#q").value = ""; st.mailbox = mailbox;
+  renderAccounts(st.accounts || []);
+  await loadFolders(); await showFolder(mailbox); await loadStatus();
+}
+function showAccountList(list) {
+  const box = $("#acctList"); box.textContent = "";
+  for (const a of list) {
+    const row = document.createElement("div"); row.className = "acct";
+    const who = document.createElement("div"); who.className = "who";
+    who.textContent = a.address + (a.label ? `（${a.label}）` : "");
+    if (a.primary) { const t = document.createElement("span"); t.className = "tag"; t.textContent = "主邮箱"; who.append(t); }
+    row.append(who);
+    const act = (text, fn) => { const b = document.createElement("button"); b.className = "act"; b.type = "button"; b.textContent = text; b.onclick = safe(fn); row.append(b); };
+    act("改备注", async () => {
+      const label = prompt("这个邮箱在 KOL Mail 里叫什么（留空就显示邮箱地址）", a.label || "");
+      if (label === null) return;
+      const d = await post("/api/accounts/label", { name: a.name, label }); showAccountList(d.accounts); renderAccounts(d.accounts);
+    });
+    if (!a.primary) {
+      act("设为主邮箱", async () => {
+        if (!confirm(`把 ${a.address} 设为主邮箱？下班自动回复、手机审稿和 KOL 总表以后都跟它走：它收件箱里已有的信不会补记进总表，原主邮箱还没处理完的手机审稿会关掉。KOL Mail 会自动重启一次，大约半分钟。`)) return;
+        await post("/api/accounts/primary", { name: a.name });
+        $("#acctNote").className = "note"; $("#acctNote").textContent = "正在重启，好了以后页面会自动刷新…";
+        await waitForRestart($("#acctNote"));
+      });
+    }
+    act("退出登录", () => openLogout(a));
+    box.append(row);
+  }
+}
+// The old process may wait for a mail being sent before it goes (up to ten minutes), and the service starts the new
+// one about 15 s after: reload only once the old one has stopped answering and a new one answers.
+async function waitForRestart(note) {
+  let down = false;
+  for (let i = 0; i < 450; i++) {
+    await new Promise(r => setTimeout(r, 2000));
+    try {
+      await fetch("/api/status", { headers: kolHeaders(), cache: "no-store" });
+      if (down) { location.reload(); return; }
+    } catch { down = true; }
+  }
+  if (note) { note.className = "note err"; note.textContent = "KOL Mail 很久没有重启好：请手动刷新这个页面，还不行就重新打开 KOL Mail。"; }
+}
+// Logging out. The primary mailbox hands over to another one first; the last one leads back to the login screen.
+function openLogout(a) {
+  const others = (st.accounts || []).filter(x => x.name !== a.name);
+  const wipe = "这台电脑上存的这个邮箱的密码、缓存、中文译文和下载过的附件会删掉，邮箱服务器上的邮件不受影响。";
+  $("#logoutText").textContent = !a.primary ? `退出 ${a.address}？${wipe}`
+    : others.length ? `${a.address} 是主邮箱：下班自动回复、手机审稿和 KOL 总表都跟它走。选一个邮箱接任主邮箱，再退出它；以后这些都跟新的主邮箱走，手机审稿里还没处理完的会关掉，接任邮箱收件箱里已有的信不会补记进总表。${wipe}KOL Mail 会自动重启一次，大约半分钟。`
+    : `退出 ${a.address}？这是 KOL Mail 里唯一的邮箱：退出后回到登录页，收信、翻译和自动回复都停下，直到你重新登录。${wipe}签名、谈判方式、KOL 总表和手机审稿这些设置会保留，下次登录的邮箱接着用。`;
+  const box = $("#logoutChoices"); box.textContent = "";
+  if (a.primary) others.forEach((o, i) => {
+    const label = document.createElement("label"), r = document.createElement("input");
+    r.type = "radio"; r.name = "successor"; r.value = o.name; r.checked = i === 0;
+    label.append(r, document.createTextNode(`由 ${o.label ? o.label + "（" + o.address + "）" : o.address} 接任主邮箱`));
+    box.append(label);
+  });
+  $("#logoutNote").className = "note"; $("#logoutNote").textContent = "";
+  $("#logoutGo").disabled = false; $("#logoutGo").dataset.name = a.name; $("#logoutCancel").textContent = "取消";
+  $("#logoutDlg").showModal();
+}
+$("#logoutCancel").onclick = () => $("#logoutDlg").close();
+$("#logoutGo").onclick = safe(async () => {
+  const name = $("#logoutGo").dataset.name, note = $("#logoutNote");
+  const picked = document.querySelector('#logoutChoices input[name="successor"]:checked');
+  $("#logoutGo").disabled = true; note.className = "note"; note.textContent = "正在退出…";
+  let d;
+  try { d = await post("/api/accounts/remove", { name, successor: picked ? picked.value : undefined }); }
+  catch (e) { note.className = "note err"; note.textContent = e.message; $("#logoutGo").disabled = false; return; }
+  if (d.restarting) {
+    note.className = d.warning ? "note err" : "note";
+    note.textContent = (d.warning ? d.warning + "。" : "") + (d.login ? "已退出，KOL Mail 正在重启，好了以后回到登录页…" : "已退出，KOL Mail 正在重启，好了以后页面会自动刷新…");
+    try { localStorage.removeItem(ACCOUNT_KEY); } catch { /* the server picks the primary one */ }
+    await waitForRestart(note);
+    return;
+  }
+  renderAccounts(d.accounts);
+  if ($("#acctDlg").open) showAccountList(d.accounts);
+  if (d.warning) {  // logged out, but the stored password is still there: say so where it stays readable
+    note.className = "note err"; note.textContent = d.warning; $("#logoutCancel").textContent = "关闭";
+  } else $("#logoutDlg").close();
+  if (st.account === name) await switchAccount(d.accounts[0].name);
+});
+async function openAccounts(adding = false) {
+  const d = await api("/api/accounts");
+  showAccountList(d.accounts);
+  $("#acctNote").className = d.frozen ? "note err" : "note"; $("#acctNote").textContent = d.frozen || "";
+  $("#acctAdd").disabled = !!d.frozen;
+  if (!$("#acctDlg").open) $("#acctDlg").showModal();
+  if (adding) $("#acctEmail").focus();
+}
+$("#acctClose").onclick = () => $("#acctDlg").close();
+$("#acctAdd").onclick = safe(async () => {
+  const note = $("#acctNote"), btn = $("#acctAdd");
+  const body = { email: $("#acctEmail").value.trim(), password: $("#acctPw").value, label: $("#acctLabel").value.trim() };
+  if ($("#acctImap").value.trim()) Object.assign(body, {
+    imap_host: $("#acctImap").value.trim(), imap_port: Number($("#acctImapPort").value) || undefined, imap_security: $("#acctImapSec").value,
+    smtp_host: $("#acctSmtp").value.trim(), smtp_port: Number($("#acctSmtpPort").value) || undefined, smtp_security: $("#acctSmtpSec").value });
+  if (!body.email || !body.password) { note.className = "note err"; note.textContent = "邮箱地址和密码（授权码）都要填"; return; }
+  btn.disabled = true; note.className = "note"; note.textContent = "正在连接邮箱服务器，测试收信和发信，可能要一两分钟…";
+  try {
+    const d = await post("/api/accounts/add", body);
+    $("#acctPw").value = ""; $("#acctEmail").value = ""; $("#acctLabel").value = "";
+    note.className = d.warning ? "note err" : "note"; note.textContent = d.warning || "加好了，点左上角的邮箱名可以切换过去";
+    showAccountList(d.accounts); renderAccounts(d.accounts);
+  } catch (e) { note.className = "note err"; note.textContent = e.message; }
+  finally { btn.disabled = false; $("#acctPw").value = ""; }
+});
+
 // Highlight at once, paint the server's cached list, then refresh it quietly in the background.
 async function showFolder(f) {
   if (st.search) { st.search = null; $("#q").value = ""; }
@@ -376,7 +858,7 @@ async function showFolder(f) {
   if (await loadList(false, "cached")) return st.mailbox === f && loadList(false, "revalidate");
   if (st.mailbox !== f || st.search) return;  // another folder or a search took over meanwhile
   const box = $("#rows"); box.textContent = "";
-  const wait = document.createElement("div"); wait.className = "empty"; wait.textContent = "载入中…";
+  const wait = document.createElement("div"); wait.className = "empty"; wait.textContent = "正在连接邮箱…（刚启动时要等十几秒）";
   box.append(wait); $("#count").textContent = ""; $("#more").hidden = true;
   return loadList();
 }
@@ -423,48 +905,6 @@ async function loadMore() {
   } finally { btn.disabled = false; btn.textContent = "加载更多"; }
 }
 
-const KOC_TEXT = { sent: "机器人已回", human: "需你处理", uncertain: "机器人发送不确定" };
-function kocBadge(k) {
-  if (!k) return null;
-  let text = KOC_TEXT[k.status];
-  if (k.status === "waiting" || k.status === "working") {
-    const d = new Date(k.due_at);
-    text = isNaN(d) ? "机器人排队中" : "机器人 " + d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) + " 回";
-  }
-  if (!text) return null;
-  const b = document.createElement("span");
-  b.className = "badge koc-" + (k.status === "working" ? "waiting" : k.status);
-  b.textContent = text; if (k.reason) b.title = k.reason;
-  return b;
-}
-
-async function openKoc() {
-  const d = await api("/api/koc");
-  $("#kocState").textContent = (d.enabled ? "已开启" : "已关闭") + (d.sheet_read ? "" : " · 总表还没读到，机器人暂不回复");
-  const t = $("#kocToggle"); t.textContent = d.enabled ? "关闭机器人" : "开启机器人"; t.dataset.on = d.enabled ? "1" : "";
-  const box = $("#kocJobs"); box.textContent = "";
-  if (!d.jobs.length) box.textContent = "还没有处理过的来信。";
-  for (const j of d.jobs) {
-    const div = document.createElement("div"); div.className = "job";
-    const head = document.createElement("div");
-    head.textContent = `${fmtDate(j.received_at)} · ${j.address} · ${j.status_zh}` + (j.status === "waiting" ? `（${fmtDate(j.due_at)} 发出）` : "");
-    div.append(head);
-    if (j.summary) { const s = document.createElement("div"); s.textContent = "对方：" + j.summary; div.append(s); }
-    if (j.reason && j.status !== "sent") { const r = document.createElement("div"); r.className = "why"; r.textContent = j.reason; div.append(r); }
-    if (j.reply) { const p = document.createElement("pre"); p.textContent = j.reply; div.append(p); }
-    box.append(div);
-  }
-  if (!$("#kocDlg").open) $("#kocDlg").showModal();
-}
-$("#kocBtn").onclick = safe(openKoc);
-$("#kocClose").onclick = () => $("#kocDlg").close();
-$("#kocToggle").onclick = safe(async () => {
-  const on = !$("#kocToggle").dataset.on;
-  if (on && !confirm("开启后，机器人会在工作时间自动回复符合条件的 KOC 来信，确定开启？")) return;
-  await post("/api/koc/switch", { enabled: on });
-  await openKoc(); await loadStatus();
-});
-
 // One row per conversation: rows come newest first, so the first message seen is the row's face and later
 // (older) ones only bump its counter. Search results span folders, so each row carries its own mailbox.
 function renderRows(emails, append, search) {
@@ -472,7 +912,7 @@ function renderRows(emails, append, search) {
   const hideOn = $("#hideSelf").checked;
   for (const e of emails) {
     const mailbox = e.mailbox || st.mailbox;
-    const hide = hideOn && (search ? mailbox !== "Sent Items" : mailbox === "INBOX");
+    const hide = hideOn && (search ? mailbox !== st.boxes.sent : mailbox === "INBOX");
     if (hide && e.skippable) continue;
     const group = st.threads.get(e.thread_key);
     if (group) {
@@ -488,13 +928,12 @@ function renderRows(emails, append, search) {
     if (st.current && st.current.opened.mailbox === mailbox && st.current.opened.id === String(e.email_id)) row.classList.add("on");
     const top = document.createElement("div"); top.className = "top";
     const from = document.createElement("span"); from.className = "from";
-    from.textContent = mailbox === "Sent Items" ? "致 " + (e.recipients || []).join(", ") : senderName(e.sender);
+    from.textContent = mailbox === st.boxes.sent ? "致 " + (e.recipients || []).join(", ") : senderName(e.sender);
     from.append(countBadge);
     const right = document.createElement("span"); right.textContent = fmtDate(e.date);
     if (search) { const b = document.createElement("span"); b.className = "badge box"; b.textContent = FOLDER_NAMES[mailbox] || mailbox; right.append(b); }
     if (e.language && e.status === "done") { const b = document.createElement("span"); b.className = "badge"; b.textContent = e.language; right.append(b); }
     if (STATUS[e.status]) { const b = document.createElement("span"); b.className = "badge " + e.status; b.textContent = STATUS[e.status]; right.append(b); }
-    const k = kocBadge(e.koc); if (k) right.append(k);
     top.append(from, right);
     const subj = document.createElement("div"); subj.className = "subj"; subj.textContent = e.subject || "(无主题)";
     row.append(top, subj);
@@ -656,7 +1095,7 @@ function attachmentUrl(m, name) {
 }
 
 async function fetchAttachment(ctx, m, name) {
-  const r = await fetch(attachmentUrl(m, name), { headers: { "X-KOL-Mail": "1" } });
+  const r = await fetch(attachmentUrl(m, name), { headers: kolHeaders() });
   if (!r.ok) { const d = await r.json().catch(() => ({})); const err = new Error(d.error || r.statusText); err.blocked = !!d.blocked; throw err; }
   const blob = await r.blob();
   const url = URL.createObjectURL(blob);
@@ -1004,7 +1443,9 @@ async function send(ctx) {
   try {
     const r = await post("/api/send", { mailbox: ctx.mailbox, email_id: ctx.email_id, to, subject, body, body_zh: ctx.pairs.zh,
                                         attachments: (ctx.outAtts || []).map(a => a.id) });
-    note.textContent = `已发送给 ${r.to}` + (atts.length ? `，带 ${atts.length} 个附件` : "") + "，副本在“已发送”里。";
+    note.textContent = `已发送给 ${r.to}` + (atts.length ? `，带 ${atts.length} 个附件` : "") +
+                       (r.warning ? `。${r.warning}。` : "，副本在“已发送”里。");
+    if (r.warning) note.className = "note err";
     ctx.outAtts.forEach(a => a.url && URL.revokeObjectURL(a.url));
     ctx.outAtts = [];
   } catch (e) {
@@ -1030,29 +1471,93 @@ $("#searchForm").onsubmit = ev => { ev.preventDefault(); safe(runSearch)($("#q")
 $("#q").addEventListener("search", () => { if (!$("#q").value && st.search) safe(showFolder)(st.mailbox); });  // the input's clear button
 $("#q").addEventListener("keydown", ev => { if (ev.key === "Escape" && !ev.isComposing && st.search) { $("#q").value = ""; safe(showFolder)(st.mailbox); } });
 
-// A desktop notification opens "#open=<mailbox>/<id>": show that folder and open the mail.
+// The pet's bubble opens "#open=<mailbox>/<id>[/<account>]" (that mail; without an account, the primary
+// mailbox's) or "#account=<account>" (that mailbox's INBOX). A mailbox this page does not know is ignored.
 function hashTarget() {
-  const m = /^#open=([^/]+)\/(\d+)$/.exec(location.hash);
-  if (!m) return null;
+  const m = /^#open=([^/]+)\/(\d+)(?:\/([A-Za-z0-9_-]{1,40}))?$/.exec(location.hash);
+  const a = /^#account=([A-Za-z0-9_-]{1,40})$/.exec(location.hash);
+  if (!m && !a) return null;
   history.replaceState(null, "", location.pathname);  // so a reload doesn't reopen it
-  try { return { mailbox: decodeURIComponent(m[1]), id: m[2] }; } catch { return null; }
+  const known = st.accounts || [], primary = known.find(x => x.primary);
+  const wanted = (m ? m[3] : a[1]) || (primary ? primary.name : st.account);
+  if (known.length && !known.some(x => x.name === wanted)) return null;  // logged out since, or made up
+  try { return m ? { mailbox: decodeURIComponent(m[1]), id: m[2], account: wanted } : { mailbox: "INBOX", account: wanted }; }
+  catch { return null; }
 }
 async function openFromHash() {
   const t = hashTarget(); if (!t) return;
-  if (st.mailbox !== t.mailbox || st.search) await showFolder(t.mailbox);
+  if (!t.id) return switchAccount(t.account);
+  if (t.account !== st.account) await switchAccount(t.account, t.mailbox);
+  else if (st.mailbox !== t.mailbox || st.search) await showFolder(t.mailbox);
   await openMessage(t.id, document.querySelector(`#rows .row[data-id="${t.id}"]`), t.mailbox);
 }
 window.addEventListener("hashchange", safe(openFromHash));
 
 (async () => {
-  await loadStatus(); setInterval(loadStatus, 5000);
+  await loadStatus();
+  if (st.loginShown) return;  // no mailbox yet: the login screen is all there is
+  setInterval(loadStatus, 5000);
   const target = hashTarget();
-  if (target) st.mailbox = target.mailbox;
+  if (target) {
+    st.mailbox = target.mailbox;
+    if (target.account !== st.account) { st.account = target.account; await loadStatus(); }
+  }
   try { await loadFolders(); await showFolder(st.mailbox); }
   catch (e) { $("#rows").textContent = "载入失败：" + e.message; }
-  if (target) safe(openMessage)(target.id, document.querySelector(`#rows .row[data-id="${target.id}"]`), target.mailbox);
+  if (target && target.id) safe(openMessage)(target.id, document.querySelector(`#rows .row[data-id="${target.id}"]`), target.mailbox);
   setInterval(safe(() => { if (st.mailbox === "INBOX" && st.page === 1 && !st.search && !st.loadingMore) return loadList(false, "revalidate"); }), 60000);
 })();
+
+// ---------------------------------------------------------------- the login screen (first use, or every mailbox logged out)
+// The mailbox added here becomes the primary one; KOL Mail restarts once to set everything up for it.
+function guessName(email) {  // eclair -> Eclair, john.doe -> John Doe, as the installer used to suggest
+  return email.split("@")[0].split(/[._-]+/).filter(Boolean).map(w => w[0].toUpperCase() + w.slice(1)).join(" ");
+}
+function showLogin(info) {
+  if (st.loginShown) return;
+  st.loginShown = true; st.loginInfo = info;
+  document.body.classList.add("login");
+  $("#loginView").hidden = false;
+  const domain = info.domain || "";
+  $("#loginEmail").placeholder = domain ? `你的工作邮箱，比如 name@${domain}（只填 @ 前面的部分也行）` : "你的邮箱地址";
+  if (info.full_name) { $("#loginName").value = info.full_name; $("#loginName").dataset.typed = "1"; }  // the last one's
+  if (info.frozen) { $("#loginNote").className = "note err"; $("#loginNote").textContent = info.frozen; $("#loginBtn").disabled = true; }
+  $("#loginEmail").focus();
+  setInterval(async () => {  // signed in from another tab (or KOL Mail restarted with a mailbox): go in
+    if (st.signingIn) return;
+    try { const s = await (await fetch("/api/status", { headers: kolHeaders(), cache: "no-store" })).json(); if (!s.login_needed) location.reload(); }
+    catch { /* restarting */ }
+  }, 5000);
+}
+$("#loginEmail").addEventListener("input", () => {
+  const name = $("#loginName");
+  if (!name.dataset.typed) name.value = guessName(fullAddress($("#loginEmail").value.trim()));
+});
+$("#loginName").addEventListener("input", () => { $("#loginName").dataset.typed = "1"; });
+function fullAddress(v) { const d = st.loginInfo && st.loginInfo.domain; return v && d && !v.includes("@") ? `${v}@${d}` : v; }
+$("#loginForm").onsubmit = safe(async e => {
+  e.preventDefault();
+  const note = $("#loginNote"), btn = $("#loginBtn");
+  const body = { email: fullAddress($("#loginEmail").value.trim()), password: $("#loginPw").value,
+    full_name: $("#loginName").value.trim() };
+  if ($("#loginImap").value.trim()) Object.assign(body, {
+    imap_host: $("#loginImap").value.trim(), imap_port: Number($("#loginImapPort").value) || undefined, imap_security: $("#loginImapSec").value,
+    smtp_host: $("#loginSmtp").value.trim(), smtp_port: Number($("#loginSmtpPort").value) || undefined, smtp_security: $("#loginSmtpSec").value });
+  if (!body.email || !body.password) { note.className = "note err"; note.textContent = "邮箱地址和密码（授权码）都要填"; return; }
+  if (!body.full_name) { note.className = "note err"; note.textContent = "请填写对外署名（英文名）"; $("#loginName").focus(); return; }
+  btn.disabled = true; st.signingIn = true; note.className = "note"; note.textContent = "正在连接邮箱服务器，测试收信和发信，可能要一两分钟…";
+  let d;
+  try { d = await post("/api/accounts/add", body); }
+  catch (err) {
+    note.className = "note err"; note.textContent = err.message; btn.disabled = false; st.signingIn = false;
+    if (/不认识这个邮箱的服务器|服务器地址不对|连不上收信服务器/.test(err.message)) $("#loginServers").open = true;
+    return;
+  }
+  $("#loginPw").value = "";
+  note.className = d.warning ? "note err" : "note";
+  note.textContent = (d.warning ? d.warning + "。" : "") + "登录成功！KOL Mail 正在为这个邮箱启动，大约半分钟，好了会自动进去…";
+  await waitForRestart(note);
+});
 
 // ---------------------------------------------------------------- reply attachments
 const ATT_MAX = 15 * 1024 * 1024, ATT_COUNT = 10;
@@ -1110,7 +1615,7 @@ async function addFiles(ctx, files) {
     ctx.outAtts.push(item); renderOutAtts(ctx);
     try {
       const r = await fetch("/api/reply/upload", { method: "POST", body: f,
-        headers: { "X-KOL-Mail": "1", "X-File-Name": encodeURIComponent(f.name), "Content-Type": "application/octet-stream" } });
+        headers: kolHeaders({ "X-File-Name": encodeURIComponent(f.name), "Content-Type": "application/octet-stream" }) });
       const data = await r.json().catch(() => ({ error: "响应无法解析" }));
       if (!r.ok) throw new Error(data.error || r.statusText);
       Object.assign(item, { id: data.id, name: data.name, size: data.size });
@@ -1143,12 +1648,20 @@ function renderOutAtts(ctx) {
   }
 }
 
-// ---------------------------------------------------------------- self-update: checked on the first open of the day
-async function checkUpdate() {
-  let u;
-  try { u = await post("/api/update", {}); } catch (e) { return; }
+// ---------------------------------------------------------------- self-update: checked on the first open of the day,
+// and at once when the version number is clicked
+async function checkUpdate(force = false) {
   const el = $("#version");
+  if (el.classList.contains("busy")) return;
+  let u;
+  if (force) { el.classList.add("busy"); el.textContent = "正在检查更新…"; }
+  try { u = await post("/api/update", force ? { force: true } : {}); }
+  catch (e) {
+    if (force) { el.classList.remove("busy"); el.textContent = "检查更新失败"; el.title = e.message + "（点一下再试）"; }
+    return;
+  } finally { if (u) el.classList.remove("busy"); }
   el.textContent = "v" + (u.current || "?");
+  el.title = "点一下马上检查更新";
   if (u.state === "restarting") {
     el.textContent = `已更新到 v${u.latest}，正在重启…`;
     const until = Date.now() + 120000;
@@ -1158,12 +1671,21 @@ async function checkUpdate() {
     };
     setTimeout(wait, 8000);
   } else if (u.state === "error") {
-    el.title = "检查更新失败（明天再试）：" + u.error;
+    el.title = "检查更新失败：" + u.error + "（点一下再试）";
+    if (force) el.textContent = `v${u.current || "?"} · 检查更新失败`;
+  } else if (u.state === "disabled") {
+    el.title = u.dev_copy ? "这是开发副本，不自动更新" : "没有设置更新来源，不能自动更新";
+    if (force) el.textContent = `v${u.current || "?"} · ${u.dev_copy ? "开发副本不自动更新" : "没有设置更新来源"}`;
+  } else if (u.state === "checking") {
+    if (force) el.textContent = `v${u.current || "?"} · 正在检查，稍等再点`;
   } else if (u.latest) {
-    el.title = u.state === "current" ? "已是最新版" : "";
+    el.title = (u.state === "current" ? "已是最新版。" : "") + "点一下马上检查更新";
+    if (force && u.state === "current") el.textContent = `v${u.current} · 已是最新版`;
   }
 }
 checkUpdate();
+$("#version").onclick = () => checkUpdate(true);
+$("#version").onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); checkUpdate(true); } };
 
 // ---------------------------------------------------------------- phone drafts, phone-review settings, feedback
 async function phoneDraft(ctx) {
@@ -1225,6 +1747,395 @@ function showPairing(code) {
   const url = `https://t.me/${encodeURIComponent(st.botName)}?start=${encodeURIComponent(code)}`;
   $("#pairCode").textContent = code; $("#pairUrl").textContent = url; $("#pairLink").href = url;
 }
+
+// "稍后再说" keeps the first-use prompt away for a day on this computer (storage may be unavailable: then it just asks)
+const SETUP_SNOOZE = "kolmail.setupSnoozedUntil";
+function setupSnoozed() { try { return Number(localStorage.getItem(SETUP_SNOOZE) || 0) > Date.now(); } catch { return false; } }
+function showSetupTab(id) {
+  for (const t of document.querySelectorAll("#setupDlg [role=tab]")) {
+    const on = t.dataset.tab === id;
+    t.setAttribute("aria-selected", String(on)); t.tabIndex = on ? 0 : -1;
+    $("#" + t.dataset.tab).hidden = !on;
+  }
+}
+for (const t of document.querySelectorAll("#setupDlg [role=tab]")) {
+  t.onclick = safe(() => t.dataset.tab === "setupSheet" ? openSheet() : openSetup());
+  t.onkeydown = e => {
+    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+    const tabs = [...document.querySelectorAll("#setupDlg [role=tab]")], i = tabs.indexOf(t);
+    const next = tabs[(i + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length]; next.focus(); next.click();
+  };
+}
+$("#setupDlg").addEventListener("close", () => { st.setupLoaded = {}; });
+async function openSetup() {
+  showSetupTab("setupMain");
+  if ($("#setupDlg").open && st.setupLoaded && st.setupLoaded.main) return;  // back to this tab: keep what was typed
+  const d = await api("/api/setup");
+  st.setupLoaded = { ...(st.setupLoaded || {}), main: true };
+  $("#setupSig").value = d.signature || ""; $("#setupPrefs").value = d.preferences || "";
+  st.setupOffhours = d.offhours_mode === "template";
+  $("#setupOffhours").checked = st.setupOffhours;
+  $("#setupOffhoursNote").dataset.base = $("#setupOffhoursNote").dataset.base || $("#setupOffhoursNote").textContent;
+  $("#setupOffhoursNote").textContent = $("#setupOffhoursNote").dataset.base + (d.offhours_mode === "ai"
+    ? "现在下班是 AI 起草、手机审批（在“手机审稿”里改），勾上会改成固定模板。" : "");
+  const note = $("#setupNote"); note.className = d.playbook_error ? "note err" : "note";
+  note.textContent = d.playbook_error || (d.setup_needed && (d.signature || "") === (d.name || "") ? "签名现在只有名字，按你平时的格式补全" : "");
+  if (!$("#setupDlg").open) $("#setupDlg").showModal();
+  $("#setupSig").focus();
+}
+$("#setupBtn").onclick = safe(() => $("#setupBtn").title.startsWith("KOL 总表") ? openSheet() : openSetup());
+$("#setupClose").onclick = () => {
+  try { localStorage.setItem(SETUP_SNOOZE, String(Date.now() + 24 * 3600 * 1000)); } catch { /* ask again next time */ }
+  $("#setupDlg").close();
+};
+$("#setupSave").onclick = safe(async () => {
+  const note = $("#setupNote"), signature = $("#setupSig").value.trim(), preferences = $("#setupPrefs").value.trim();
+  if (!signature) { note.className = "note err"; note.textContent = "签名不能是空的"; return; }
+  $("#setupSave").disabled = true; note.className = "note"; note.textContent = "保存中…";
+  const body = { signature, preferences };
+  if ($("#setupOffhours").checked !== st.setupOffhours) body.offhours_template = $("#setupOffhours").checked;
+  try { await post("/api/setup", body); note.textContent = "已保存"; $("#setupDlg").close(); await loadStatus(); }
+  catch (e) { note.className = "note err"; note.textContent = e.message; }
+  finally { $("#setupSave").disabled = false; }
+});
+// ---------------------------------------------------------------- 外观: the desktop pet (and the page theme)
+function showPet(d) {
+  $("#petOn").checked = d.enabled; $("#petMuted").checked = d.muted;
+  $("#petScale").value = String(d.scale);
+  $("#petScale").disabled = $("#petMuted").disabled = $("#petDemo").disabled = !d.enabled;
+  const note = $("#petNote"); note.className = d.error ? "note err" : "note";
+  note.textContent = d.error || (!d.enabled ? "已关闭，来信只在这个页面上显示" : d.running ? "桌宠在桌面上" : "正在叫她出来…");
+}
+async function savePet(changes) { showPet(await post("/api/pet/settings", changes)); }
+async function openLook() {
+  const [skin, pet] = await Promise.all([api("/api/skin"), api("/api/pet/settings")]);
+  applySkin(skin); showSkin(skin); showPet(pet);
+  if (!$("#lookDlg").open) $("#lookDlg").showModal();
+}
+
+// Colours, light/dark and the wallpaper. Over a wallpaper the big surfaces get the panel colours with the chosen
+// transparency (--glass*), computed here from whatever the preset's colours are.
+const SKIN_KEY = "kolmail.skin";
+const darkQuery = matchMedia("(prefers-color-scheme: dark)");
+function rgbOf(value) {
+  const v = value.trim();
+  if (v.startsWith("#")) {
+    const hex = v.length === 4 ? [...v.slice(1)].map(c => c + c).join("") : v.slice(1, 7);
+    const n = parseInt(hex, 16); return [n >> 16 & 255, n >> 8 & 255, n & 255];
+  }
+  const m = v.match(/[\d.]+/g); return m ? m.slice(0, 3).map(Number) : [255, 255, 255];
+}
+const cssVar = name => getComputedStyle(document.documentElement).getPropertyValue(name);
+const see = (name, a) => `rgba(${rgbOf(cssVar(name)).join(", ")}, ${Math.min(1, a).toFixed(2)})`;
+const wallUrl = s => `/skin/wallpaper?v=${encodeURIComponent(s.wallpaper.version)}`;
+function applySkin(s) {
+  st.skin = s;
+  const root = document.documentElement, wall = $("#wall");
+  root.dataset.skin = s.preset;
+  root.dataset.scheme = s.mode === "dark" || (s.mode === "auto" && darkQuery.matches) ? "dark" : "light";
+  for (const k of ["--accent", "--accent-soft", "--on-accent"]) root.style.removeProperty(k);
+  if (s.wallpaper) {
+    wall.style.backgroundImage = `url("${wallUrl(s)}")`;
+    wall.style.backgroundPosition = `${s.focus_x}% ${s.focus_y}%`;
+    const a = 1 - s.show / 100;
+    root.style.setProperty("--glass", see("--panel", a));
+    root.style.setProperty("--glass-card", see("--panel", a + .15));
+    root.style.setProperty("--glass-zh", see("--zh", a + .15));
+    root.style.setProperty("--glass-unread", see("--unread", a));
+    root.style.setProperty("--glass-strong", see("--bg", a + .25));
+    root.dataset.wall = "";
+    if (s.glass) root.dataset.glass = ""; else delete root.dataset.glass;
+    if (s.auto_accent) {
+      // worked out once per picture and light/dark, so moving the slider does not flash the preset's colour
+      const key = `${s.wallpaper.version}|${s.preset}|${root.dataset.scheme}`;
+      const use = c => { if (c && st.skin === s) for (const [k, v] of Object.entries(c)) root.style.setProperty(k, v); };
+      st.accents = st.accents || {};
+      if (key in st.accents) use(st.accents[key]);
+      else wallpaperAccent(wallUrl(s), root.dataset.scheme === "dark")
+        .then(c => { st.accents[key] = c; use(c); }).catch(() => { /* the preset's own colour stays */ });
+    }
+  } else {
+    delete root.dataset.wall; delete root.dataset.glass; wall.style.backgroundImage = "";
+  }
+  try { localStorage.setItem(SKIN_KEY, JSON.stringify(s)); } catch { /* next load starts from the default */ }
+}
+darkQuery.addEventListener("change", () => { if (st.skin && st.skin.mode === "auto") applySkin(st.skin); });
+
+// The wallpaper's main colour as the accent: the most frequent saturated hue, made dark or light enough that text
+// on it (and it as text) keeps a 4.5:1 contrast. A grey picture keeps the preset's colour.
+function hslRgb(h, s, l) {
+  const k = n => (n + h / 30) % 12, a = s * Math.min(l, 1 - l);
+  return [0, 8, 4].map(n => Math.round(255 * (l - a * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1)))));
+}
+function luminance(rgb) {
+  const c = v => (v /= 255) <= .03928 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4;
+  return .2126 * c(rgb[0]) + .7152 * c(rgb[1]) + .0722 * c(rgb[2]);
+}
+const contrast = (x, y) => { const [a, b] = [luminance(x), luminance(y)].sort((p, q) => q - p); return (a + .05) / (b + .05); };
+async function wallpaperAccent(url, dark) {
+  const img = new Image(); img.src = url; await img.decode();
+  const c = document.createElement("canvas"); c.width = c.height = 48;
+  const g = c.getContext("2d", { willReadFrequently: true }); g.drawImage(img, 0, 0, 48, 48);
+  const px = g.getImageData(0, 0, 48, 48).data, bins = new Array(24).fill(0);
+  for (let i = 0; i < px.length; i += 4) {
+    const r = px[i] / 255, gr = px[i + 1] / 255, b = px[i + 2] / 255;
+    const mx = Math.max(r, gr, b), mn = Math.min(r, gr, b), d = mx - mn, l = (mx + mn) / 2;
+    if (d < .08) continue;
+    const h = mx === r ? ((gr - b) / d + 6) % 6 : mx === gr ? (b - r) / d + 2 : (r - gr) / d + 4;
+    bins[Math.floor(h * 60 / 15) % 24] += d / (1 - Math.abs(2 * l - 1)) * (1 - Math.abs(l - .5) * 2);
+  }
+  const best = bins.indexOf(Math.max(...bins));
+  if (bins[best] < 20) return null;
+  const hue = best * 15 + 7.5, bg = rgbOf(cssVar("--bg"));
+  if (dark) {
+    let l = .62; while (contrast(hslRgb(hue, .7, l), bg) < 4.5 && l < .9) l += .03;
+    return { "--accent": `rgb(${hslRgb(hue, .7, l)})`, "--accent-soft": `rgb(${hslRgb(hue, .35, .2)})`, "--on-accent": `rgb(${bg})` };
+  }
+  let l = .45; while (contrast(hslRgb(hue, .62, l), [255, 255, 255]) < 4.5 && l > .15) l -= .03;
+  return { "--accent": `rgb(${hslRgb(hue, .62, l)})`, "--accent-soft": `rgb(${hslRgb(hue, .7, .94)})`, "--on-accent": "#ffffff" };
+}
+
+function showSkin(s) {
+  for (const b of document.querySelectorAll("#skinPresets button")) b.classList.toggle("on", b.dataset.preset === s.preset);
+  $("#skinMode").value = s.mode;
+  $("#wallOpts").hidden = $("#wallRemove").hidden = !s.wallpaper;
+  if (s.wallpaper) {
+    $("#wallThumb").style.backgroundImage = `url("${wallUrl(s)}")`;
+    $("#wallDot").style.left = s.focus_x + "%"; $("#wallDot").style.top = s.focus_y + "%";
+  }
+  $("#wallShow").value = s.show; $("#wallShowVal").textContent = s.show + "%";
+  $("#wallGlass").checked = s.glass; $("#wallAccent").checked = s.auto_accent;
+}
+async function saveSkin(changes) { const s = await post("/api/skin", changes); applySkin(s); showSkin(s); }
+async function sendWallpaper(body) {
+  const note = $("#skinNote"); note.className = "note"; note.textContent = body ? "上传中…" : "";
+  const r = await fetch("/api/skin/wallpaper", { method: "POST", body,
+    headers: { "X-KOL-Mail": "1", "Content-Type": "application/octet-stream" } });
+  const d = await r.json().catch(() => ({ error: "响应无法解析" }));
+  if (!r.ok) { note.className = "note err"; note.textContent = d.error || r.statusText; return; }
+  note.textContent = ""; applySkin(d); showSkin(d);
+}
+for (const b of document.querySelectorAll("#skinPresets button")) b.onclick = safe(() => saveSkin({ preset: b.dataset.preset }));
+$("#skinMode").onchange = safe(() => saveSkin({ mode: $("#skinMode").value }));
+$("#wallPick").onclick = () => $("#wallFile").click();
+$("#wallFile").onchange = safe(async () => {
+  const f = $("#wallFile").files[0]; $("#wallFile").value = "";
+  if (f) await sendWallpaper(f);
+});
+$("#wallRemove").onclick = safe(() => sendWallpaper(null));
+$("#wallThumb").onclick = safe(e => {
+  const r = $("#wallThumb").getBoundingClientRect();
+  return saveSkin({ focus_x: Math.round((e.clientX - r.left) / r.width * 100), focus_y: Math.round((e.clientY - r.top) / r.height * 100) });
+});
+$("#wallShow").oninput = () => { $("#wallShowVal").textContent = $("#wallShow").value + "%"; applySkin({ ...st.skin, show: Number($("#wallShow").value) }); };
+$("#wallShow").onchange = safe(() => saveSkin({ show: Number($("#wallShow").value) }));
+$("#wallGlass").onchange = safe(() => saveSkin({ glass: $("#wallGlass").checked }));
+$("#wallAccent").onchange = safe(() => saveSkin({ auto_accent: $("#wallAccent").checked }));
+try { const cached = JSON.parse(localStorage.getItem(SKIN_KEY) || "null"); if (cached) applySkin(cached); } catch { /* fetched below */ }
+api("/api/skin").then(applySkin).catch(() => { /* keep the default look */ });
+$("#lookBtn").onclick = safe(openLook);
+$("#lookClose").onclick = () => $("#lookDlg").close();
+$("#petOn").onchange = safe(() => savePet({ enabled: $("#petOn").checked }));
+$("#petMuted").onchange = safe(() => savePet({ muted: $("#petMuted").checked }));
+$("#petScale").onchange = safe(() => savePet({ scale: Number($("#petScale").value) }));
+$("#petDemo").onclick = safe(async () => {
+  const d = await post("/api/pet/demo", {});
+  $("#petNote").className = "note";
+  $("#petNote").textContent = d.running ? "看看桌面右下角" : "桌宠还没出来，过几秒再试";
+});
+// ---------------------------------------------------------------- KOL 总表: link a colleague's own sheet
+const SHEET_FIELD_HINT = { email: "必须", name: "新 KOL 加行时填", channel: "邮件里显示的频道链接；只填空格子", last_contact: "写日期时间",
+  owner: "轮到我方 / 对方，沿用表里原有的叫法；格子里写的是别的字（比如人名）就不改", summary: "一句话进展；只改空格子和程序写过的格子" };
+function sheetNote(text, err) { const n = $("#sheetNote"); n.className = err ? "note err" : "note"; n.textContent = text || ""; }
+function sheetBusy(on) { for (const id of ["sheetPick", "sheetRead", "sheetNew", "sheetSave", "sheetCheck", "sheetUnlink"]) $("#" + id).disabled = on; }
+function showSheetState(info) {
+  st.sheetInfo = info;
+  const el = $("#sheetState"), legacy = !!info.owner_fixed;
+  let text = legacy ? "这台电脑用的是固定格式的总表（kol.py），在这里不能改。"
+    : info.mode === "legacy" ? `现在用的是旧的固定格式同步（kol.py）${info.path ? "：" + info.path : ""}。重新选表、对应好列并保存后，会改用按列对应的同步。`
+    : !info.path ? "还没有连接总表。"
+    : !info.exists ? `连接的总表找不到了：${info.path}（被移动或改名了？重新选一下）`
+    : info.needs_map ? `已选 ${sheetLabel(info)}，还没对应好列，同步没有开始。`
+    : `已连接 ${sheetLabel(info)}` + (info.queued ? `，有 ${info.queued} 条改动排队等写入` : "") + "。";
+  if (info.mac && info.mode === "mapped" && info.path && !info.popo && !info.google) text += " Mac 上第一次写表时系统会问是否允许 KOL Mail 控制 Excel，点“好”；点了“不允许”的话，在 系统设置 → 隐私与安全性 → 自动化 里打开。";
+  el.className = info.error || (info.path && !info.exists) ? "note err" : "note";
+  el.textContent = text + (info.error ? " 最近的问题：" + info.error : "");
+  for (const id of ["sheetPick", "sheetRead", "sheetNew", "sheetSave"]) $("#" + id).hidden = legacy;
+  $("#sheetPath").disabled = legacy;
+  $("#sheetCheck").hidden = !(info.mode === "mapped" && info.path);
+  $("#sheetUnlink").hidden = legacy || !info.path;
+}
+function sheetLabel(info) {
+  return info.popo ? "POPO 表格 " + (info.popo_link || info.path) : info.google ? "Google 表格 " + (info.google_link || info.path) : info.path;
+}
+const isPopoLink = v => /^https?:\/\/docs\.popo\./i.test(v.trim()) || v.trim().startsWith("popo:");
+const isGoogleLink = v => /^https?:\/\/docs\.google\.com\/spreadsheets\//i.test(v.trim()) || v.trim().startsWith("google:");
+// Google 表格: each colleague lets KOL Mail into their own sheets once, in their own browser, with their Google account.
+async function showGoogleState(waitForIt = false) {
+  const row = $("#sheetGoogleRow"), note = $("#sheetGoogleNote"), auth = $("#sheetGoogleAuth");
+  row.hidden = false; note.className = "note"; note.textContent = "正在检查 Google 授权…";
+  let s;
+  for (let i = 0; ; i++) {
+    try { s = await api("/api/sheet/google"); } catch (e) { note.className = "note err"; note.textContent = e.message; return null; }
+    if (!waitForIt || s.authorized || !s.pending || i > 300) break;
+    note.textContent = "在浏览器新打开的标签页里选你的 Google 账号并允许，好了这里会自动继续…";
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  auth.hidden = !s.configured || s.authorized;
+  note.className = s.configured && s.authorized ? "note" : "note err";
+  note.textContent = !s.configured ? "这台电脑的 KOL Mail 还没配置 Google 授权（安装命令里缺 Google 客户端参数），请联系维护者。"
+    : !s.authorized ? (s.error ? s.error + " " : "") + "还没授权：点“用 Google 账号授权”，在打开的网页里选你的账号并允许 KOL Mail 读写你的 Google 表格。"
+    : `已授权${s.email ? "（" + s.email + "）" : ""}，读写这张表会用这个 Google 账号，请确认它能编辑这张表。`;
+  return s;
+}
+$("#sheetGoogleRecheck").onclick = safe(() => showGoogleState());
+$("#sheetGoogleAuth").onclick = safe(async () => {
+  const btn = $("#sheetGoogleAuth"), link = $("#sheetGoogleLink"), note = $("#sheetGoogleNote");
+  btn.disabled = true;
+  try {
+    let d;
+    try { d = await post("/api/sheet/google", {}); }
+    catch (e) { note.className = "note err"; note.textContent = e.message; return; }
+    const tab = d.url ? window.open(d.url, "_blank") : null;
+    if (tab) tab.opener = null;
+    link.hidden = !d.url || !!tab;  // a blocked new tab: the colleague opens the page by hand
+    if (d.url) link.href = d.url;
+    const s = await showGoogleState(true);
+    if (s && s.authorized && $("#sheetPath").value.trim()) await readSheet();
+  } finally { btn.disabled = false; link.hidden = true; }
+});
+async function showPopoState() {
+  const row = $("#sheetPopoRow"), note = $("#sheetPopoNote");
+  row.hidden = false; note.className = "note"; note.textContent = "正在检查 popo-cli…";
+  let s;
+  try { s = await api("/api/sheet/popo"); } catch (e) { note.className = "note err"; note.textContent = e.message; return; }
+  $("#sheetPopoLogin").hidden = !s.installed || s.logged_in;
+  note.className = s.installed && s.logged_in ? "note" : "note err";
+  note.textContent = !s.installed ? "这台电脑还没有 popo-cli：按公司的 POPO CLI 使用说明装好（需要 Node.js 20 以上），装好后点“重新检测”。"
+    : !s.logged_in ? "popo-cli 还没登录：点“登录 POPO”，在弹出的窗口里登录，再到 POPO 里确认授权卡片，然后点“重新检测”。"
+    : `popo-cli 已登录（${s.user || "当前账号"}），写表会用这个账号，请确认它能编辑这张表。`;
+}
+function renderSheetMap(d, preset) {
+  st.sheetInspect = d;
+  $("#sheetMapBox").hidden = false;
+  const sel = $("#sheetSheet"); sel.textContent = "";
+  for (const name of d.sheets) { const o = document.createElement("option"); o.value = o.textContent = name; o.selected = name === d.sheet; sel.append(o); }
+  $("#sheetHeaderRow").value = d.header_row;
+  $("#sheetRows").textContent = `表头下面有 ${d.rows} 行`;
+  const table = $("#sheetMap"); table.textContent = "";
+  for (const [field, label] of Object.entries(d.fields)) {
+    const tr = document.createElement("tr");
+    const name = document.createElement("td"); name.textContent = label + (d.required.includes(field) ? " *" : "");
+    name.title = SHEET_FIELD_HINT[field] || "";
+    const pick = document.createElement("td"), sample = document.createElement("td"); sample.className = "sample";
+    const s2 = document.createElement("select"); s2.dataset.field = field;
+    const none = document.createElement("option"); none.value = ""; none.textContent = "（不同步）"; s2.append(none);
+    const want = preset && field in preset ? preset[field] : d.guess[field];
+    for (const c of d.columns) {
+      const o = document.createElement("option"); o.value = c.header; o.textContent = c.header; o.selected = c.header === want; s2.append(o);
+    }
+    const showSample = () => { const c = d.columns.find(x => x.header === s2.value); sample.textContent = c && c.samples.length ? "例：" + c.samples.join(" ｜ ") : ""; };
+    s2.onchange = showSample; showSample();
+    pick.append(s2); tr.append(name, pick, sample); table.append(tr);
+  }
+}
+async function readSheet(opts = {}) {
+  const path = $("#sheetPath").value.trim();
+  if (!path) { sheetNote("先选一个总表文件，或者粘贴 POPO / Google 在线表格的链接", true); return; }
+  $("#sheetPopoRow").hidden = !isPopoLink(path); $("#sheetGoogleRow").hidden = !isGoogleLink(path);
+  if (isPopoLink(path)) showPopoState();
+  if (isGoogleLink(path)) { const g = await showGoogleState(); if (!g || !g.authorized) { sheetNote("先完成 Google 授权，再点“读取”", true); return; } }
+  sheetBusy(true); sheetNote("读取中…");
+  try { renderSheetMap(await post("/api/sheet/inspect", { path, sheet: opts.sheet, header_row: opts.header_row }), opts.preset); sheetNote(""); }
+  catch (e) { $("#sheetMapBox").hidden = true; sheetNote(e.message, true); }
+  finally { sheetBusy(false); }
+}
+async function openSheet() {
+  showSetupTab("setupSheet");
+  if (!$("#setupDlg").open) $("#setupDlg").showModal();
+  if (st.setupLoaded && st.setupLoaded.sheet) return;  // back to this tab: keep the mapping being made
+  st.setupLoaded = { ...(st.setupLoaded || {}), sheet: true };
+  const info = await api("/api/sheet");
+  showSheetState(info); sheetNote(""); $("#sheetMapBox").hidden = true;
+  $("#sheetPath").value = info.owner_fixed || String(info.path || "").startsWith("gsheet:") ? "" : info.path || "";
+  $("#sheetPopoRow").hidden = $("#sheetGoogleRow").hidden = true;
+  if (info.popo) { $("#sheetPath").value = info.popo_link || info.path; showPopoState(); }
+  if (info.google) { $("#sheetPath").value = info.google_link || info.path; showGoogleState(); }
+  if (info.mode === "mapped" && info.path && info.exists) {
+    const m = info.map || {};
+    const preset = m.columns ? { ...Object.fromEntries(Object.keys(SHEET_FIELD_HINT).map(f => [f, ""])), ...m.columns } : null;
+    await readSheet({ sheet: m.sheet, header_row: m.header_row, preset });
+  }
+}
+$("#sheetClose").onclick = () => $("#setupDlg").close();
+$("#sheetRead").onclick = safe(() => readSheet());
+$("#sheetSheet").onchange = safe(() => readSheet({ sheet: $("#sheetSheet").value }));
+$("#sheetHeaderRow").onchange = safe(() => readSheet({ sheet: $("#sheetSheet").value, header_row: $("#sheetHeaderRow").value }));
+$("#sheetPopoRecheck").onclick = safe(showPopoState);
+$("#sheetPopoLogin").onclick = safe(async () => {
+  try { await post("/api/sheet/popo", {}); $("#sheetPopoNote").textContent = "登录窗口已经打开（可能在浏览器后面）。登录并在 POPO 里确认授权后，点“重新检测”。"; }
+  catch (e) { $("#sheetPopoNote").className = "note err"; $("#sheetPopoNote").textContent = e.message; }
+});
+$("#sheetPath").addEventListener("change", () => { if (isPopoLink($("#sheetPath").value)) showPopoState(); else $("#sheetPopoRow").hidden = true; });
+$("#sheetPick").onclick = safe(async () => {
+  sheetBusy(true); sheetNote("在弹出的窗口里选你的总表（窗口可能在浏览器后面）…");
+  try {
+    const r = await post("/api/sheet/pick", {});
+    if (r.cancelled) { sheetNote(""); return; }
+    $("#sheetPath").value = r.path;
+  } catch (e) { sheetNote(e.message, true); return; }
+  finally { sheetBusy(false); }
+  await readSheet();
+});
+$("#sheetNew").onclick = safe(async () => {
+  sheetBusy(true); sheetNote("在弹出的窗口里选新总表存在哪里（窗口可能在浏览器后面）…");
+  try {
+    const r = await post("/api/sheet/pick", { save: true });
+    if (r.cancelled) { sheetNote(""); return; }
+    const info = await post("/api/sheet/create", { path: r.path });
+    $("#sheetPath").value = info.path; showSheetState(info);
+  } catch (e) { sheetNote(e.message, true); return; }
+  finally { sheetBusy(false); }
+  await readSheet({ preset: (st.sheetInfo.map || {}).columns });
+  sheetNote("新总表建好了，已经连上。");
+});
+$("#sheetSave").onclick = safe(async () => {
+  const d = st.sheetInspect, path = $("#sheetPath").value.trim();
+  if (!d || $("#sheetMapBox").hidden) { await readSheet(); return; }
+  const columns = {};
+  for (const s2 of $("#sheetMap").querySelectorAll("select")) if (s2.value) columns[s2.dataset.field] = s2.value;
+  sheetBusy(true); sheetNote("保存中…");
+  try {
+    const info = await post("/api/sheet/save", { path, sheet: $("#sheetSheet").value, header_row: Number($("#sheetHeaderRow").value) || 1, columns });
+    showSheetState(info); sheetNote("已保存。以后收发的 KOL 邮件会同步进这张表，点“测试读取”可以确认读得到。");
+    await loadStatus();
+  } catch (e) { sheetNote(e.message, true); }
+  finally { sheetBusy(false); }
+});
+$("#sheetCheck").onclick = safe(async () => {
+  const via = st.sheetInfo && st.sheetInfo.popo ? "POPO" : st.sheetInfo && st.sheetInfo.google ? "Google" : "Excel";
+  sheetBusy(true); sheetNote(`正在经 ${via} 按对应好的列读一遍总表，约半分钟…`);
+  try {
+    const r = await post("/api/sheet/check", {});
+    const how = r.mode === "popo" ? "从 POPO 读的" : r.mode === "google" ? "从 Google 表格读的"
+      : r.mode === "live" ? "从开着的 Excel 窗口读的" : "在后台打开读的";
+    sheetNote(`读到了：${r.rows} 行，其中 ${r.emails} 行有邮箱、${r.links} 行有频道链接（${how}）。同步的列：${Object.values(r.columns).join("、")}`);
+  } catch (e) { sheetNote(e.message, true); }
+  finally { sheetBusy(false); }
+});
+$("#sheetUnlink").onclick = safe(async () => {
+  if (!confirm("断开以后不再往这张表同步，表本身不会被改动。确定断开？")) return;
+  sheetBusy(true);
+  try { const info = await post("/api/sheet/unlink", {}); showSheetState(info); $("#sheetPath").value = ""; $("#sheetMapBox").hidden = true; sheetNote("已断开"); }
+  catch (e) { sheetNote(e.message, true); }
+  finally { sheetBusy(false); }
+});
+
+$("#aiCheckBtn").onclick = safe(async () => {
+  const b = $("#aiCheckBtn"); b.disabled = true; b.textContent = "检测中，约半分钟…";
+  try { await post("/api/ai/check", {}); } catch (e) { /* the status line shows what is wrong */ }
+  finally { b.disabled = false; b.textContent = "重新检测 AI"; await loadStatus(); }
+});
 
 $("#fbBtn").onclick = () => { $("#fbNote").textContent = ""; $("#fbDlg").showModal(); $("#fbText").focus(); };
 $("#fbClose").onclick = () => $("#fbDlg").close();

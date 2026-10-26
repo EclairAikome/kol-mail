@@ -15,7 +15,6 @@
   },
   "paths": {
     "playbook": "",
-    "koc_knowledge": "",
     "sheet_tool": "",
     "sheet_python": "",
     "sheet_workbook": "",
@@ -27,24 +26,6 @@
     "models": {},
     "claude_bin": "",
     "codemaker_bin": ""
-  },
-  "koc": {
-    "allowed_numbers": [
-      "1",
-      "5",
-      "7",
-      "20",
-      "24",
-      "50"
-    ],
-    "commission_percents": [
-      "5",
-      "1"
-    ],
-    "profit_share_percent": "20",
-    "withdraw_minimum": "50",
-    "site_domain": "",
-    "fallback_subject": "Collaboration"
   },
   "mobile": {
     "telegram_bot_token": "",

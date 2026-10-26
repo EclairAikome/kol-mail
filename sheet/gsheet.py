@@ -82,19 +82,25 @@ def normalized(rows: list[list]) -> list[list]:
 # ---------------------------------------------------------------- credentials
 
 class Credentials:
-    def __init__(self, state_dir: Path, unavailable=GSheetError):
-        self.path = Path(state_dir) / TOKEN_FILE
+    """`token_file` and `reauth` (what to do to authorise again, for the messages) default to kol.py's: the installer's
+    google-token.json. googlegrid.py keeps its own token, authorised from the settings page."""
+
+    def __init__(self, state_dir: Path, unavailable=GSheetError, token_file: str = TOKEN_FILE, reauth: str = ""):
+        self.path = Path(state_dir) / token_file
         self.unavailable = unavailable
+        self.reauth = reauth
 
     def load(self) -> dict:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("not a JSON object")
         except FileNotFoundError:
-            raise self.unavailable("还没授权 KOL Mail 访问 Google 表格，请重新运行安装命令完成授权") from None
+            raise self.unavailable(f"还没授权 KOL Mail 访问 Google 表格，{self.reauth or '请重新运行安装命令完成授权'}") from None
         except (OSError, ValueError) as e:
             raise self.unavailable(f"Google 授权文件读不出来：{e}") from None
         if not data.get("refresh_token") or not data.get("client_id"):
-            raise self.unavailable("Google 授权文件不完整，请重新运行安装命令完成授权")
+            raise self.unavailable(f"Google 授权文件不完整，{self.reauth or '请重新运行安装命令完成授权'}")
         return data
 
     def save(self, data: dict):
@@ -119,11 +125,12 @@ class Credentials:
             return data["access_token"]
         try:
             r = client.post(TOKEN_URL, data={"client_id": data["client_id"], "client_secret": data.get("client_secret", ""),
-                                             "refresh_token": data["refresh_token"], "grant_type": "refresh_token"})
+                                             "refresh_token": data["refresh_token"], "grant_type": "refresh_token"},
+                            follow_redirects=False)  # the refresh token and secret go to Google, never on
         except httpx.HTTPError as e:
             raise self.unavailable(f"连不上 Google（检查网络或代理）：{type(e).__name__}") from None
         if r.status_code in (400, 401):
-            raise self.unavailable("Google 授权已失效或被撤销，请重新运行安装命令重新授权")
+            raise self.unavailable(f"Google 授权已失效或被撤销，{self.reauth or '请重新运行安装命令重新授权'}")
         try:
             body = r.json() if r.status_code == 200 else {}
             token = str(body["access_token"])
@@ -460,8 +467,12 @@ def check(api: Api, sid: str) -> list[str]:
 # ---------------------------------------------------------------- one-time authorisation (installer)
 
 def authorize(state_dir: Path, client_id: str, client_secret: str, open_browser: bool = True,
-              timeout: float = 600) -> None:
-    """Desktop OAuth with a loopback redirect and PKCE; stores the refresh token."""
+              timeout: float = 600, token_file: str = TOKEN_FILE, scope: str = SCOPE,
+              done_page: str = "授权完成，可以关掉这个页面，回到终端。",
+              failed_page: str = "没有完成授权，回到终端重新运行安装命令即可。", on_url=None) -> None:
+    """Desktop OAuth with a loopback redirect and PKCE; stores the refresh token. The defaults are the installer's
+    (kol.py's token and scope); googlegrid.py passes its own token file, scope and page texts, and `on_url` gets the
+    consent address as soon as it is known, so the settings page can open it itself."""
     import http.server
     import webbrowser
 
@@ -480,8 +491,7 @@ def authorize(state_dir: Path, client_id: str, client_secret: str, open_browser:
             result["code"] = q.get("code", [""])[0]
             result["error"] = q.get("error", [""])[0]
             ok = bool(result["code"])
-            page = ("<p>授权完成，可以关掉这个页面，回到终端。</p>" if ok else
-                    "<p>没有完成授权，回到终端重新运行安装命令即可。</p>")
+            page = f"<p>{done_page if ok else failed_page}</p>"
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
@@ -495,11 +505,17 @@ def authorize(state_dir: Path, client_id: str, client_secret: str, open_browser:
     server.daemon_threads = True
     redirect = f"http://127.0.0.1:{server.server_port}/"
     url = AUTH_URL + "?" + urllib.parse.urlencode({
-        "client_id": client_id, "redirect_uri": redirect, "response_type": "code", "scope": SCOPE,
+        "client_id": client_id, "redirect_uri": redirect, "response_type": "code", "scope": scope,
         "access_type": "offline", "prompt": "consent", "state": state,
         "code_challenge": challenge, "code_challenge_method": "S256"})
     print("请在打开的浏览器页面里登录你工作用的 Google 账号，点“继续”或“允许”。没有自动打开的话，复制下面的地址到浏览器：")
     print(url, flush=True)
+    if on_url is not None:
+        try:
+            on_url(url)
+        except BaseException:
+            server.server_close()
+            raise
     if open_browser:
         webbrowser.open(url)
     server.timeout = 1  # handle_request returns every second, so the loop notices the code as soon as it arrives
@@ -516,10 +532,10 @@ def authorize(state_dir: Path, client_id: str, client_secret: str, open_browser:
     if r.status_code != 200 or not r.json().get("refresh_token"):
         raise SystemExit(f"换取 Google 授权失败（HTTP {r.status_code}）：{r.text[:200]}")
     body = r.json()
-    Credentials(state_dir).save({"client_id": client_id, "client_secret": client_secret,
-                                 "refresh_token": body["refresh_token"], "scope": body.get("scope", SCOPE),
-                                 "access_token": body.get("access_token"),
-                                 "expires_at": time.time() + int(body.get("expires_in") or 3600)})
+    Credentials(state_dir, token_file=token_file).save({
+        "client_id": client_id, "client_secret": client_secret, "refresh_token": body["refresh_token"],
+        "scope": body.get("scope", scope), "access_token": body.get("access_token"),
+        "expires_at": time.time() + int(body.get("expires_in") or 3600)})
 
 
 def main(argv=None):
