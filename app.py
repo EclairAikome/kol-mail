@@ -5435,8 +5435,8 @@ async def guard(scope, receive, send, app):
 
 
 async def handle_errors(request: Request, exc: Exception):
-    if not isinstance(exc, MailError):  # a mail server's refusal shows as 邮箱连接 instead (autoreport_loop)
-        autoreport.report(f"页面操作 {request.method} {request.url.path}", err_text(exc), exc=exc)
+    # a mail server's refusal too: one on sending or moving a mail never shows as 邮箱连接 (autoreport_loop)
+    autoreport.report(f"页面操作 {request.method} {request.url.path}", err_text(exc), exc=exc)
     return JSONResponse({"error": err_text(exc)}, status_code=502 if isinstance(exc, MailError) else 500)
 
 

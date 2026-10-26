@@ -54,6 +54,9 @@ function Send-Problem($where, $message, $detail = "") {
             if ((Has $s "feedback") -and (Has $s.feedback "popo_webhook")) { $url = "$($s.feedback.popo_webhook)" }
         }
         if ("$url" -notmatch '^(https://|http://127\.0\.0\.1[:/])') { return }  # loopback: the tests' stand-in
+        # pip or a mail test can say a lot, and the robot cuts long messages off
+        if ("$message".Length -gt 1500) { $message = "$message".Substring(0, 1500) + "…" }
+        if ("$detail".Length -gt 1500) { $detail = "…" + "$detail".Substring("$detail".Length - 1500) }
         $versionFile = Join-Path $Dir "app\VERSION"
         $version = if ($Source -and (Test-Path (Join-Path $Source "VERSION"))) { (Get-Content -Raw (Join-Path $Source "VERSION")).Trim() }
                    elseif ($tag) { "$tag".TrimStart("v") } elseif (Test-Path $versionFile) { (Get-Content -Raw $versionFile).Trim() } else { "?" }
@@ -73,7 +76,8 @@ function Send-Problem($where, $message, $detail = "") {
 }
 $script:Reported = $false
 trap {  # anything that stops the install: report it, then fail as before
-    if (-not $script:Reported) {
+    # not when the colleague closed the password window: that is a choice, not a failure
+    if (-not $script:Reported -and "$($_.Exception.Message)" -notmatch "^没有输入邮箱密码") {
         $script:Reported = $true
         Send-Problem "安装失败 Windows" "$($_.Exception.Message)" "$($_.InvocationInfo.PositionMessage)`n$($_.ScriptStackTrace)"
     }

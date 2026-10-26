@@ -62,17 +62,20 @@ die() { printf '\033[31m%s\033[0m\n' "$*" >&2; LAST_ERR="$*"; exit 1; }
 # 出了问题自动发到维护者的 POPO 反馈群（和页面上“反馈”按钮同一个机器人，消息里必须有 KOL Mail 这个关键词）：
 # 安装失败，以及装完了但 AI、邮箱用不了。地址来自 --feedback，重装时也读旧设置里的。发不出去不影响安装。
 report_problem() {  # report_problem "哪里" "错误"
-    local url="$FEEDBACK" py="" text body version="${TAG:-?}"
+    local url="$FEEDBACK" py="" text body version="${TAG:-?}" err="$2"
+    [ "${#err}" -gt 1500 ] && err="${err:0:1500}…"  # pip or a mail test can say a lot; the robot cuts long messages
     [ -z "$url" ] && [ -x "${PY:-}" ] && [ -f "${SETTINGS:-}" ] && url="$(old feedback.popo_webhook 2>/dev/null || true)"
     case "$url" in https://*|http://127.0.0.1:*) ;; *) return 0 ;; esac  # loopback: the tests' stand-in
     [ -n "${SRC:-}" ] && [ -f "$SRC/VERSION" ] && version="$(cat "$SRC/VERSION")"
     text="$(printf '【KOL Mail 自动报错 · %s】\n错误：%s\n卡在：%s\n环境：macOS %s (%s) · Python %s · AI %s · 邮箱 %s · %s\n最近输出：\n%s\n\n(版本 %s)' \
-        "$1" "$2" "${STEP:-开始之前}" "$(sw_vers -productVersion 2>/dev/null)" "$(uname -m)" \
+        "$1" "$err" "${STEP:-开始之前}" "$(sw_vers -productVersion 2>/dev/null)" "$(uname -m)" \
         "$("${BASEPY:-false}" -c 'import platform; print(platform.python_version())' 2>/dev/null || echo 没找到)" \
         "${BACKEND:-还没选}" "${EMAIL:-还没填}" "$(id -un)" "$RECENT" "$version")"
     if [ -x "${PY:-}" ]; then py="$PY"; elif [ -x "${BASEPY:-}" ]; then py="$BASEPY"; fi
     if [ -n "$py" ]; then
-        body="$(printf '%s' "$text" | "$py" -I -c 'import json, sys; print(json.dumps({"message": sys.stdin.read()}, ensure_ascii=False))')"
+        # bytes in, ASCII out: no locale (LANG unset, C) can garble the Chinese on the way
+        body="$(printf '%s' "$text" | "$py" -I -c 'import json, sys
+print(json.dumps({"message": sys.stdin.buffer.read().decode("utf-8", "replace")}))')" || body=""
     else  # no Python yet: escape by hand
         body="{\"message\": \"$(printf '%s' "$text" | LC_ALL=C sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g' -e 's/\r//g' |
             awk 'BEGIN { ORS = "\\n" } { print }')\"}"
@@ -100,9 +103,9 @@ STAGING="$(mktemp -d)"
 WAS_LOADED=0; DONE=0
 on_exit() {
     local code=$?
-    # 安装失败（不是同事自己按 Ctrl+C）：发给维护者（先发，下载下来的源码里有版本号）
-    if [ "$code" -ne 0 ] && [ "$code" -ne 130 ]; then
-        report_problem "安装失败 Mac" "${LAST_ERR:-脚本出错退出（第 $ERR_LINE 行：$ERR_CMD，退出码 $code）}"
+    # 安装失败（不是同事自己按 Ctrl+C、关掉终端窗口）：发给维护者（先发，下载下来的源码里有版本号）
+    if [ "$code" -ne 0 ] && [ "$code" -ne 129 ] && [ "$code" -ne 130 ] && [ "$code" -ne 143 ]; then
+        report_problem "安装失败 Mac" "${LAST_ERR:-脚本出错退出（第 $ERR_LINE 行：$ERR_CMD，退出码 $code）}" || true
     fi
     rm -rf "$STAGING"
     # 中途失败时把原来在跑的服务拉回来，不让同事的后台一直停着
@@ -112,6 +115,7 @@ on_exit() {
     fi
 }
 trap on_exit EXIT
+set -E  # the ERR trap below also inside functions
 trap 'ERR_LINE=$LINENO; ERR_CMD=$BASH_COMMAND' ERR
 
 # ---------------------------------------------------------------- 1. Python
