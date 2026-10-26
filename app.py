@@ -1319,6 +1319,17 @@ def sheet_state_dir(workbook: Path | None) -> Path:
     return DATA / "sheet" / ("user-" + hashlib.sha1(os.path.normcase(str(workbook)).encode("utf-8")).hexdigest()[:12])
 
 
+def popo_cli() -> str:
+    """popo-cli's full path (kept in the settings once found: the background service starts with a bare PATH).
+    Defined before configure_sheet(), which needs it while app.py is still being read when a POPO sheet is linked."""
+    found = popogrid.find_popo_cli(CFG["paths"].get("popo_cli") or "")
+    if found and found != CFG["paths"].get("popo_cli"):
+        with contextlib.suppress(OSError):
+            config.update(["paths", "popo_cli"], found)
+            CFG["paths"]["popo_cli"] = found
+    return found
+
+
 def configure_sheet():
     """(Re)read the sheet settings; called at start and whenever the settings page links, remaps or unlinks."""
     global SHEET_PYTHON, SHEET_TOOL, SHEET_WORKBOOK, SHEET_STATE, SHEET_ENV, SHEET_PENDING, SHEET_MODE, SHEET_MAP
@@ -2679,16 +2690,6 @@ async def user_sheet_tool(args: list[str], timeout: int = 120, mapping: dict | N
         tail = ((err or b"") + (out or b"")).decode("utf-8", "replace").strip()[-300:]
         data = {"error": tail or f"退出码 {proc.returncode}"}
     return proc.returncode, data if isinstance(data, dict) else {"error": str(data)[:300]}
-
-
-def popo_cli() -> str:
-    """popo-cli's full path (kept in the settings once found: the background service starts with a bare PATH)."""
-    found = popogrid.find_popo_cli(CFG["paths"].get("popo_cli") or "")
-    if found and found != CFG["paths"].get("popo_cli"):
-        with contextlib.suppress(OSError):
-            config.update(["paths", "popo_cli"], found)
-            CFG["paths"]["popo_cli"] = found
-    return found
 
 
 popo_links: dict[str, str] = {}  # pasted link -> popo:<docId>[:<teamSpaceId>], so a link is looked up once

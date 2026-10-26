@@ -29,6 +29,19 @@ jobs:
       - run: python -m pip install --disable-pip-version-check -q -r requirements.txt pytest
       - run: python -m pytest tests -q -rs
 
+  # The desktop pet with Tk 9, what uv's and Homebrew's Pythons bring (the job above has python.org's Tk 8.6). Tk 9
+  # cannot draw anything see-through on a Mac, so there the pet must come up through pet/macdraw.py's layers.
+  mac-pet-tk9:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.12 && uv venv --python 3.12 .venv
+      - run: uv pip install --python .venv -q -r requirements.txt pytest
+      - name: This Python really has Tk 9
+        run: .venv/bin/python -c "import sys, tkinter; print('Tk', tkinter.Tcl().call('info', 'patchlevel')); sys.exit(tkinter.TkVersion < 9)"
+      - run: .venv/bin/python -m pytest tests/test_pet.py -q -rs
+
   mac-install:
     runs-on: macos-latest
     timeout-minutes: 30
