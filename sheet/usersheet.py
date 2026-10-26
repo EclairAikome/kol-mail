@@ -31,10 +31,13 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))  # kol.py (the Excel COM helpers) sits next to this file
-RAW_WORKBOOK = os.environ.get("KOL_SHEET_PATH") or ""  # a file path, or popo:<docId>[:<teamSpaceId>] (popogrid.py)
+# a file path, popo:<docId>[:<teamSpaceId>] (popogrid.py) or google:<spreadsheetId> (googlegrid.py)
+RAW_WORKBOOK = os.environ.get("KOL_SHEET_PATH") or ""
 WORKBOOK = Path(RAW_WORKBOOK)
 POPO_CLI = os.environ.get("KOL_POPO_CLI") or ""
 STATE_DIR = Path(os.environ.get("KOL_SHEET_STATE") or HERE)
+# KOL_GOOGLE_TOKEN_DIR: where googlegrid's Google token is (one per computer user, whichever sheet is linked);
+# read when a Google sheet is opened, STATE_DIR when unset.
 PENDING = STATE_DIR / "pending.jsonl"
 FAILED = STATE_DIR / "pending.failed.jsonl"
 STATE_FILE = STATE_DIR / "usersheet_state.json"
@@ -160,7 +163,7 @@ def load_map(raw: str | None = None) -> dict:
     except (TypeError, ValueError):
         header_row = 1
     out = {"sheet": str(m["sheet"]), "header_row": max(1, header_row), "columns": cols}
-    if m.get("sheet_id"):  # a POPO sheet: its id survives a rename
+    if m.get("sheet_id"):  # a POPO or Google sheet: its id survives a rename
         out["sheet_id"] = str(m["sheet_id"])
     return out
 
@@ -470,10 +473,22 @@ def popo_grid(setting: str, mapping: dict | None = None):
                     keep_backups=KEEP_BACKUPS)
 
 
+def google_grid(setting: str, mapping: dict | None = None):
+    from googlegrid import GoogleGrid
+    ids = {mapping["sheet"]: mapping["sheet_id"]} if mapping and mapping.get("sheet_id") else {}
+    token_dir = Path(os.environ.get("KOL_GOOGLE_TOKEN_DIR") or STATE_DIR)
+    return GoogleGrid(setting, Unavailable, UsageError, token_dir, sheet_ids=ids, backups=BACKUPS,
+                      keep_backups=KEEP_BACKUPS)
+
+
 @contextlib.contextmanager
 def open_grid(write: bool = True):
     if RAW_WORKBOOK.startswith("popo:"):
         with popo_grid(RAW_WORKBOOK, load_map()) as g:
+            yield g
+        return
+    if RAW_WORKBOOK.startswith("google:"):  # the Sheets API, the same on Windows and the Mac
+        with google_grid(RAW_WORKBOOK, load_map()) as g:
             yield g
         return
     if sys.platform == "win32":
@@ -798,7 +813,10 @@ def run(ops: list[dict], source: str, mapping: dict, grid_factory=open_grid) -> 
                     entries, done_lines = read_pending()
                     state = load_state()
                     with grid_factory() as grid:
-                        grid.backup_once_a_day()
+                        try:  # a backup that cannot be written (disk full, a virus scanner) must not stop the sync
+                            grid.backup_once_a_day()
+                        except OSError as e:
+                            print(f"backup skipped: {e}", file=sys.stderr)
                         sheet = UserSheet(grid, mapping, state)
                         flushed = 0
                         for entry in entries:
@@ -833,8 +851,13 @@ def run(ops: list[dict], source: str, mapping: dict, grid_factory=open_grid) -> 
 # ---------------------------------------------------------------- reading without Excel
 
 def read_file_rows(path, sheet: str | None = None, mapping: dict | None = None) -> tuple[list[str], str, list[list]]:
-    """An .xlsx file through openpyxl, or a POPO sheet (popo:...) through popo-cli."""
-    g = popo_grid(str(path), mapping).__enter__() if str(path).startswith("popo:") else XlsxGrid(Path(path))
+    """An .xlsx file through openpyxl, a POPO sheet (popo:...) through popo-cli, or a Google sheet (google:...)."""
+    if str(path).startswith("popo:"):
+        g = popo_grid(str(path), mapping).__enter__()
+    elif str(path).startswith("google:"):
+        g = google_grid(str(path), mapping).__enter__()
+    else:
+        g = XlsxGrid(Path(path))
     names = g.sheet_names()
     chosen = sheet if sheet in names else None
     if chosen is None:  # the sheet with the most e-mail addresses
@@ -946,7 +969,7 @@ def main(argv=None):
             emit(create(Path(a.path)))
         if a.cmd == "status":
             pending = sum(len(e.get("ops", [])) for e in read_pending()[0])
-            emit({"workbook": RAW_WORKBOOK, "exists": RAW_WORKBOOK.startswith("popo:") or WORKBOOK.is_file(),
+            emit({"workbook": RAW_WORKBOOK, "exists": RAW_WORKBOOK.startswith(("popo:", "google:")) or WORKBOOK.is_file(),
                   "queued_ops": pending})
         mapping = load_map()
         if a.cmd == "list":

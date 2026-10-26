@@ -200,10 +200,10 @@ def test_switches_can_be_flipped_without_touching_the_rest(tmp_path):
     import json
     import pytest
     path = write_config(tmp_path)
-    assert not autoreply.load_config(path).koc_enabled
-    autoreply.set_switch(path, "koc_enabled", True)
+    assert not autoreply.load_config(path).telegram_enabled
+    autoreply.set_switch(path, "telegram_enabled", True)
     cfg = autoreply.load_config(path)
-    assert cfg.koc_enabled and cfg.email_enabled
+    assert cfg.telegram_enabled and cfg.email_enabled
     assert json.loads(path.read_text(encoding="utf-8"))["holidays"] == ["2026-10-19"]
     with pytest.raises(ValueError):
         autoreply.set_switch(path, "templates", True)

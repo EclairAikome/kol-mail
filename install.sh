@@ -5,15 +5,17 @@
 #   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/<owner>/kol-mail/main/install.sh)" -- \
 #       --repo <owner>/kol-mail --imap-host <收信服务器> --smtp-host <发信服务器> --feedback <反馈地址> \
 #       --google-client-id <OAuth 客户端 ID> --google-client-secret <客户端密钥>
-# 带了 Google 客户端参数，才会问要不要接 KOL 总表（Mac 上总表是一张 Google 表格）。
+# 带了 Google 客户端参数，才会问要不要接 KOL 总表（Mac 上总表是一张 Google 表格），同事也才能在页面的
+# 设置 → KOL 总表 里连自己已有的 Google 表格。公司邮箱的域名用 --domain 改（默认 lootbar.com）。
 #
-# 做的事：找到或安装 Python，下载最新版 KOL Mail，装依赖，配置你的邮箱和 AI（Claude Code 或 CodeMaker），
-# 写好你的签名，注册开机自动启动的后台服务（launchd），在“应用程序”里放一个“KOL Mail”。重复运行是安全的，
-# 已有的设置会保留。邮箱密码只在邮件组件自己的提示里输入，这个脚本看不到也不保存，密码存进 Mac 的钥匙串。
+# 做的事：找到或安装 Python，下载最新版 KOL Mail，装依赖，配置 AI（Claude Code 或 CodeMaker），注册开机自动启动的
+# 后台服务（launchd），在“应用程序”里放一个“KOL Mail”。邮箱在装好后打开的网页登录页里登录。重复运行是安全的，
+# 已有的设置会保留。邮箱密码只在登录页或邮件组件自己的提示里输入，这个脚本看不到也不保存，密码存进 Mac 的钥匙串。
 
 set -eo pipefail
 
 REPO=""; FEEDBACK=""; IMAP_HOST=""; SMTP_HOST=""; PIP_INDEX=""; MIRROR=""; SOURCE=""; GCLIENT_ID=""; GCLIENT_SECRET=""
+DOMAIN="lootbar.com"
 DIR="$HOME/Library/Application Support/kol-mail"
 # 维护者测试用（云主机上无人值守安装）：不提问，用下面的参数和默认值
 YES=0; ASK_EMAIL=""; ASK_NAME=""; ASK_COMPANY=""; ASK_BACKEND=""; PASSWORD_STDIN=0; NO_OPEN=0
@@ -24,6 +26,7 @@ while [ $# -gt 0 ]; do
         --feedback) FEEDBACK="$2"; shift 2 ;;
         --imap-host) IMAP_HOST="$2"; shift 2 ;;
         --smtp-host) SMTP_HOST="$2"; shift 2 ;;
+        --domain) DOMAIN="$2"; shift 2 ;;
         --pip-index) PIP_INDEX="$2"; shift 2 ;;
         --mirror) MIRROR="$2"; shift 2 ;;   # GitHub 连不上时用的 https 代理前缀
         --dir) DIR="$2"; shift 2 ;;
@@ -194,43 +197,52 @@ if printf '%s\n' "$MCP_STATUS" | grep -q "not_configured"; then
 fi
 EMAIL="$(old mail.address)"
 [ -z "$EMAIL" ] && EMAIL="$ASK_EMAIL"
-until printf '%s' "$EMAIL" | grep -Eq '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'; do
-    [ "$YES" = 1 ] && die "无人值守安装需要 --email"
-    ask "你的工作邮箱" ""; EMAIL="$REPLY"
-done
-EMAIL="$(printf '%s' "$EMAIL" | tr '[:upper:]' '[:lower:]')"
-ACCOUNT="$(old mail.account_name)"
-[ -z "$ACCOUNT" ] && ACCOUNT="$(printf '%s' "${EMAIL%%@*}" | tr -cd 'A-Za-z0-9_-')"
+# 新版程序在网页上登录邮箱（登录页）：第一次装、又没用 --email 指定时不在这里问，装好后浏览器打开的就是登录页。
+# 已经配好邮箱的（重复运行本脚本）、无人值守安装和装旧版程序的，还是在这里配置、测试邮箱。
+WEB_LOGIN=0
+if [ -z "$EMAIL" ] && [ "$YES" != 1 ] && grep -q 'id="loginView"' "$APP/static/index.html" 2>/dev/null; then WEB_LOGIN=1; fi
+ACCOUNT=""
 FULLNAME="$(old identity.name)"
-[ -z "$FULLNAME" ] && FULLNAME="$ASK_NAME"
-while [ -z "$FULLNAME" ]; do
-    [ "$YES" = 1 ] && die "无人值守安装需要 --name"
-    ask "对外署名（英文名，会出现在签名里）" ""; FULLNAME="$REPLY"
-done
-ACCOUNTS="$("$MCP" account list 2>&1 || true)"
-if ! printf '%s\n' "$ACCOUNTS" | grep -Eq "(^|[^A-Za-z0-9_-])$ACCOUNT([^A-Za-z0-9_-]|$)"; then
-    [ -z "$IMAP_HOST" ] && { ask "收信服务器（IMAP）" ""; IMAP_HOST="$REPLY"; }
-    [ -z "$SMTP_HOST" ] && { ask "发信服务器（SMTP）" ""; SMTP_HOST="$REPLY"; }
-    ADD=(account add "$ACCOUNT" --email "$EMAIL" --full-name "$FULLNAME" --imap-host "$IMAP_HOST" --smtp-host "$SMTP_HOST"
-         --imap-user "$EMAIL" --smtp-user "$EMAIL")
-    if [ "$PASSWORD_STDIN" = 1 ]; then
-        "$MCP" "${ADD[@]}" --password-stdin || die "添加邮箱失败"
-    else
-        say "  下面会提示输入邮箱密码（输入时不显示），密码由邮件组件存进 Mac 的钥匙串。"
-        "$MCP" "${ADD[@]}" < /dev/tty || die "添加邮箱失败，检查服务器地址和密码后重新运行本脚本。"
+if [ "$WEB_LOGIN" = 1 ]; then
+    say "  邮箱在 KOL Mail 的页面上登录：装好后浏览器会打开登录页，在那里填邮箱和密码（授权码）。"
+else
+    until printf '%s' "$EMAIL" | grep -Eq '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'; do
+        [ "$YES" = 1 ] && die "无人值守安装需要 --email"
+        ask "你的工作邮箱" ""; EMAIL="$REPLY"
+    done
+    EMAIL="$(printf '%s' "$EMAIL" | tr '[:upper:]' '[:lower:]')"
+    ACCOUNT="$(old mail.account_name)"
+    [ -z "$ACCOUNT" ] && ACCOUNT="$(printf '%s' "${EMAIL%%@*}" | tr -cd 'A-Za-z0-9_-')"
+    [ -z "$FULLNAME" ] && FULLNAME="$ASK_NAME"
+    while [ -z "$FULLNAME" ]; do
+        [ "$YES" = 1 ] && die "无人值守安装需要 --name"
+        ask "对外署名（英文名，会出现在签名里）" ""; FULLNAME="$REPLY"
+    done
+    ACCOUNTS="$("$MCP" account list 2>&1 || true)"
+    if ! printf '%s\n' "$ACCOUNTS" | grep -Eq "(^|[^A-Za-z0-9_-])$ACCOUNT([^A-Za-z0-9_-]|$)"; then
+        [ -z "$IMAP_HOST" ] && { ask "收信服务器（IMAP）" ""; IMAP_HOST="$REPLY"; }
+        [ -z "$SMTP_HOST" ] && { ask "发信服务器（SMTP）" ""; SMTP_HOST="$REPLY"; }
+        ADD=(account add "$ACCOUNT" --email "$EMAIL" --full-name "$FULLNAME" --imap-host "$IMAP_HOST" --smtp-host "$SMTP_HOST"
+             --imap-user "$EMAIL" --smtp-user "$EMAIL")
+        if [ "$PASSWORD_STDIN" = 1 ]; then
+            "$MCP" "${ADD[@]}" --password-stdin || die "添加邮箱失败"
+        else
+            say "  下面会提示输入邮箱密码（输入时不显示），密码由邮件组件存进 Mac 的钥匙串。"
+            "$MCP" "${ADD[@]}" < /dev/tty || die "添加邮箱失败，检查服务器地址和密码后重新运行本脚本。"
+        fi
     fi
+    # 连接测试。密码输错了可以当场重输（重跑安装命令时也会再测一次）
+    for try in 1 2 3; do
+        if TEST_OUT="$("$MCP" account test "$ACCOUNT" 2>&1)"; then say "  邮箱连接正常"; break; fi
+        warn "  邮箱连接测试没通过：$TEST_OUT"
+        [ "$YES" = 1 ] && break
+        ask "要重新输入邮箱密码吗？输入 y 重输，直接回车跳过" ""
+        case "$REPLY" in y|Y|yes) ;; *) warn "  先跳过。服务器地址填错的话，把上面这段提示截图发给维护者。"; break ;; esac
+        say "  先输收信（IMAP）密码，再输发信（SMTP）密码，一般两次都是邮箱密码。"
+        "$MCP" account set-secret "$ACCOUNT" incoming < /dev/tty || warn "  收信密码没改成"
+        "$MCP" account set-secret "$ACCOUNT" outgoing < /dev/tty || warn "  发信密码没改成"
+    done
 fi
-# 连接测试。密码输错了可以当场重输（重跑安装命令时也会再测一次）
-for try in 1 2 3; do
-    if TEST_OUT="$("$MCP" account test "$ACCOUNT" 2>&1)"; then say "  邮箱连接正常"; break; fi
-    warn "  邮箱连接测试没通过：$TEST_OUT"
-    [ "$YES" = 1 ] && break
-    ask "要重新输入邮箱密码吗？输入 y 重输，直接回车跳过" ""
-    case "$REPLY" in y|Y|yes) ;; *) warn "  先跳过。服务器地址填错的话，把上面这段提示截图发给维护者。"; break ;; esac
-    say "  先输收信（IMAP）密码，再输发信（SMTP）密码，一般两次都是邮箱密码。"
-    "$MCP" account set-secret "$ACCOUNT" incoming < /dev/tty || warn "  收信密码没改成"
-    "$MCP" account set-secret "$ACCOUNT" outgoing < /dev/tty || warn "  发信密码没改成"
-done
 # 回信、附件、移动邮件要用到的权限
 POLICY="$("$MCP" config policy 2>&1 || true)"
 REV="$(printf '%s\n' "$POLICY" | sed -n 's/^revision=\([0-9][0-9]*\).*/\1/p' | head -n 1)"
@@ -277,8 +289,11 @@ fi
 say "[6/8] 写设置…"
 export KM_ACCOUNT="$ACCOUNT" KM_EMAIL="$EMAIL" KM_MCP="$MCP" KM_BACKEND="$BACKEND" KM_NAME="$FULLNAME"
 export KM_CLAUDE="$CLAUDE" KM_CM="$CM" KM_REPO="$REPO" KM_MIRROR="$MIRROR" KM_FEEDBACK="$FEEDBACK"
-export KM_TITLE="" KM_COMPANY="" KM_EXTRA="" KM_SITE="" KM_PLAYBOOK="" KM_KNOWLEDGE="" KM_RECORD=""
-if [ -z "$(old identity.signature)" ]; then
+export KM_DOMAIN="$DOMAIN" KM_IMAP="$IMAP_HOST" KM_SMTP="$SMTP_HOST" KM_GCLIENT_ID="$GCLIENT_ID" KM_GCLIENT_SECRET="$GCLIENT_SECRET"
+export KM_TITLE="" KM_COMPANY="" KM_EXTRA="" KM_SITE="" KM_PLAYBOOK="" KM_KNOWLEDGE="" KM_RECORD="" KM_COMPANY_ONLY=""
+# web login: no signature questions here, but the drafts still need the company's name (as -Company on Windows)
+[ "$WEB_LOGIN" = 1 ] && [ -z "$(old identity.company)" ] && KM_COMPANY_ONLY="${ASK_COMPANY:-LootBar}"
+if [ -z "$(old identity.signature)" ] && [ "$WEB_LOGIN" != 1 ]; then  # web login: the page asks for the signature
     ask "职位（英文）" "Marketing Manager"; KM_TITLE="$REPLY"
     KM_COMPANY="$ASK_COMPANY"
     while [ -z "$KM_COMPANY" ]; do
@@ -289,7 +304,11 @@ if [ -z "$(old identity.signature)" ]; then
     ask "签名里的网址（没有就回车）" ""; KM_SITE="$REPLY"
 fi
 if [ -z "$(old paths.playbook)" ]; then
-    ask "谈判手册（Markdown 文件）的完整路径，没有就回车用模板" "$DATA/谈判手册.md"
+    if [ "$WEB_LOGIN" = 1 ]; then  # the page asks for one's own way of negotiating instead
+        REPLY="$DATA/谈判手册.md"
+    else
+        ask "谈判手册（Markdown 文件）的完整路径，没有就回车用模板" "$DATA/谈判手册.md"
+    fi
     # 从访达拖进终端的路径会带引号或反斜杠转义的空格
     KM_PLAYBOOK="$(printf '%s' "$REPLY" | sed -e "s/^'\(.*\)'$/\1/" -e 's/^"\(.*\)"$/\1/' -e 's/\\\(.\)/\1/g')"
     KM_PLAYBOOK="${KM_PLAYBOOK/#\~/$HOME}"
@@ -300,10 +319,6 @@ if [ -z "$(old paths.playbook)" ]; then
             [ -f "$KM_PLAYBOOK" ] || cp "$APP/templates/谈判手册.example.md" "$KM_PLAYBOOK"
         fi
     fi
-fi
-if [ -z "$(old paths.koc_knowledge)" ]; then
-    KM_KNOWLEDGE="$DATA/KOC机器人知识.md"
-    [ -f "$KM_KNOWLEDGE" ] || cp "$APP/templates/KOC机器人知识.example.md" "$KM_KNOWLEDGE"
 fi
 [ -z "$(old paths.autoreply_record)" ] && KM_RECORD="$DATA/自动回复记录.md"
 # KOL 总表：Mac 上是同事自己云端硬盘里的一张 Google 表格，KOL Mail 只能碰它自己建的这张
@@ -345,13 +360,13 @@ case "$CURRENT_SHEET" in
             say "  KOL 总表：连上你自己的 xlsx 总表后，打开邮件会显示 KOL 的频道链接，收发信的进展会记进表里（只写对得上的列，不改你的格式）。"
             say "  写表要用 Microsoft Excel。第一次写表时系统会问是否允许 KOL Mail 控制 Excel，请点“好”。"
             while true; do
-                ask "总表文件的完整路径（可以把文件拖进这个窗口），输入 new 新建一张，不用就直接回车（以后在页面上方的 KOL 总表按钮里也能接）" ""
+                ask "总表文件的完整路径（可以把文件拖进这个窗口），输入 new 新建一张，不用就直接回车（以后在页面右上角 设置 → KOL 总表 里也能接）" ""
                 # 拖进“终端”的文件路径带引号，或者空格前带反斜杠
                 SHEET_PATH="$(printf '%s' "$REPLY" | sed -e "s/^'\(.*\)'\$/\1/" -e 's/^"\(.*\)"$/\1/' -e 's/\\\(.\)/\1/g')"
                 [ -z "$SHEET_PATH" ] && break
                 case "$SHEET_PATH" in
                     http://docs.popo.*|https://docs.popo.*)
-                        say "  POPO 在线表格要先在这台 Mac 上装好并登录 popo-cli。装好 KOL Mail 后，在页面上方的“KOL 总表”里粘贴这个链接连接。"
+                        say "  POPO 在线表格要先在这台 Mac 上装好并登录 popo-cli。装好 KOL Mail 后，在页面右上角 设置 → KOL 总表 里粘贴这个链接连接。"
                         break ;;
                 esac
                 CREATE=0
@@ -381,28 +396,36 @@ case "$CURRENT_SHEET" in
             done
         fi ;;
 esac
-export KM_TITLE KM_COMPANY KM_EXTRA KM_SITE KM_PLAYBOOK KM_KNOWLEDGE KM_RECORD KM_SHEET KM_SHEET_MAP KM_APP="$APP" KM_PY="$PY"
+export KM_TITLE KM_COMPANY KM_COMPANY_ONLY KM_EXTRA KM_SITE KM_PLAYBOOK KM_RECORD KM_SHEET KM_SHEET_MAP KM_APP="$APP" KM_PY="$PY"
 ANSWERS="$STAGING/answers.json"
 "$PY" -I - "$ANSWERS" <<'PYEOF'
 import json, os, sys
 e = os.environ.get
 email = e("KM_EMAIL")
+mail = {"mcp_exe": e("KM_MCP")}
+if email:  # signed in here; otherwise on the page's login screen
+    mail.update(account_name=e("KM_ACCOUNT"), address=email, company_domain="@" + email.split("@")[1])
+elif e("KM_DOMAIN"):
+    mail["company_domain"] = "@" + e("KM_DOMAIN")
+if e("KM_DOMAIN") and e("KM_IMAP") and e("KM_SMTP"):  # the login screen needs no servers for a company address
+    mail["company_servers"] = {"domain": e("KM_DOMAIN"), "imap_host": e("KM_IMAP"), "smtp_host": e("KM_SMTP")}
 answers = {
-    "mail": {"account_name": e("KM_ACCOUNT"), "address": email, "company_domain": "@" + email.split("@")[1],
-             "mcp_exe": e("KM_MCP")},
+    "mail": mail,
     "llm": {"backend": e("KM_BACKEND")},
-    "identity": {"name": e("KM_NAME")},
+    "identity": {"name": e("KM_NAME")} if e("KM_NAME") else {},
     "paths": {}, "update": {}, "feedback": {},
 }
 if e("KM_CLAUDE"):
     answers["llm"]["claude_bin"] = e("KM_CLAUDE")
 if e("KM_CM"):
     answers["llm"]["codemaker_bin"] = e("KM_CM")
+if e("KM_COMPANY_ONLY"):
+    answers["identity"]["company"] = e("KM_COMPANY_ONLY")
 if e("KM_COMPANY"):
     title, company = e("KM_TITLE"), e("KM_COMPANY")
     answers["identity"].update(title=title, company=company, signature="\n".join(
         x for x in (e("KM_NAME"), f"{title} | {company}", e("KM_EXTRA"), e("KM_SITE")) if x))
-for key, env in (("playbook", "KM_PLAYBOOK"), ("koc_knowledge", "KM_KNOWLEDGE"), ("autoreply_record", "KM_RECORD")):
+for key, env in (("playbook", "KM_PLAYBOOK"), ("autoreply_record", "KM_RECORD")):
     if e(env):
         answers["paths"][key] = e(env)
 if e("KM_SHEET"):
@@ -417,6 +440,8 @@ if e("KM_MIRROR"):
     answers["update"]["mirror"] = e("KM_MIRROR")
 if e("KM_FEEDBACK"):
     answers["feedback"]["popo_webhook"] = e("KM_FEEDBACK")
+if e("KM_GCLIENT_ID"):  # the page's Google sign-in for a colleague's own Google sheet
+    answers["google"] = {"client_id": e("KM_GCLIENT_ID"), "client_secret": e("KM_GCLIENT_SECRET")}
 with open(sys.argv[1], "w", encoding="utf-8") as f:
     json.dump(answers, f, ensure_ascii=False)
 PYEOF
@@ -477,5 +502,6 @@ else
     /bin/bash "$OPEN_SH" || die "KOL Mail 没有启动起来，日志在 $LOG"
 fi
 say "装好了。以后在“应用程序”（或启动台）里点“KOL Mail”就能打开；每天第一次打开会自动检查更新。"
+[ "$WEB_LOGIN" = 1 ] && say "浏览器里打开的是 KOL Mail 的登录页：先登录你的邮箱，然后写自己的签名和“我的谈判方式”。"
 say "下班 AI 回复需要在页面上方“手机审稿”里绑定你自己的 Telegram 机器人。"
 say "新邮件通知第一次弹出时，如果系统问要不要允许“脚本编辑器”发通知，请点允许。"

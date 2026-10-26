@@ -7,10 +7,12 @@
 # -ImapHost、-SmtpHost、-Company 改。维护者在本机试装时加 -Source <源码目录> -Dir <别的目录> -NoService，
 # 这样不注册开机任务、不放桌面图标、不启动服务（真服务会在下班时间自动回信）。
 #
-# 做的事：找到或安装 Python，下载最新版 KOL Mail，装依赖，配置你的邮箱和 AI（Claude Code 或 CodeMaker），
-# 写好你的签名，注册开机自动启动的后台任务，在桌面放一个“KOL Mail”图标。重复运行是安全的，已有的设置会保留。
-# 邮箱密码在一个小窗口里输入（可以 Ctrl+V 粘贴），经标准输入直接交给邮件组件存进 Windows 凭据管理器，
-# 这个脚本不显示、不保存，也不把它放进命令行。
+# 做的事：找到或安装 Python，下载最新版 KOL Mail，装依赖，配置 AI（Claude Code 或 CodeMaker），注册开机自动启动的
+# 后台任务，在桌面放一个“KOL Mail”图标。邮箱在装好后打开的网页登录页里登录。重复运行是安全的，已有的设置会保留；
+# 已配好的邮箱密码不对时，会弹一个小窗口重新输入（可以 Ctrl+V 粘贴），经标准输入直接交给邮件组件存进 Windows
+# 凭据管理器，这个脚本不显示、不保存，也不把它放进命令行。
+# 带上 -GoogleClientId 和 -GoogleClientSecret（Google Cloud 里“桌面应用”类型的 OAuth 客户端），同事就能在
+# 设置 → KOL 总表 里连自己的 Google 表格。
 
 param(
     [string]$Repo = "",
@@ -19,6 +21,8 @@ param(
     [string]$Company = "LootBar",
     [string]$ImapHost = "imap.mail.us-east-1.awsapps.com",
     [string]$SmtpHost = "smtp.mail.us-east-1.awsapps.com",
+    [string]$GoogleClientId = "",
+    [string]$GoogleClientSecret = "",
     [string]$PipIndex = "",
     [string]$Mirror = "",  # GitHub 连不上时用的 https 代理前缀
     [string]$Dir = (Join-Path $env:LOCALAPPDATA "kol-mail"),
@@ -293,36 +297,44 @@ $settingsPath = Join-Path $Data "settings.json"
 $old = $null
 if (Test-Path $settingsPath) { $old = Get-Content -Raw -Encoding UTF8 $settingsPath | ConvertFrom-Json }
 $email = if ((Has $old "mail") -and (Has $old.mail "address")) { $old.mail.address } else { "" }
-while ($email -notmatch "^[^@\s]+@[^@\s]+\.[^@\s]+$") {
-    $email = Ask $(if ($Domain) { "你的工作邮箱（只填 @$Domain 前面的部分就行）" } else { "你的工作邮箱" })
-    if ($email -and $Domain -and $email -notmatch "@") { $email = "$email@$Domain" }
-}
-$email = $email.ToLower()
-$account = if ((Has $old "mail") -and (Has $old.mail "account_name")) { $old.mail.account_name } else { ($email.Split("@")[0] -replace "[^A-Za-z0-9_-]", "") }
+# 新版程序在网页上登录邮箱（登录页）：第一次装时不在这里问，装好后浏览器打开的就是登录页。
+# 已经配好邮箱的（重复运行本脚本）和装旧版程序的，还是在这里测试邮箱、问密码。
+$webLogin = (-not $email) -and [bool](Select-String -Quiet -SimpleMatch -Pattern 'id="loginView"' -LiteralPath (Join-Path $App "static\index.html"))
+$account = ""
 $fullName = if ((Has $old "identity") -and (Has $old.identity "name")) { $old.identity.name } else { "" }
-# 默认用邮箱前缀当名字：eclair -> Eclair，john.doe -> John Doe
-$guess = (($email.Split("@")[0] -split "[._-]+") | Where-Object { $_ } |
-    ForEach-Object { $_.Substring(0, 1).ToUpper() + $_.Substring(1) }) -join " "
-while (-not $fullName) { $fullName = Ask "对外署名（英文名）" $guess }
-$accounts = (Run-Native { & $Mcp account list }).Out
-if ($accounts -notmatch "(?m)\b$([regex]::Escape($account))\b") {
-    if (-not $ImapHost) { $ImapHost = Ask "收信服务器（IMAP）" }
-    if (-not $SmtpHost) { $SmtpHost = Ask "发信服务器（SMTP）" }
-    Say "  马上会弹出一个小窗口，在里面输入邮箱密码（可以 Ctrl+V 粘贴）。密码由邮件组件存进 Windows 凭据管理器。"
-    $mailOk = Set-MailPassword $account $email @("account", "add", $account, "--email", $email, "--full-name", $fullName,
-        "--imap-host", $ImapHost, "--smtp-host", $SmtpHost, "--imap-user", $email, "--smtp-user", $email)
+if ($webLogin) {
+    Say "  邮箱在 KOL Mail 的页面上登录：装好后浏览器会打开登录页，在那里填邮箱和密码（授权码）。"
 } else {
-    $failed = @(Test-MailAccount $account)
-    $mailOk = -not $failed
-    if ($failed -and (Test-PasswordProblem $failed)) {
-        # 已经配过但密码不对，多半是上次粘贴没成功：重新运行本脚本就能改
-        Warn "  邮箱已经配置过，但密码没通过验证，弹出窗口重新输入一次。"
-        $mailOk = Set-MailPassword $account $email @()
-    } elseif ($failed) {
-        Write-ConnectionProblem $failed
+    while ($email -notmatch "^[^@\s]+@[^@\s]+\.[^@\s]+$") {
+        $email = Ask $(if ($Domain) { "你的工作邮箱（只填 @$Domain 前面的部分就行）" } else { "你的工作邮箱" })
+        if ($email -and $Domain -and $email -notmatch "@") { $email = "$email@$Domain" }
     }
+    $email = $email.ToLower()
+    $account = if ((Has $old "mail") -and (Has $old.mail "account_name")) { $old.mail.account_name } else { ($email.Split("@")[0] -replace "[^A-Za-z0-9_-]", "") }
+    # 默认用邮箱前缀当名字：eclair -> Eclair，john.doe -> John Doe
+    $guess = (($email.Split("@")[0] -split "[._-]+") | Where-Object { $_ } |
+        ForEach-Object { $_.Substring(0, 1).ToUpper() + $_.Substring(1) }) -join " "
+    while (-not $fullName) { $fullName = Ask "对外署名（英文名）" $guess }
+    $accounts = (Run-Native { & $Mcp account list }).Out
+    if ($accounts -notmatch "(?m)\b$([regex]::Escape($account))\b") {
+        if (-not $ImapHost) { $ImapHost = Ask "收信服务器（IMAP）" }
+        if (-not $SmtpHost) { $SmtpHost = Ask "发信服务器（SMTP）" }
+        Say "  马上会弹出一个小窗口，在里面输入邮箱密码（可以 Ctrl+V 粘贴）。密码由邮件组件存进 Windows 凭据管理器。"
+        $mailOk = Set-MailPassword $account $email @("account", "add", $account, "--email", $email, "--full-name", $fullName,
+            "--imap-host", $ImapHost, "--smtp-host", $SmtpHost, "--imap-user", $email, "--smtp-user", $email)
+    } else {
+        $failed = @(Test-MailAccount $account)
+        $mailOk = -not $failed
+        if ($failed -and (Test-PasswordProblem $failed)) {
+            # 已经配过但密码不对，多半是上次粘贴没成功：重新运行本脚本就能改
+            Warn "  邮箱已经配置过，但密码没通过验证，弹出窗口重新输入一次。"
+            $mailOk = Set-MailPassword $account $email @()
+        } elseif ($failed) {
+            Write-ConnectionProblem $failed
+        }
+    }
+    if ($mailOk) { Say "  邮箱连接测试通过" } else { Warn "  邮箱还没连通，KOL Mail 暂时收不到信。处理好后重新运行本脚本即可，已有的设置都会保留。" }
 }
-if ($mailOk) { Say "  邮箱连接测试通过" } else { Warn "  邮箱还没连通，KOL Mail 暂时收不到信。处理好后重新运行本脚本即可，已有的设置都会保留。" }
 # 回信、附件、移动邮件要用到的权限
 $policy = (Run-Native { & $Mcp config policy }).Out
 $rev = [regex]::Match($policy, "(?m)^revision=(\d+)").Groups[1].Value
@@ -527,8 +539,18 @@ if (-not $aiOk) { Warn "  AI 还没连上：翻译和起草暂时用不了。处
 
 # ---------------------------------------------------------------- 6. 你的设置（只写安装器负责的键，其余保持原样）
 Say "[6/8] 写设置…"
+$mailAnswers = [ordered]@{ mcp_exe = $Mcp }
+if ($email) {
+    $mailAnswers.account_name = $account; $mailAnswers.address = $email; $mailAnswers.company_domain = "@" + $email.Split("@")[1]
+} elseif ($Domain) {
+    $mailAnswers.company_domain = "@$Domain"
+}
+# 公司邮箱的服务器：登录页上填公司邮箱时就不用再填服务器
+if ($Domain -and $ImapHost -and $SmtpHost) {
+    $mailAnswers.company_servers = [ordered]@{ domain = $Domain; imap_host = $ImapHost; smtp_host = $SmtpHost }
+}
 $answers = [ordered]@{
-    mail = [ordered]@{ account_name = $account; address = $email; company_domain = "@" + $email.Split("@")[1]; mcp_exe = $Mcp }
+    mail = $mailAnswers
     llm = [ordered]@{ backend = $backend }
     paths = [ordered]@{}
     identity = [ordered]@{ name = $fullName }
@@ -559,22 +581,21 @@ if (-not ((Has $old "paths") -and (Has $old.paths "playbook"))) {
     if (-not (Test-Path $playbook)) { Copy-Item (Join-Path $App "templates\谈判手册.example.md") $playbook }
     $answers.paths.playbook = $playbook
 }
-if (-not ((Has $old "paths") -and (Has $old.paths "koc_knowledge"))) {
-    $knowledge = Join-Path $Data "KOC机器人知识.md"
-    if (-not (Test-Path $knowledge)) { Copy-Item (Join-Path $App "templates\KOC机器人知识.example.md") $knowledge }
-    $answers.paths.koc_knowledge = $knowledge
-}
 # KOL 总表：同事自己的 xlsx，格式各不相同。这里只记下文件；第一次打开页面时请同事核对各列对应什么，
 # 对好之前不往表里写。新建的表是程序自己的简单模板，列对应直接定好。
 if (-not ((Has $old "paths") -and (Has $old.paths "sheet_workbook"))) {
     Say "  KOL 总表：连上你自己的 xlsx 总表后，打开邮件会显示 KOL 的频道链接，收发信的进展会自动记进表里（只写对得上的列，不改你的格式）。"
     $workbook = ""
     while ($true) {
-        $ans = Ask "总表文件的完整路径（可以把文件拖进这个窗口），输入 new 新建一张，不用就直接回车（以后在页面上方的 KOL 总表按钮里也能接）" ""
+        $ans = Ask "总表文件的完整路径（可以把文件拖进这个窗口），输入 new 新建一张，不用就直接回车（以后在页面右上角 设置 → KOL 总表 里也能接）" ""
         $ans = "$ans".Trim().Trim('"').Trim("'")
         if (-not $ans) { break }
         if ($ans -match '^https?://docs\.popo\.') {
-            Say "  POPO 在线表格要先在这台电脑上装好并登录 popo-cli。装好 KOL Mail 后，在页面上方的“KOL 总表”里粘贴这个链接连接。"
+            Say "  POPO 在线表格要先在这台电脑上装好并登录 popo-cli。装好 KOL Mail 后，在页面右上角 设置 → KOL 总表 里粘贴这个链接连接。"
+            break
+        }
+        if ($ans -match '^https?://docs\.google\.com/spreadsheets/') {
+            Say "  Google 表格要先用你的 Google 账号授权一次。装好 KOL Mail 后，在页面右上角 设置 → KOL 总表 里粘贴这个链接，按提示授权。"
             break
         }
         $create = $ans -eq "new"
@@ -608,6 +629,7 @@ if (-not ((Has $old "paths") -and (Has $old.paths "sheet_workbook"))) {
 if (-not ((Has $old "paths") -and (Has $old.paths "autoreply_record"))) { $answers.paths.autoreply_record = Join-Path $Data "自动回复记录.md" }
 if ($Repo) { $answers.update.repo = $Repo }
 if ($Mirror) { $answers.update.mirror = $Mirror }
+if ($GoogleClientId) { $answers.google = [ordered]@{ client_id = $GoogleClientId; client_secret = $GoogleClientSecret } }
 if ($Feedback) { $answers.feedback.popo_webhook = $Feedback }
 elseif (-not ((Has $old "feedback") -and (Has $old.feedback "popo_webhook"))) {
     Warn "  安装命令里没有反馈地址（-Feedback），页面右下角的“反馈”按钮会是灰的。需要的话问维护者要完整的安装命令。"
@@ -645,5 +667,6 @@ $s.Save()
 Start-ScheduledTask -TaskName "kol-mail"
 Start-Process (Join-Path $App "start-kol-mail.cmd")
 Say "装好了。以后双击桌面上的“KOL Mail”就能打开；每天第一次打开会自动检查更新。"
-if ($setupInApp) { Say "第一次打开页面时，会请你写自己的签名和“我的谈判方式”，AI 出策略和起草都照它来。" }
+if ($webLogin) { Say "浏览器里打开的是 KOL Mail 的登录页：先登录你的邮箱，然后写自己的签名和“我的谈判方式”，AI 出策略和起草都照它来。" }
+elseif ($setupInApp) { Say "第一次打开页面时，会请你写自己的签名和“我的谈判方式”，AI 出策略和起草都照它来。" }
 Say "下班 AI 回复需要在页面上方“手机审稿”里绑定你自己的 Telegram 机器人。"

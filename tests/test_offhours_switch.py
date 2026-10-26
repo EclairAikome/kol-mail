@@ -40,7 +40,6 @@ def run_offhours(monkeypatch, mode: str) -> list[str]:
     monkeypatch.setattr(app, "load_autoreply_config", lambda: cfg)
     monkeypatch.setattr(app, "offhours_email_reply", reply)
     monkeypatch.setattr(app, "open_email_case", lambda *a, **k: calls.append("case"))
-    monkeypatch.setattr(app.kq, "mark", lambda mid: None)
     monkeypatch.setattr(app, "already_answered", lambda *a: False)
     asyncio.run(app.offhours_email([KOL_MAIL]))
     return calls

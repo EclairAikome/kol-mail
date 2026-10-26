@@ -154,7 +154,6 @@ class Config:
     schedule: Schedule = field(default_factory=Schedule)
     email_enabled: bool = False
     telegram_enabled: bool = False
-    koc_enabled: bool = False  # work-hours KOC chatbot (koc.py)
     # off (default): nothing is sent off hours; template: send the fixed text; ai: draft with AI, owner approves on
     # the phone. The channel switches above still decide which channels "template" and "ai" act on.
     offhours_mode: str = "off"
@@ -193,13 +192,12 @@ def load_config(path: Path) -> Config:
         schedule=Schedule(holidays=frozenset(date.fromisoformat(d) for d in holidays)),
         email_enabled=raw.get("email_enabled") is True,
         telegram_enabled=raw.get("telegram_enabled") is True,
-        koc_enabled=raw.get("koc_enabled") is True,
         offhours_mode=mode,
         templates=templates,
     )
 
 
-SWITCHES = ("email_enabled", "telegram_enabled", "koc_enabled")
+SWITCHES = ("email_enabled", "telegram_enabled")
 
 
 def change_holidays(path: Path, days: list[date], add: bool) -> list[date]:

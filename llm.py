@@ -6,14 +6,16 @@
              reply text. Models are named without their provider here; the full provider/model id is looked up once
              in `codemaker models`.
 
-Either way the model only ever sees text and can only answer with text. Both CLIs add their own context to the user
-turn (Claude Code appends reminders such as <ip_reminder>); answers are scrubbed of those tags, and callers that show
-model text as a translation must still check it (see looks_chinese).
+The model sees text, plus the image or PDF files a caller passes (what a KOL sent, already checked by kol-mail),
+and can only answer with text. Both CLIs add their own context to the user turn (Claude Code appends reminders such
+as <ip_reminder>); answers are scrubbed of those tags, and callers that show model text as a translation must still
+check it (see looks_chinese).
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import glob
 import json
 import os
@@ -246,20 +248,48 @@ def _fail(message: str, backend: str):
     raise (LLMUnavailable if unavailable(explained) else LLMError)(explained)
 
 
+FILE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+              ".webp": "image/webp", ".pdf": "application/pdf"}
+
+
+def file_type(path: Path) -> str:
+    """The media type of a file the model may be shown; ValueError for anything else."""
+    kind = FILE_TYPES.get(Path(path).suffix.lower())
+    if not kind:
+        raise ValueError(f"AI 只能看图片和 PDF：{Path(path).name}")
+    return kind
+
+
+def claude_message(user_text: str, files: list[Path]) -> bytes:
+    """One stream-json user turn: the text, then each file as an image or a PDF document block."""
+    content = [{"type": "text", "text": user_text}]
+    for f in files:
+        kind = file_type(f)
+        data = base64.b64encode(Path(f).read_bytes()).decode("ascii")
+        content.append({"type": "document" if kind == "application/pdf" else "image",
+                        "source": {"type": "base64", "media_type": kind, "data": data}})
+    line = {"type": "user", "message": {"role": "user", "content": content}}
+    return (json.dumps(line, ensure_ascii=False) + "\n").encode("utf-8")
+
+
 async def complete(settings: Settings, system_prompt: str, user_text: str, schema: dict, role: str,
-                   timeout: int) -> dict:
-    """Run one call and return the JSON object the schema describes, scrubbed of injected reminder blocks."""
+                   timeout: int, files: list[Path] | None = None) -> dict:
+    """Run one call and return the JSON object the schema describes, scrubbed of injected reminder blocks.
+    files: images or PDFs shown to the model along with user_text."""
     if role not in ROLES:
         raise ValueError(role)
+    files = [Path(f) for f in files or []]
+    for f in files:
+        file_type(f)
     binary = settings.binary()
     if not binary:
         raise LLMUnavailable(f"找不到 {settings.label()} 命令行")
     model = settings.models[role]
     settings.workdir.mkdir(parents=True, exist_ok=True)
     if settings.backend == "claude":
-        result = await _claude(binary, model, system_prompt, user_text, schema, settings.workdir, timeout)
+        result = await _claude(binary, model, system_prompt, user_text, schema, settings.workdir, timeout, files)
     else:
-        result = await _codemaker(binary, model, system_prompt, user_text, schema, settings.workdir, timeout)
+        result = await _codemaker(binary, model, system_prompt, user_text, schema, settings.workdir, timeout, files)
     return check_required(scrub(result), schema)
 
 
@@ -275,12 +305,16 @@ async def _communicate(proc, data: bytes, timeout: int, label: str) -> tuple[byt
 
 
 async def _claude(binary: str, model: str, system_prompt: str, user_text: str, schema: dict, cwd: Path,
-                  timeout: int) -> dict:
+                  timeout: int, files: list[Path] | None = None) -> dict:
     # The prompt (with the whole playbook) goes through a private file: a command line is readable by other local
     # processes and Windows caps it at 32K characters.
     prompt_file = cwd / f"prompt-{secrets.token_hex(6)}.md"
     prompt_file.write_text(system_prompt, encoding="utf-8")
     env = dict(os.environ, CLAUDE_CODE_DISABLE_AUTO_MEMORY="1")  # mail text must never meet personal memories
+    # Plain stdin carries text only; files go as content blocks of one stream-json turn, still with every tool off.
+    streamed = ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose"] if files else \
+        ["--output-format", "json"]
+    stdin = claude_message(user_text, files) if files else user_text.encode("utf-8")
     try:
         proc = await asyncio.create_subprocess_exec(
             binary, "-p",
@@ -288,7 +322,7 @@ async def _claude(binary: str, model: str, system_prompt: str, user_text: str, s
             "--tools", "",
             "--disallowedTools", "mcp__*",
             "--strict-mcp-config",
-            "--output-format", "json",
+            *streamed,
             "--json-schema", json.dumps(schema, ensure_ascii=False),
             "--system-prompt-file", str(prompt_file),
             "--setting-sources", "local",
@@ -297,14 +331,14 @@ async def _claude(binary: str, model: str, system_prompt: str, user_text: str, s
             cwd=str(cwd), env=env,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        out, err = await _communicate(proc, user_text.encode("utf-8"), timeout, "Claude Code")
+        out, err = await _communicate(proc, stdin, timeout, "Claude Code")
     finally:
         try:
             prompt_file.unlink()
         except OSError:
             pass
     try:
-        obj = json.loads(out.decode("utf-8", "replace"))
+        obj = stream_result(out) if files else json.loads(out.decode("utf-8", "replace"))
     except ValueError:  # not the CLI's JSON at all: a broken call, not proof the backend is unavailable
         raise LLMError(explain((err or out).decode("utf-8", "replace")[:300] or "Claude Code 输出无法解析", "claude"))
     if obj.get("is_error"):
@@ -313,6 +347,18 @@ async def _claude(binary: str, model: str, system_prompt: str, user_text: str, s
     if isinstance(structured, dict):
         return structured
     return parse_json_text(str(obj.get("result", "")))
+
+
+def stream_result(out: bytes) -> dict:
+    """The final "result" event of a stream-json run (the same object --output-format json prints)."""
+    for line in reversed(out.decode("utf-8", "replace").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        event = json.loads(line)
+        if isinstance(event, dict) and event.get("type") == "result":
+            return event
+    raise ValueError("no result event")
 
 
 CODEMAKER_FORMAT = """
@@ -345,7 +391,7 @@ async def codemaker_model_id(binary: str, model: str) -> str:
 
 
 async def _codemaker(binary: str, model: str, system_prompt: str, user_text: str, schema: dict, workdir: Path,
-                     timeout: int) -> dict:
+                     timeout: int, files: list[Path] | None = None) -> dict:
     model = await codemaker_model_id(binary, model)
     # The agent (system prompt, no tools) is defined in a codemaker.json of a fresh folder per call, so parallel
     # calls never share a prompt and nothing is left in a project folder. It replaces the default agent "build"
@@ -369,6 +415,8 @@ async def _codemaker(binary: str, model: str, system_prompt: str, user_text: str
     try:
         proc = await asyncio.create_subprocess_exec(
             binary, "run", "--pure", "-m", model, "--format", "json", "--dir", str(run_dir),
+            # --file=PATH, never "--file PATH": the option takes several values and would swallow a message.
+            *[f"--file={Path(f).resolve()}" for f in files or []],
             cwd=str(run_dir), env={**os.environ, **NO_GIT_PROMPTS},
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )

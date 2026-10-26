@@ -5,12 +5,16 @@
 1. Copies every git-tracked file (never data/, never anything untracked) into the clone of the public repo.
 2. Scans the copy for anything private: the patterns in data/publish-denylist.txt (one regex per line; the list
    itself stays out of git because it names the private strings), plus built-in checks for tokens, webhooks,
-   Windows user folders, e-mail addresses that are not example ones and binary files. Any hit stops the release.
+   Windows user folders, e-mail addresses that are not example ones and binary files (PNG pictures are allowed when
+   they hold nothing but the picture: no text, EXIF or other metadata chunks). Any hit stops the release.
 3. Writes MANIFEST.json (SHA-256 of every file) and MANIFEST.sig, signed with data/release-signing-key.pem. The
    updater on colleagues' machines only installs releases whose signature matches the pinned public key.
 4. Commits as "Release vX.Y.Z" (version from VERSION) with the given author and, with --push, pushes and tags it.
    An existing tag is never moved. Creating the GitHub release (what the updater looks for) is
    `gh release create vX.Y.Z --repo owner/name --notes "..."`.
+5. With --push, restarts the KOL Mail service running from this checkout (it never updates itself, so it would keep
+   the old code in memory) through POST /api/restart, which waits until nothing is being sent, and waits until a new
+   process answers. A service that is not running is left alone; a failed restart never fails the release.
 """
 
 from __future__ import annotations
@@ -19,8 +23,10 @@ import argparse
 import base64
 import re
 import shutil
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,10 +50,42 @@ ALLOWED_EMAIL = re.compile(
     r"|@(x\.com|y\.com|evil\.io|example-team\.com)$"       # test fixtures
     r"|^(mailer-daemon|postmaster|no-reply|noreply|no_reply|do_not_reply)@"  # machine senders
     r"|^(ana\.gamer|ana|bob|busy|done|fee|mixed|no|gone|someone|stranger)@gmail\.com$"
+    # tests of the mailbox presets, and the add-mailbox placeholder, need a real provider's domain
+    r"|^(a|li|li2|name)@163\.com$|^li@qq\.com$|^a@icloud\.com$|^x@outlook\.com$"
+    # an address on a video site's domain must not be read as a link to it (tests/test_materials.py)
+    r"|^gamer@youtube\.com$"
     r"|@users\.noreply\.github\.com$|^noreply@anthropic\.com$", re.IGNORECASE)
 TEXT_SUFFIXES = {".py", ".md", ".txt", ".json", ".html", ".js", ".css", ".ps1", ".cmd", ".toml", ".cfg", ".ini", ".sh",
                  ".yml", ".yaml", ""}
+MAX_PNG = 3 * 1024 * 1024  # the desktop pet's pictures: five frames each, under 0.1 MB
 SKIP_SELF = {"tools/publish.py"}  # its own patterns would match themselves
+
+
+PNG_CHUNKS = {b"IHDR", b"PLTE", b"tRNS", b"IDAT", b"IEND", b"gAMA", b"cHRM", b"sRGB", b"pHYs", b"bKGD"}
+
+
+def png_problem(raw: bytes) -> str | None:
+    """Why this PNG may not go public, or None. Only the chunks that hold the picture itself are allowed: text,
+    EXIF, colour profiles, provenance (C2PA) and editors' private chunks can all carry names, paths or places,
+    and anything after the end chunk could carry anything at all."""
+    import struct
+    import zlib
+    if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "不是 PNG"
+    pos = 8
+    while pos + 12 <= len(raw):
+        length, kind = struct.unpack(">I4s", raw[pos:pos + 8])
+        end = pos + 12 + length
+        if end > len(raw):
+            return "文件被截断了"
+        if struct.unpack(">I", raw[end - 4:end])[0] != zlib.crc32(raw[pos + 4:end - 4]):
+            return f"{kind.decode('latin-1')} 块校验不对"
+        if kind not in PNG_CHUNKS:
+            return f"带有 {kind.decode('latin-1')} 块（文字、EXIF、配置文件之类的附加信息），先用工具去掉再发布"
+        pos = end
+        if kind == b"IEND":
+            return None if pos == len(raw) else "图片结尾后面还藏着别的数据"
+    return "没有结尾块"
 
 
 def tracked() -> list[str]:
@@ -64,6 +102,12 @@ def scan(base: Path, files: list[str]) -> list[str]:
     hits = []
     for rel in files:
         path = base / rel
+        if path.suffix.lower() == ".png":
+            raw = path.read_bytes()
+            problem = png_problem(raw) or (f"超过 {MAX_PNG // 1024 // 1024} MB" if len(raw) > MAX_PNG else None)
+            if problem:
+                hits.append(f"{rel}: {problem}")
+            continue
         if path.suffix.lower() not in TEXT_SUFFIXES and rel not in (".gitignore", ".gitattributes"):
             hits.append(f"{rel}: 不是文本文件，扫描不了，不能放进公开仓库")
             continue
@@ -94,6 +138,44 @@ def sign(clone: Path, files: list[str], version: str):
     updater.verify_manifest(manifest, signature, updater.PUBLIC_KEY)  # the pinned key must match this private key
     (clone / updater.MANIFEST).write_bytes(manifest)
     (clone / updater.SIGNATURE).write_bytes(signature + b"\n")
+
+
+def restart_local_service(version: str, wait: float = 720, poll: float = 5):
+    """The app waits up to 10 minutes for a send in progress before it exits; run.ps1 / launchd start it 15 s later."""
+    import httpx
+    import config
+    port = int(os.environ.get("KOL_MAIL_PORT", config.S["port"]))
+    base = f"http://127.0.0.1:{port}"
+    client = httpx.Client(base_url=base, headers={"x-kol-mail": "1", "origin": base}, timeout=10,
+                          trust_env=False)  # never through a proxy from the environment
+
+    def status() -> dict | None:
+        try:
+            r = client.get("/api/status")
+            return r.json() if r.status_code == 200 else None
+        except (httpx.HTTPError, ValueError):
+            return None
+
+    with client:
+        before = status()
+        if before is None:
+            print(f"本机 {base} 没有在运行的 KOL Mail，不用重启")
+            return
+        r = client.post("/api/restart", json={})
+        if r.status_code != 200:
+            print(f"本机服务没有重启（HTTP {r.status_code}：{r.text[:200]}），需要手动重启它才会用上 v{version}")
+            return
+        print("已请求本机服务重启，等它跑起新代码（有邮件正在发会先等发完）……")
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            time.sleep(poll)
+            now = status()
+            if now and now.get("pid") != before.get("pid"):  # a new process, not a slow answer from the old one
+                running = now.get("version")
+                note = "" if running == version else f"（这个文件夹里的代码是 v{running}，发布的是 v{version}）"
+                print(f"本机服务已重启，现在运行 v{running}{note}")
+                return
+        print(f"等了 {int(wait / 60)} 分钟本机服务还没重启完，去看一下 server.log")
 
 
 def main():
@@ -141,6 +223,11 @@ def main():
         git("push", "-q", "origin", "HEAD")
         git("push", "-q", "origin", f"v{version}")
     print(f"导出完成：v{version}，{len(files)} 个文件，扫描干净，已签名")
+    if a.push:
+        try:
+            restart_local_service(version)
+        except Exception as e:  # noqa: BLE001  the release is out already; restarting is a convenience
+            print(f"本机服务重启失败：{type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":

@@ -3,3 +3,4 @@
 MANIFEST.json -text
 MANIFEST.sig -text
 *.sh text eol=lf
+*.png binary

@@ -23,6 +23,14 @@ DEFAULTS = {
         "address": "",               # your own address, e.g. you@example.com
         "company_domain": "",        # e.g. @company.com: colleagues never get automatic replies
         "mcp_exe": "",               # mcp-email-server.exe
+        "label": "",                 # what the page calls the primary mailbox (optional)
+        "extra_accounts": [],        # further mailboxes added in the page: {"name", "address", "label"}
+        "company_servers": {},       # {"domain", "imap_host", "smtp_host"} from the installer: the login screen
+                                     # needs no server settings for an address on the company's domain
+    },
+    "google": {
+        "client_id": "",             # a Google Cloud OAuth client of the "Desktop app" kind (set by the installer):
+        "client_secret": "",         # lets a colleague link their own Google sheet as KOL总表
     },
     "identity": {
         "name": "",                  # how you sign, e.g. Alex
@@ -32,7 +40,6 @@ DEFAULTS = {
     },
     "paths": {
         "playbook": "",              # negotiation playbook (Markdown) the drafts follow
-        "koc_knowledge": "",         # the only facts the KOC bot may use
         "sheet_tool": "",            # kol-sheet\kol.py (optional)
         "sheet_python": "",          # a Python with pywin32 for the sheet tool
         "sheet_workbook": "",        # KOL总表.xlsx; empty = next to the sheet tool (the original single-user setup)
@@ -44,14 +51,6 @@ DEFAULTS = {
         "models": {},                # {"translate": "...", "draft": "..."}; empty = the backend's defaults
         "claude_bin": "",
         "codemaker_bin": "",
-    },
-    "koc": {
-        "allowed_numbers": ["1", "5", "7", "20", "24", "50"],
-        "commission_percents": ["5", "1"],
-        "profit_share_percent": "20",
-        "withdraw_minimum": "50",
-        "site_domain": "",           # e.g. example.com: always allowed as a link
-        "fallback_subject": "Collaboration",
     },
     "mobile": {
         "telegram_bot_token": "",    # from @BotFather; the bot only ever talks to owner_chat_id
@@ -101,14 +100,21 @@ def save(settings: dict) -> None:
 
 def update(path: list[str], value) -> dict:
     """Set one nested key in settings.json, keeping everything else as the user wrote it."""
+    return update_many([(path, value)])
+
+
+def update_many(changes: list[tuple[list[str], object]]) -> dict:
+    """Several nested keys in one write, so a failure never leaves half of them (a new primary mailbox's name with
+    the old one's address)."""
     try:
         raw = json.loads(SETTINGS_FILE.read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
         raw = {}
-    node = raw
-    for key in path[:-1]:
-        node = node.setdefault(key, {})
-    node[path[-1]] = value
+    for path, value in changes:
+        node = raw
+        for key in path[:-1]:
+            node = node.setdefault(key, {})
+        node[path[-1]] = value
     save(raw)
     return _merge(DEFAULTS, raw)
 

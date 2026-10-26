@@ -162,3 +162,62 @@ def test_the_owners_sheet_cannot_be_changed_from_the_page(tmp_path):
         r = client().post(url, json=body, headers=PAGE)
         assert r.status_code == 400 and "kol.py" in r.json()["error"]
     assert app.SHEET_MODE == "legacy" and not (tmp_path / "b.xlsx").exists()
+
+
+GOOGLE_ID = "1" + "Ab3_x-" * 7  # the shape of a spreadsheet id
+
+
+def test_a_google_sheet_link_is_linked_like_a_popo_one(monkeypatch):
+    calls = []
+
+    async def fake_tool(args, timeout=120, mapping=None, workbook=None):
+        calls.append(args)
+        return 0, {"sheets": ["KOL"], "sheet": "KOL", "sheet_id": "0", "header_row": 1, "rows": 3,
+                   "columns": [{"col": 1, "header": "Email", "samples": []}], "guess": {"email": "Email"},
+                   "fields": {"email": "邮箱"}, "required": ["email"]}
+    monkeypatch.setattr(app, "user_sheet_tool", fake_tool)
+    url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_ID}/edit#gid=0"
+    c = client()
+    assert c.post("/api/sheet/inspect", json={"path": url}, headers=PAGE).json()["sheet"] == "KOL"
+    assert calls[-1][:3] == ["inspect", "--path", f"google:{GOOGLE_ID}"]
+    d = c.post("/api/sheet/save", json={"path": url, "sheet": "KOL", "header_row": 1, "columns": {"email": "Email"}},
+               headers=PAGE).json()
+    assert d["ok"] and d["google"] and not d["popo"] and d["exists"] and d["google_link"] == url
+    assert d["map"]["sheet_id"] == "0" and app.sheet_enabled()  # a sheet with no file on this disk still syncs
+    assert app.SHEET_ENV["KOL_GOOGLE_TOKEN_DIR"] == str(app.GOOGLE_TOKEN_DIR)  # one sign-in, whichever sheet
+    bad_link = c.post("/api/sheet/inspect", json={"path": "https://docs.google.com/document/d/abc/edit"}, headers=PAGE)
+    assert bad_link.status_code == 400 and len(calls) == 2  # refused before anything runs
+
+
+def test_google_sign_in_hands_the_page_its_consent_page(monkeypatch):
+    monkeypatch.setattr(app, "google_signin", {"pending": False, "url": "", "error": None})
+    monkeypatch.setitem(app.CFG, "google", {"client_id": "", "client_secret": ""})
+    c = client()
+    assert c.get("/api/sheet/google", headers=PAGE).json()["configured"] is False
+    assert "Google 客户端" in c.post("/api/sheet/google", json={}, headers=PAGE).json()["error"]
+    monkeypatch.setitem(app.CFG, "google", {"client_id": "cid.apps.googleusercontent.com", "client_secret": "s"})
+    seen = {}
+
+    def fake_authorize(token_dir, client_id, secret, open_browser=True, timeout=600, on_url=None):
+        seen.update(dir=token_dir, client=client_id, browser=open_browser)
+        on_url("https://accounts.google.com/o/oauth2/v2/auth?client_id=cid")
+    monkeypatch.setattr(app.googlegrid, "authorize", fake_authorize)
+    monkeypatch.setattr(app.googlegrid, "auth_status", lambda d: {"authorized": True, "error": None})
+    d = c.post("/api/sheet/google", json={}, headers=PAGE).json()
+    assert d["url"].startswith("https://accounts.google.com/")
+    assert seen == {"dir": app.GOOGLE_TOKEN_DIR, "client": "cid.apps.googleusercontent.com", "browser": False}
+    s = c.get("/api/sheet/google", headers=PAGE).json()
+    assert s["configured"] and s["authorized"] and not s["error"]
+
+
+def test_a_refused_google_sign_in_is_said_on_the_page(monkeypatch):
+    monkeypatch.setattr(app, "google_signin", {"pending": False, "url": "", "error": None})
+    monkeypatch.setitem(app.CFG, "google", {"client_id": "cid", "client_secret": "s"})
+
+    def refused(*a, **k):
+        raise app.googlegrid.AuthError("你在 Google 页面上没有允许")
+    monkeypatch.setattr(app.googlegrid, "authorize", refused)
+    monkeypatch.setattr(app.googlegrid, "auth_status", lambda d: {"authorized": False, "error": None})
+    c = client()
+    assert "没有允许" in c.post("/api/sheet/google", json={}, headers=PAGE).json()["error"]
+    assert "没有允许" in c.get("/api/sheet/google", headers=PAGE).json()["error"]
