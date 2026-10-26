@@ -37,7 +37,7 @@ import updater  # noqa: E402
 BUILTIN = [
     r"\d{6,12}:[A-Za-z0-9_-]{30,}",                    # Telegram bot token
     r"ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}",
-    r"sk-[A-Za-z0-9-]{20,}",                             # API keys
+    r"(?<![A-Za-z0-9_-])sk-[A-Za-z0-9-]{20,}",           # API keys (a word that merely ends in "sk" is none)
     r"open-apis/robots|/hook/[A-Za-z0-9-]{16,}",         # webhook addresses
     r"[A-Za-z]:[\\/]+Users[\\/]+(?!alex\b)[A-Za-z0-9._-]+",  # someone's Windows profile, either slash
     r"(?<![\w.])/Users/(?!alex\b|Shared\b)[A-Za-z0-9._-]+",  # someone's Mac home folder

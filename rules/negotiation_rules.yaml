@@ -1,0 +1,435 @@
+# Hard rules every reply to a KOL must keep, taken from the negotiation playbook (谈判手册), the KOL team SOP
+# (koc分销+云机新游kol拓新SOP) and the owner's own corrections of earlier drafts. compliance.py checks each draft
+# against them; app.py rewrites a failing draft up to max_revisions times and then flags it to the owner.
+#
+# Each rule:
+#   id        stable name, used in tests and in the notes shown to the owner
+#   title_zh  what the owner reads when the rule is broken
+#   source    where the rule comes from
+#   action    revise: the draft is rewritten with `fix` as the instruction
+#             review: nothing to rewrite; the owner is told in needs_approval_zh
+#   check     which checker in compliance.py runs it (patterns, or a named special check)
+#   fix       the instruction given to the model for the rewrite (English, the model writes the reply)
+#   patterns  case-insensitive Python regexes, matched sentence by sentence
+# Options of the patterns check:
+#   negation_ok: true  a sentence that refuses (vocab negation or refusal, after the comfort phrases such as "no
+#                      worries" are taken out) is a refusal, not an offer, and passes
+#   exempt       a sentence matching this passes (e.g. a banner pointed to in the brief)
+#   near         the sentence must also match this
+#   kol_mentions the rule only applies when the KOL's own words match this
+#   unless_owner the rule is off when the owner's notes match this (the owner said it themselves)
+#   skip_with_outgoing_attachments  off when the caller knows files go with the reply
+# Text in quotes ("...", “...”, «...», 「...」) is left out of pattern rules: it is mostly the title of a KOL's video.
+#
+# Regexes catch the usual wordings, not every possible one; the owner still reads every draft. Edit freely: the file
+# is read again whenever it changes, no restart needed. Regexes are single-quoted YAML strings, so a quote inside
+# one is written twice ('').
+
+version: 2
+updated: 2026-10-26
+max_revisions: 2
+
+# Shared vocabularies.
+vocab:
+  negation: '\bno\b(?! (painel|canal|v[íi]deo|perfil|site|link|momento|fim|final|in[íi]cio|dia|m[êe]s))|\b(not|never|can''t|cannot|can not|unable|don''t|doesn''t|won''t|isn''t|aren''t|without|unfortunately|instead of)\b|n''t\b|\bне\b|\bнет\b|нельзя|к сожалению|исключено|\bno podemos\b|\bnão\b|\bpas\b|\bkeine?\b|\bnicht\b|ません|かねます|ございません|できない|어렵|불가|수 없|못 |없|않|不能|无法|没有|不会|不提供|不支持'
+  # "but every creator is paid after publication": a refusal without a no.
+  refusal: '\b(but|however|instead)\b[^.\n]{0,100}\b(after|once)\b[^.\n]{0,40}\b(publish\w*|live|released?|goes up|is up|posted)\b|\bно\b[^.\n]{0,80}после (выхода|публикации)|\bpero\b[^.\n]{0,80}(después de|cuando|una vez)[^.\n]{0,40}publica|\bmas\b[^.\n]{0,80}depois[^.\n]{0,40}publica|\bmais\b[^.\n]{0,80}après (la )?publication'
+  # Reassurances that are not refusals: taken out before looking for a negation.
+  comfort: '\bno (problem|worries|stress)\b|\bdon''t worry\b|\bnot a problem\b|\bnever mind\b|не (переживайте|волнуйтесь|беспокойтесь)|без проблем|no (hay problema|te preocupes|pasa nada)|sem problema|não se preocupe|pas de (problème|souci)|keine sorge|kein problem|ご安心|걱정 마|没问题|别担心'
+  additive: '\b(on top of|in addition|additionally|as well|also|plus|bonus|extra)\b|также|кроме того|помимо|вдобавок|дополнительн|\bплюс\b|además|también|aussi|en plus|zusätzlich|\bauch\b|さらに|추가|另外|额外|外加|此外'
+  fee_talk: '\b(rate|rates|price|pricing|fee|fees|cost|quote|budget|sponsored|paid (mention|integration|video|stream|post)|flat)\b|стоимост|\bцен[аыу]\b|прайс|расценк|оплат|precio|tarifa|\btarif|preis|料金|단가|비용|报价|价格|费用'
+  sweetener: '\bcommission|profit[- ]shar|% of (the )?(net )?profit|affiliate (link|program)[^.\n]{0,80}\b(earn|commission|percent|%)|giveaway|free coupons?|процент\w* с (каждого )?заказ|% с (каждого )?заказ|комисси\w* с|розыгрыш|чист\w+ прибыл|промокод|comisi[oó]n|comiss[aã]o|sorteo|sorteio|concours|gewinnspiel|抽奖|佣金|分成|プレゼント企画|이벤트'
+  # The affiliate default (5% new users, 1% returning) is the opening offer itself, never a card shown too early.
+  default_cps: '\b5\s?%[^\n]{0,120}\b1\s?%|\b1\s?%[^\n]{0,120}\b5\s?%'
+  price_quote: '[$€£₽¥]\s?\d|\d[\d.,\s]{0,12}(usd|us\$|dollars?|bucks|eur|euros?|€|gbp|£|руб\w*|₽|rub|r\$|brl|reais|yen|円|원|krw|元|rmb|cad|aud|usdt)\b|\b(rate|price|fee|charge|quote)\w*[^.\n]{0,25}\d{2,}|\d{2,}[^.\n]{0,12}(per|a|each) (video|stream|post|short)'
+  profit: 'net profit|\bprofit|\bmargin|\b\d{2}\s?/\s?\d{2}\b[^.\n]{0,15}split|прибыл|маржи|ganancia|beneficio|margen|lucro|margem|bénéfice|gewinn|利润|利益|이익|수익|纯利'
+  giveaway: 'giveaway|free coupons?|розыгрыш|sorteo|sorteio|concours|gewinnspiel|抽奖|プレゼント企画|경품'
+  pushback: '\d{1,2}\s?%|other (platforms?|sites?|companies)|another (platform|site)|competitor|higher (rate|commission|share|percentage)|more commission|too low|not enough|другие (площадки|сайты)|конкурент|больше процент|мало|otras plataformas|muy bajo|别家|其他平台'
+  acceptance: '\b(deal|agreed|it''s a deal|works for us|we accept|we can do|confirmed|let''s do|sounds good)\b|договорились|согласны|подтверждаем|\bde acuerdo\b|trato hecho|\bfechado\b|combinado|\bd''accord\b|einverstanden|承知しました|了解しました|좋습니다|확정'
+
+rules:
+
+  - id: payment-after-publication
+    title_zh: 只在内容发布后付款，不预付、不付定金、不按“草稿确认先付一半”
+    source: 谈判手册第零节第 1 条、第六节；SOP 固薪部分“所有付款必须在视频发后进行”；主人 2026-10-16、2026-10-22 纠正
+    action: revise
+    check: patterns
+    # "Оплату до публикации ... сделать не сможем" (sent 2026-10-22) refuses a prepayment and passes.
+    negation_ok: true
+    fix: >-
+      All payment happens only after the content is published (for several pieces, pay for what is already live,
+      nothing ahead). Remove every deposit, upfront, advance or partial-before-publication payment and any payment
+      tied to draft approval, signing or the start of the work. Do not use the word "upfront" at all, not even as
+      an idiom ("to be upfront"). If the KOL asked for prepayment, answer that content is reviewed before it goes
+      live and paid in full after publication, the same rule for every creator.
+    patterns:
+      - '\b(deposit|down[- ]?payment|pre-?pay(ment|ing)?|advance payment|payment in advance|pay(ing)? (you )?in advance|up ?front|up-front)\b'
+      - '\b\d{1,3}\s?%\s*(up ?on|after|on|at|before|once|when|as soon as)\s+(the\s+|we\s+|you\s+)?(draft|script|approv|sign|confirm|agree|contract|start|kick)'
+      - '\bhalf\b[^.\n]{0,40}\b(before|when you sign|when (the )?(draft|script|contract)|up ?on (approval|signing)|once (the )?(draft|script|contract)|as soon as|after (the )?(draft|script|approval|signing))'
+      - '\bpa(y|id|yment)\b[^.\n]{0,40}\bbefore\b[^.\n]{0,30}\b(publish|publication|goes live|go live|release|upload|posted|airs?|you start|filming|recording)\b'
+      - 'предоплат|\bаванс|задат(ок|ка|ком)|оплат\w*[^.\n]{0,20}\b(вперёд|вперед|заранее)|оплат\w*[^.\n]{0,20}\bдо\s+(выхода|публикации|выпуска|релиза)|половин\w*[^.\n]{0,30}(после согласовани|после утверждени|после подписани|до выхода|до публикации|сразу)'
+      - '\d{1,3}\s?%\s*(после|при|по|до)\s+(согласовани|утверждени|подписани|одобрени|выход)'
+      - 'adelanto|anticipo|pago (por )?adelantado|por adelantado|adiantamento|pagamento antecipado|(la )?mitad[^.\n]{0,30}antes|metade[^.\n]{0,30}antes|acompte|paiement (d''avance|anticip)|payer (d''avance|à l''avance)|anzahlung|vorauszahlung|vorkasse|im voraus (be)?zahl'
+      - '前払い|先払い|前金|手付金|先にお支払|半額を先|선금|선불|선결제|선입금|계약금|절반[^.\n]{0,15}먼저|预付|定金|订金|首付|先付'
+
+  - id: no-bank-transfer
+    title_zh: 不走银行转账，回复里不出现 bank
+    source: 谈判手册第零节第 2 条、第六节；SOP“只推荐走任务中心和 aff 付款”
+    action: revise
+    check: patterns
+    fix: >-
+      Do not offer or mention bank transfer, wire transfer, bank cards or bank accounts, and do not use the word
+      "bank" at all. All payments go through the LootBar Task Center; the balance can be withdrawn via Payoneer or
+      Airwallex.
+    patterns:
+      - '\bbank|\bwire\b|\biban\b|\bswift\b|\bpix\b|\bсбп\b|to your (debit |credit )?card|\b(visa|mastercard) card|банк|на карту|\bсбер|тинькофф|bancari[ao]|bancári[ao]|transferencia bancaria|virement( bancaire)?|überweisung|bankkonto|銀行|振込|은행|계좌|银行|银行卡'
+
+  - id: no-paypal-unasked
+    title_zh: 对方没问 PayPal 就别提
+    source: 谈判手册第零节第 2 条、第六节
+    action: revise
+    check: paypal_unasked
+    fix: >-
+      Remove PayPal: the KOL did not ask about it. Payment goes through the Task Center, with withdrawal via
+      Payoneer or Airwallex.
+
+  - id: no-asking-payment-method
+    title_zh: 不问对方想用什么方式收款，付款方式按 SOP 由我们说明
+    source: 主人 2026-10-16、2026-10-19 纠正；SOP 固薪部分“介绍付款”
+    action: revise
+    check: patterns
+    fix: >-
+      Do not ask the KOL how they would like to be paid. State the process instead: after publication they submit
+      the content link in the LootBar Task Center and the money goes to their LootBar balance, withdrawable via
+      Payoneer or Airwallex.
+    patterns:
+      - '\b(how|which way|what way)\b[^.?\n]{0,15}\b(would|do|will)\b[^.?\n]{0,10}\byou\b[^.?\n]{0,20}\b(like|prefer|want)\b[^.?\n]{0,10}\bto (get|be|receive)\b[^.?\n]{0,20}\b(paid|payment|payout|money|funds)'
+      - '\bhow do you (usually |normally )?(receive|get|take) (payments?|paid|money)|\bbest way to pay you\b|\bhow (should|can|could) we pay you\b'
+      - '\b(preferred|preference for)\b[^.?\n]{0,15}\b(payment|payout)\b'
+      - '\b(what|which)\b[^.?\n]{0,10}\b(payment|payout)\b[^.?\n]{0,10}\b(method|option|way|platform|service)s?\b[^.?\n]{0,30}\?'
+      - '(как|каким способом)[^.?\n]{0,25}удобн\w*[^.?\n]{0,25}(получ|прин|оплат)|удобн\w+ способ (оплаты|получения)|какой способ (оплаты|получения)|куда (вам )?(перевести|отправить (деньги|оплату))'
+      - '(cómo|como) (prefieres|quieres|te gustaría|preferís)[^.?\n]{0,25}(recibir|cobrar|que te paguemos)|método de pago (prefieres|preferido)|forma de pagamento (prefere|preferida)|como (você )?prefere receber'
+      - 'お支払い方法[^。\n]{0,10}(どちら|いかが|ご希望)|어떤 (방식|방법)으로[^.\n]{0,10}(정산|지급|받)|用什么方式收|怎么收款|收款方式'
+
+  - id: no-discount-code-promise
+    title_zh: 不许诺专属折扣码、具体折扣率，也不说链接自带折扣
+    source: 谈判手册第八节；主人 2026-10-21“别说观众折扣码”、2026-10-23“discount code 不留”
+    action: revise
+    check: patterns
+    negation_ok: true
+    fix: >-
+      Do not promise a discount code, promo code, coupon code, exclusive or personal discount, or a specific
+      discount rate, and do not say the link comes with a discount. If the KOL asked for a code, say we do not set
+      up long-term discount codes right now. What we can offer instead is free coupons for a giveaway for their
+      fans (only when the playbook allows it for this game).
+    patterns:
+      - '\b(discount|promo|promotional|coupon|voucher|referral|creator)[- ]?codes?\b|\bcode with your name\b|(?-i:\bcode [A-Z0-9]{4,}\b)'
+      - '\b(exclusive|special|personal|custom(i[sz]ed)?|dedicated|unique)\b[^.\n]{0,15}\b(discount|deal|code|coupon)s?\b'
+      - '\d{1,2}\s?%\s*(off|discount)\b|\bdiscount (of |up to )?\d{1,2}\s?%|\bsave (up to )?\d{1,2}\s?%'
+      - '\b(link|code)\b[^.\n]{0,40}\b(gives?|gets?|comes with|includes?|with an?)\b[^.\n]{0,25}\b(discount|% off)'
+      - 'промокод|код на скидку|(персональн|эксклюзивн|индивидуальн|специальн)\w*\s+скидк|скидк\w*\s+(для\s+(зрителей|подписчиков|аудитории|фанатов)|по\s+(промокоду|ссылке|коду))|скидк\w*\s+(в\s+|до\s+)?\d{1,2}\s?%|\d{1,2}\s?%\s+скидк'
+      - 'código (de descuento|de desconto|promocional|de promoción)|cup[oó]n de descuento|cupom de desconto|descuento (exclusivo|personal)|desconto exclusivo|\d{1,2}\s?% de (descuento|desconto)'
+      - 'code (promo|de réduction)|réduction exclusive|rabattcode|gutscheincode|割引コード|割引クーポン|クーポンコード|プロモコード|\d{1,2}\s?%\s?オフ|할인\s?코드|할인\s?쿠폰|쿠폰\s?코드|프로모\s?코드|\d{1,2}\s?%\s?할인|折扣码|优惠码|专属折扣|专属优惠'
+
+  - id: aff-signup-not-utm
+    title_zh: 链接让达人自己加入流量联盟生成，不拼 utm_source 链接，不发 SOP 示例链接
+    source: 谈判手册第一节“谈成后的落地”；SOP“确认意向后完成落地”；主人 2026-10-22 纠正
+    action: revise
+    check: patterns
+    fix: >-
+      Do not send a link we built (no utm_source or other tracking parameters, no example affiliate links). Ask the
+      KOL to join the affiliate program at https://lootbar.com/affiliate/guide, create their own Customized Link at
+      https://lootbar.com/account/affiliate/ (the handle cannot be changed after saving, so check the spelling), and
+      send the link back to us.
+    patterns:
+      - '[?&](utm_[a-z]+|aff_short|share_token|ref|source|src|aff)='
+      - 'lootbar\.(com|gg)/(a|s)/[A-Za-z0-9]{4,}'
+      - '\b(i''ll|i will|we''ll|we will|let me|i can|we can)\b[^.\n]{0,15}\b(create|generate|make|set up|prepare|build)\b[^.\n]{0,20}\b(your|a|the)\b[^.\n]{0,25}\blink\b'
+      - '\b(i''ll|i will|we''ll|we will)\b[^.\n]{0,10}\b(send|share|give)\b[^.\n]{0,15}\byour\b[^.\n]{0,20}\blink\b|\bhere(''s| is) your\b[^.\n]{0,25}\blink\b'
+      - '(сделаю|подготовлю|сгенерирую|создам|пришлю|отправлю|скину)[^.\n]{0,20}(вашу |вам |личную |персональную )?ссылк|вот ваша[^.\n]{0,20}ссылк|(te )?(preparo|creo|genero|envío|mando)[^.\n]{0,20}(tu |su )?enlace|(vou )?(criar|gerar|enviar)[^.\n]{0,15}(seu |o seu )?link|リンク[^。\n]{0,15}(作成して|お作りして|お送りします)|링크[^.\n]{0,15}(만들어 드|만들어서 보내|보내 드)|我来(帮你)?(生成|准备|做)[^。\n]{0,6}链接'
+
+  - id: handle-cannot-change-reminder
+    title_zh: 让达人配专属链接时，要提醒 handle 保存后不能改
+    source: 谈判手册第一节落地第 2 条；SOP“配置成功后无法修改”
+    action: revise
+    check: reminder
+    trigger: 'lootbar\.(com|gg)/account/affiliate|customi[sz]ed link|custom link'
+    reminder: '(can''t|cannot|can not|won''t be able to|isn''t possible to)\b[^.\n]{0,30}\b(chang|edit)|\bpermanent\b|\b(choose|pick)\b[^.\n]{0,20}\bcarefully\b|нельзя\s+(будет\s+)?(измен|поменять)|не получится (измен|поменять)|no se (puede|podrá) (cambiar|modificar)|não (pode|poderá) ser (alterad|mudad)|変更できません|変更不可|변경할 수 없|수정할 수 없|改不了|不能(再)?改'
+    fix: >-
+      Remind the KOL that the handle of the Customized Link cannot be changed once saved (it is also used for the
+      Shop link), so they should check the spelling before saving.
+
+  - id: no-uid-for-link
+    title_zh: 配链接这一步不找达人要 UID，只有 Task Center 付款或佣金有疑问时才要
+    source: 谈判手册第一节落地第 4 条；SOP 大马小组案例“不要过多提出疑问……索要用户的 LootBar UID”
+    action: revise
+    check: patterns
+    exempt: 'task center|payout|payment|paid|commission|order|ban|trouble|problem|issue|support|viewers?|their lootbar|выплат|оплат|комисси|заказ|бан|pago|comisión|pagamento|comissão|pedido|支払|정산|付款|佣金|订单|封号'
+    fix: >-
+      Do not ask for the KOL's LootBar UID to set up their link: they create the link themselves and send it back.
+      The UID is only needed for a Task Center payout or a question about commission.
+    patterns:
+      - '\b(send|share|provide|tell|give)\b[^.?\n]{0,40}\b(uid|user id|lootbar id)\b|\b(uid|user id)\b[^.?\n]{0,20}\?|(пришлите|отправьте|скиньте|укажите)[^.?\n]{0,30}\b(uid|айди)|(envía|manda|compárteme)[^.?\n]{0,30}\buid\b|\buid\b[^。\n]{0,10}(を教えて|をお送り|알려|보내)'
+
+  - id: task-center-not-for-joining
+    title_zh: Task Center 是发布后领钱的地方，不是加入流量联盟的入口
+    source: 谈判手册第一节落地第 5 条
+    action: revise
+    check: patterns
+    fix: >-
+      The Task Center is where the KOL collects payment after publishing. Joining the affiliate program happens at
+      https://lootbar.com/affiliate/guide. Do not tell them to join through the Task Center.
+    patterns:
+      - '\b(join|sign up|signup|register|enrol+)\b[^.\n]{0,50}\btask center\b'
+      - '\btask center\b[^.\n]{0,30}\bto (join|sign up|register)\b'
+      - '(вступ|зарегистр|присоедин)\w*[^.\n]{0,40}task center'
+
+  - id: trial-no-guarantee
+    title_zh: 两周试合作不能承诺之后一定给固定费
+    source: 谈判手册第一节第 2 条；SOP 固薪部分 2.2“两周试合作不代表一定能获得固薪”
+    action: revise
+    check: patterns
+    negation_ok: true
+    fix: >-
+      Do not promise that a trial leads to a fixed fee. Say that after the trial we review the real results and
+      then see whether a paid deal makes sense.
+    patterns:
+      - '\b(guarantee|promise|secure|lock in)\w*\b[^.\n]{0,40}\b(fixed|paid|flat|monthly)\b[ -]?(fee|rate|deal|payment|contract|integration|sponsorship)'
+      - '\bafter\b[^.\n]{0,25}\b(two|2)[- ]weeks?\b[^.\n]{0,40}\b(you''ll|you will|we will|we''ll)\b (get|receive|be paid|pay you|move you to|switch you to|offer you)\b[^.\n]{0,15}\b(a |the )?(fixed|flat|paid)'
+      - 'гарантир\w*[^.\n]{0,40}(фикс|оплат)|(после|через) (двух|2) недел\w*[^.\n]{0,40}(получите|переведём|переведем) на фикс'
+
+  - id: profit-share-cap
+    title_zh: 利润分成最高 50%，50% 以上不谈
+    source: 谈判手册第二节（SOP 的 80% 上限不再用）
+    action: revise
+    check: profit_share_cap
+    cap: 50
+    fix: >-
+      The profit share can be at most 50% of net profit. Lower the share to 50% or below; anything higher is not
+      offered.
+
+  - id: cps-opens-at-default
+    title_zh: 纯 CPS 先报默认档（新用户 GMV 5%、老用户 1%），对方嫌低才升级成纯利分成
+    source: 谈判手册第一节第 1 条、第二节；主人 2026-10-22
+    action: revise
+    check: cps_opens_at_default
+    fix: >-
+      This is the first commission offer and the KOL has not pushed back on any rate. Offer the affiliate program
+      default: 5% of the order value for new users and 1% for returning users. Do not offer a share of net profit
+      yet; keep it for when the KOL says the default is too low or mentions a higher rate elsewhere.
+
+  - id: no-order-level-visibility
+    title_zh: 不说后台能看到每笔订单、完整流水，只说能看到分成收益
+    source: 谈判手册第二节；主人 2026-10-22
+    action: revise
+    check: patterns
+    negation_ok: true
+    fix: >-
+      Do not say the KOL can see every order, each order's details or the full sales history in the dashboard. The
+      creator dashboard only shows their own commission earnings; say "you can see your earnings in the dashboard".
+    patterns:
+      - '\b(every|each|all)\b (single |of the |your |her |his |their )?(orders?|purchases?|sales?|transactions?)\b[^.\n]{0,60}\b(show|shows|shown|appear|appears|visible|listed|tracked)\b'
+      - '\b(see|view|track|check|monitor|lists?|shows?)\b[^.\n]{0,30}\b(every|each|all)\b (single |of the |your |her |his |their )?(orders?|purchases?|sales?|transactions?)\b'
+      - '\b(order|transaction)[- ](level|by[- ]order)\b|\bfull (order|sales|transaction) (history|details|breakdown|records?|list)'
+      - 'кажд\w+ (заказ|покупк|продаж)\w*[^.\n]{0,60}(видн|отобража|увид|видеть|в кабинете|в личном кабинете)|(видеть|увидите|отслеживать)[^.\n]{0,30}(кажд\w+|все) (заказ|покупк)|детализаци\w* (заказ|продаж)|истори\w* (заказов|продаж)'
+      - 'cada (pedido|compra|venta)[^.\n]{0,60}(ver|verás|aparece|panel|visible)|(ver|verás)[^.\n]{0,30}cada (pedido|compra|venta)|tod[oa]s (los|las|os|as) (pedidos|compras|ventas|vendas)|chaque (commande|achat)[^.\n]{0,60}(voir|visible|apparaît|tableau)'
+      - '(すべて|全て)の注文|注文(の)?(明細|履歴)|모든 주문|주문 내역|每笔订单|订单明细|完整流水|全部流水'
+
+  - id: no-sweetener-before-quote
+    title_zh: 对方还没报价时，不亮佣金、分成、Giveaway 这类加码（底牌留后手）
+    source: 主人 2026-10-22“我们手里要有底牌，牌不能一次性打光”
+    action: revise
+    check: sweetener_before_quote
+    fix: >-
+      The KOL has not quoted a price yet. Keep this round to asking for their rate, audience geography and format.
+      Remove any extra on top of the fee (affiliate commission, profit share, giveaway, coupons, codes); they are
+      kept for later in the negotiation.
+
+  - id: no-confirming-unapproved-amount
+    title_zh: 金额没经主人点头前不对达人确认，只说要和团队确认
+    source: 谈判手册第一节第 3 条“审批通过之前，任何金额都不能对达人确认”、第五节“不当场答应”
+    action: revise
+    check: confirm_amount
+    fix: >-
+      Do not accept or confirm this amount yet: it has not been approved. Thank the KOL for the number and say we
+      will confirm with the team and come back.
+
+  - id: no-extra-banner-promise
+    title_zh: 横幅在 brief 文末，指向 brief 即可，不答应另发横幅
+    source: 主人 2026-10-22 “brief 里有我们 banner”、2026-10-23 “banner 不是在 brief 里就有吗”
+    action: revise
+    check: patterns
+    exempt: '\b(brief|бриф)\b[^\n]{0,80}\b(end|bottom|last (page|section|part))\b|\b(brief|бриф)\b[^\n]{0,80}(конце|final|fim|末尾|最後|끝)'
+    fix: >-
+      Do not promise to send a banner or banner image separately or later. The banner is at the end of the game
+      brief: point the KOL to the "LootBar banner" part of the brief. If this game has no brief yet, write a
+      placeholder 【此处附 brief】 and say so in needs_approval_zh.
+    patterns:
+      - '\b(i''ll|i will|we''ll|we will|i can|we can|i''m going to|we''re going to|let me|will)\b[^.\n]{0,12}\b(also )?(send|share|provide|prepare|get|make|forward|email|drop)\b[^.\n]{0,30}\bbanners?\b'
+      - '\bbanners?\b[^.\n]{0,40}\b(will be sent|to follow|later|separately|before (we start|monday|the (first )?stream|launch|going live)|coming soon|on its way)\b'
+      - '\b(send|sending)\b (you |over )?(the |our |a |your )?(lootbar )?banner'
+      - '(пришл|отправ|скин|вышл)\w*[^.\n]{0,30}баннер|баннер\w*[^.\n]{0,30}(пришл|отправ|позже|отдельно|вышл)'
+      - '(mando|mandaré|envío|enviaré|enviaremos|enviar|envio|enviarei|vou te enviar|envoyer(ai|ons)?)[^.\n]{0,25}(banner|bannière)|バナー[^。\n]{0,15}(お送り|後ほど|別途)|배너[^.\n]{0,15}(보내|따로)|另发横幅|发(给你|你)?.{0,4}横幅|横幅.{0,6}(稍后|另发|晚点)'
+
+  - id: no-attachment-claims
+    title_zh: 文档一律发链接，草稿不写“见附件”
+    source: 谈判手册第九节
+    action: revise
+    check: patterns
+    negation_ok: true
+    # kol-mail drafts before any file is added, so this only stays off for a caller that knows files go along.
+    skip_with_outgoing_attachments: true
+    fix: >-
+      Nothing is attached to this reply. Do not write "attached", "see attachment" or similar. Send documents as
+      links; where no link exists, write a placeholder such as 【此处附 Task Center 打款教程】 and list it in
+      needs_approval_zh.
+    patterns:
+      - '\b(attached|attachments?|enclosed|i''ve attached|i have attached)\b'
+      - 'во вложении|прикрепляю|прикрепил|прилагаю|\bte adjunto\b|\badjunto (el|la|los|las)\b|adjuntamos|em anexo|segue (em )?anexo|ci-joint|pièce jointe|im anhang|angehängt|添付(いた|します|しました|の)|첨부(합니다|했습니다|드립니다|파일)|见附件|附件'
+
+  - id: no-unlisted-links
+    title_zh: 手册里没写、往来里也没出现过的链接不能自己编，用占位
+    source: 谈判手册第九节“手册里没写明的链接一律用占位”
+    action: revise
+    check: unlisted_links
+    # Links that may always be written: the site itself.
+    allow:
+      - '^https?://(www\.)?lootbar\.(com|gg)/?$'
+    fix: >-
+      Only use links that are in the playbook or already appeared in this conversation. Replace any other link with
+      a placeholder such as 【此处附 xxx 链接】 and list it in needs_approval_zh.
+
+  - id: no-official-authorization-claim
+    title_zh: 不声称有游戏官方授权或官方合作，也不提供“授权文件”
+    source: 谈判手册第七节；SOP 客诉部分
+    action: revise
+    check: patterns
+    negation_ok: true
+    fix: >-
+      LootBar is a third-party top-up platform without official authorization from the game companies. Do not claim
+      authorization, licensing, official partnership or endorsement, and do not offer any authorization document. It
+      is fine to say that for some games products come from the game companies' official resellers.
+    patterns:
+      - '\b(officially )?(authori[sz]ed|licensed|endorsed|approved) (by|partner|seller|reseller|retailer|store|platform)\b'
+      - '\bofficial(ly)?\b[\w\s-]{0,15}\b(partner(ed)?|authori[sz]ation|licen[cs]e[ds]?|store|platform)\b|\bauthori[sz]ation (certificate|document|letter|papers?)\b|\bpermission from (the )?(game|publisher|developer|studio)'
+      - '\b(partner(ed|s)?|affiliated|working directly) with (mihoyo|hoyoverse|tencent|the (game|developer|publisher|studio))\b'
+      - 'официальн\w+\s+(партн|магазин|лиценз|авторизац|платформ)|авторизован|лицензирован|разрешени\w+ от (разработчик|издател)|socios? oficial|parceir\w+ oficia|revendedor autorizado|distribuidor autorizado|plataforma oficial|partenaire officiel|plateforme officielle|offizieller partner|公式パートナー|公式ライセンス|正規(販売|代理)|공식 파트너|정식 (인증|판매)|官方授权|官方合作|官方认证|授权文件|授权书'
+
+  - id: no-ban-guarantee
+    title_zh: 只说正常购买一般不会导致封号，不打包票说绝不封号
+    source: 谈判手册第七节“一般不会导致封号”、第十一节“不确定的事不承诺”
+    action: revise
+    check: patterns
+    negation_ok: false
+    unless_owner: '不会封号|绝不封号|保证不封'
+    fix: >-
+      Do not guarantee that accounts will never be banned. Say that normal purchases follow a strict safety process
+      and generally do not lead to bans, and offer to have support look into any case (ask for the LootBar UID).
+    patterns:
+      - '\b(never|won''t ever|will never|zero chance|no chance|no risk)\b[^.\n]{0,25}\b(get |be )?(banned|ban)\b|\bguarantee\w*\b[^.\n]{0,30}\b(no|never|not)\b[^.\n]{0,10}\bban'
+      - 'никогда не (забан|заблокир)|гарантир\w*[^.\n]{0,30}(не будет бан|без бан|не забан)|nunca (serás|será|te) (baneado|banead)|nunca (será|vai ser) banid|絶対に(BAN|バン)され|절대 (밴|정지)|绝对不会封号|保证不封号'
+
+  - id: withdrawal-fees-truthful
+    title_zh: 提现手续费由达人自己承担，不说免手续费
+    source: 谈判手册第六节；SOP Task Center“余额提现需达人自己承担手续费”
+    action: revise
+    check: patterns
+    near: '\b(withdraw\w*|payouts?|cash(ing)? out)\b|вывод|retir|saque|retrait|auszahl|出金|출금|提现'
+    fix: >-
+      Withdrawal fees from the LootBar balance are paid by the KOL. Do not say payment or withdrawal is free of fees.
+    patterns:
+      - '\b(free of|without|no|zero) (any )?(fees?|charges?|commission)\b|\bfee[- ]free\b|\b(completely|totally|100%) free\b'
+      - 'без\s+комисси|sin comisi|sem taxa|sans frais|gebührenfrei|ohne gebühr|手数料(無料|なし)|수수료 없|免手续费|无手续费|零手续费'
+
+  - id: no-country-value-judgment
+    title_zh: 砍价时不说“某国观众不值这个价”，说参考了过往同类创作者的合作数据
+    source: 谈判手册第五节；SOP 固薪部分“砍价后别提到是某国家观众”
+    action: revise
+    check: patterns
+    fix: >-
+      Do not tie the price to the country of the KOL's audience. Explain that the offer is based on results from
+      previous partnerships with similar creators, and that it can be reviewed next month if the results are good.
+    patterns:
+      - '\b(audience|viewers|views|traffic|followers)\b[^.\n]{0,15}\b(from|in|based in)\b [A-Z][\w-]+[^.\n]{0,50}\b(isn''t|aren''t|not|less|lower|cheaper|don''t|doesn''t)\b[^.\n]{0,15}\b(worth|valuable|value|convert|pay|spend)'
+      - '\bbecause\b[^.\n]{0,20}\b(your|the|her|his|their) (audience|viewers)\b[^.\n]{0,20}\b(is|are) (mostly |mainly |largely )?(from|in|based in)\b'
+      - '(аудитори|зрител|подписчик)\w*\s+(из|в)\s+\w+[^.\n]{0,50}(не\s+стоит|дешевле|меньше\s+стоит|не\s+платят|не\s+конверт)'
+
+  - id: no-internal-terms
+    title_zh: 不向达人透露 CPM、预算线、审批线这类内部口径
+    source: 谈判手册（内部，不对外引用）；replyflow 起草规则
+    action: revise
+    check: patterns
+    fix: >-
+      Do not mention CPM, internal budget lines, approval limits or the playbook. If a reason for the price is
+      needed, say it is based on past campaigns with similar creators.
+    patterns:
+      - '\bCPM\b|\bСРМ\b|cost per (thousand|mille)|\bplaybook\b|\b(budget|approval) (cap|limit|threshold|line)\b|内部(预算|审批)|审批线'
+
+  - id: no-giveaway-for-excluded-games
+    title_zh: 米哈游游戏和官充游戏不做 Giveaway
+    source: 谈判手册第十节；SOP Giveaway“目前不支持 giveaway”名单
+    action: revise
+    check: giveaway_games
+    games: 'genshin|原神|геншин|honkai|star rail|\bhsr\b|星穹铁道|崩坏|хонкай|zenless|\bzzz\b|绝区零|marvel rivals|漫威争锋|eggy party|蛋仔|where winds meet|燕云|racing master|blood strike'
+    fix: >-
+      Giveaways are not available for this game (miHoYo games and official top-up games). Remove the giveaway or
+      coupon offer.
+
+  - id: no-reasking-received-data
+    title_zh: 对方发过的截图和数据不再找他要
+    source: 谈判手册第十一节；主人 2026-10-22“这是对对方极大的不尊重”
+    action: revise
+    check: reasking_received
+    patterns:
+      - '\b(send|share|provide|forward|attach|need|could you|can you|would you)\b[^.?\n]{0,60}\b(screenshots?|analytics|demographics?|audience (data|distribution|breakdown|geograph\w*|stats)|statistics|stats|insights)\b'
+      - 'скриншот|статистик\w*\s+(канала|аудитории)|географи\w+\s+аудитори|captura de pantalla|estadísticas|capture d''écran|スクリーンショット|스크린샷|截图'
+    fix: >-
+      The KOL already sent screenshots or data in this conversation. Do not ask for them again; use what they sent.
+      If something they sent could not be read, leave the request out (the owner is told separately).
+
+  - id: owner-wording-kept
+    title_zh: 主人给的卖点和说法照原话写进去，不删不弱化
+    source: 主人 2026-10-23“我说的你就照做”
+    action: revise
+    check: owner_wording
+    # A Chinese clause of the owner's notes counts as a claim when it holds one of these markers, a number or a
+    # Latin word; it is covered when this share of its two-character pieces shows up in the Chinese back-translation.
+    markers: '最|绝对|任何|确保|保证|100%|高达|远高于|高于|同行|别家|独特|唯一|独家|领先|第一|全网|没有之一|只有我们'
+    # Clauses that tell the AI what to do (remove this, ask that, why is this here) are never claims to keep.
+    instruction: '^(帮我|帮忙|问问|问他|问下|告诉他|跟他说|和他说|回复|回他|起草|就这么|你|请你|记得|顺便|把)|忽悠|去掉|拿掉|删|不提|不写|不用|不要|别(写|提|说|发|给|问|加|用|再)|改成|改为|写上|加上|换成|为什么|吗|呢|？|\?|语气|太长|太短|翻译'
+    min_coverage: 0.2
+    number_tolerance: 0.1
+    fix: >-
+      Keep every selling point and claim from OWNER_NOTES / OWNER_FEEDBACK in the reply, translated faithfully, with
+      the same strength. Do not drop, soften or hedge them, and keep their numbers.
+
+  - id: amounts-listed-for-owner
+    title_zh: 草稿里的金额要列进要主人确认的事项（审批前只能当提议）
+    source: 谈判手册第一节第 3 条、第五节
+    action: review
+    check: amounts_listed
+
+  - id: coupon-count-listed-for-owner
+    title_zh: 草稿里写了给几张券，张数要列进要主人确认的事项
+    source: 谈判手册第八节
+    action: review
+    check: coupon_count_listed
+    patterns:
+      - '\b(\d+|one|two|three|four|five|ten)\b[^.\n]{0,20}\b(free )?(coupons?|monthly cards?|month(ly)? pass(es)?)\b|\d+\s*(купон|месячн\w+ карт)|\d+\s*(cupones|cupons)|\d+\s*张(券|月卡)'
+
+  - id: guarantee-terms-for-owner
+    title_zh: 写到保底分佣时，保底金额、CPM 和要求的播放量要由主人定
+    source: 谈判手册第二节“保底必须换保播放量交付……这三个数列进要主人确认的事项”
+    action: review
+    check: patterns
+    patterns:
+      - '\bguarantee(d)? (minimum|earnings|commission|payout)|\bminimum guarantee|\bguaranteed (amount|income)|гарантированн\w+ (минимум|выплат|доход)|mínimo garantizado|ganho mínimo garantido|最低保証|최소 보장|保底'
+
+  - id: no-casual-congrats-on-life-change
+    title_zh: 达人说辞职、转全职、休息时别随手恭喜，可能背后有难处
+    source: 主人 2026-10-22“别恭喜……没事别下头”
+    action: review
+    check: patterns
+    kol_mentions: '\b(quit|resign\w*|full[- ]time|left my job|leaving my job|taking a break|hiatus|family (emergency|reasons))\b|уволил|ухожу с работы|на полную ставку|перерыв|renunci|tiempo completo|demiti|tempo integral|退職|휴식|그만두'
+    patterns:
+      - '\bcongrat\w*|поздравля|felicidades|felicita|parabéns|félicitations|おめでとう|축하|恭喜'

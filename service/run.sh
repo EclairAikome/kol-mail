@@ -27,4 +27,20 @@ if /usr/sbin/lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     exit 0
 fi
 echo "[$(stamp)] starting kol-mail on 127.0.0.1:$PORT" >> "$LOG"
-exec "$PY" -I -X utf8 app.py >> "$LOG" 2>&1
+# not exec: the exit code is needed below. launchd stops the agent with SIGTERM to this shell, so pass it on and
+# let the app shut down cleanly
+"$PY" -I -X utf8 app.py >> "$LOG" 2>&1 &
+APP_PID=$!
+trap 'kill -TERM "$APP_PID" 2>/dev/null' TERM INT HUP
+code=0
+wait "$APP_PID" || code=$?
+if kill -0 "$APP_PID" 2>/dev/null; then  # wait was cut short by the signal: wait for the app itself
+    code=0; wait "$APP_PID" || code=$?
+fi
+# an error exit (a restart for an update exits with 0) goes to the maintainer's POPO group, with the log's end;
+# not a stop (SIGHUP, SIGINT, SIGKILL, SIGTERM: launchctl, a reinstall, a logout)
+if [ "$code" -ne 0 ] && [ "$code" -ne 129 ] && [ "$code" -ne 130 ] && [ "$code" -ne 137 ] && [ "$code" -ne 143 ]; then
+    echo "[$(stamp)] exited with code $code" >> "$LOG"
+    "$PY" -I -X utf8 autoreport.py exited "$code" "$LOG" >> "$LOG" 2>&1
+fi
+exit "$code"

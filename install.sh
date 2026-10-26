@@ -53,9 +53,36 @@ LOG="$DIR/server.log"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 GUI="gui/$(id -u)"
 
-say() { printf '\033[36m%s\033[0m\n' "$*"; }
-warn() { printf '\033[33m%s\033[0m\n' "$*"; }
-die() { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
+STEP=""; RECENT=""; LAST_ERR=""; ERR_LINE=""; ERR_CMD=""
+note() { RECENT="$(printf '%s\n%s' "$RECENT" "$*" | tail -n 30)"; }
+say() { printf '\033[36m%s\033[0m\n' "$*"; note "$*"; case "$*" in "["[0-9]"/8]"*) STEP="${*%%]*}]" ;; esac; }
+warn() { printf '\033[33m%s\033[0m\n' "$*"; note "$*"; }
+die() { printf '\033[31m%s\033[0m\n' "$*" >&2; LAST_ERR="$*"; exit 1; }
+
+# 出了问题自动发到维护者的 POPO 反馈群（和页面上“反馈”按钮同一个机器人，消息里必须有 KOL Mail 这个关键词）：
+# 安装失败，以及装完了但 AI、邮箱用不了。地址来自 --feedback，重装时也读旧设置里的。发不出去不影响安装。
+report_problem() {  # report_problem "哪里" "错误"
+    local url="$FEEDBACK" py="" text body version="${TAG:-?}" err="$2"
+    [ "${#err}" -gt 1500 ] && err="${err:0:1500}…"  # pip or a mail test can say a lot; the robot cuts long messages
+    [ -z "$url" ] && [ -x "${PY:-}" ] && [ -f "${SETTINGS:-}" ] && url="$(old feedback.popo_webhook 2>/dev/null || true)"
+    case "$url" in https://*|http://127.0.0.1:*) ;; *) return 0 ;; esac  # loopback: the tests' stand-in
+    [ -n "${SRC:-}" ] && [ -f "$SRC/VERSION" ] && version="$(cat "$SRC/VERSION")"
+    text="$(printf '【KOL Mail 自动报错 · %s】\n错误：%s\n卡在：%s\n环境：macOS %s (%s) · Python %s · AI %s · 邮箱 %s · %s\n最近输出：\n%s\n\n(版本 %s)' \
+        "$1" "$err" "${STEP:-开始之前}" "$(sw_vers -productVersion 2>/dev/null)" "$(uname -m)" \
+        "$("${BASEPY:-false}" -c 'import platform; print(platform.python_version())' 2>/dev/null || echo 没找到)" \
+        "${BACKEND:-还没选}" "${EMAIL:-还没填}" "$(id -un)" "$RECENT" "$version")"
+    if [ -x "${PY:-}" ]; then py="$PY"; elif [ -x "${BASEPY:-}" ]; then py="$BASEPY"; fi
+    if [ -n "$py" ]; then
+        # bytes in, ASCII out: no locale (LANG unset, C) can garble the Chinese on the way
+        body="$(printf '%s' "$text" | "$py" -I -c 'import json, sys
+print(json.dumps({"message": sys.stdin.buffer.read().decode("utf-8", "replace")}))')" || body=""
+    else  # no Python yet: escape by hand
+        body="{\"message\": \"$(printf '%s' "$text" | LC_ALL=C sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g' -e 's/\r//g' |
+            awk 'BEGIN { ORS = "\\n" } { print }')\"}"
+    fi
+    printf '%s' "$body" | curl -sS -m 15 -o /dev/null -H "Content-Type: application/json; charset=utf-8" \
+        --data-binary @- "$url" >/dev/null 2>&1 || true
+}
 # ask "问题" "默认值"：结果在 $REPLY。用 /dev/tty 读，所以“curl | bash”的写法也能问。
 ask() {
     local hint=""
@@ -75,6 +102,11 @@ mkdir -p "$DIR"
 STAGING="$(mktemp -d)"
 WAS_LOADED=0; DONE=0
 on_exit() {
+    local code=$?
+    # 安装失败（不是同事自己按 Ctrl+C、关掉终端窗口）：发给维护者（先发，下载下来的源码里有版本号）
+    if [ "$code" -ne 0 ] && [ "$code" -ne 129 ] && [ "$code" -ne 130 ] && [ "$code" -ne 143 ]; then
+        report_problem "安装失败 Mac" "${LAST_ERR:-脚本出错退出（第 $ERR_LINE 行：$ERR_CMD，退出码 $code）}" || true
+    fi
     rm -rf "$STAGING"
     # 中途失败时把原来在跑的服务拉回来，不让同事的后台一直停着
     if [ "$DONE" != 1 ] && [ "$WAS_LOADED" = 1 ] && [ -f "$PLIST" ]; then
@@ -83,6 +115,8 @@ on_exit() {
     fi
 }
 trap on_exit EXIT
+set -E  # the ERR trap below also inside functions
+trap 'ERR_LINE=$LINENO; ERR_CMD=$BASH_COMMAND' ERR
 
 # ---------------------------------------------------------------- 1. Python
 say "[1/8] 检查 Python…"
@@ -232,8 +266,9 @@ else
         fi
     fi
     # 连接测试。密码输错了可以当场重输（重跑安装命令时也会再测一次）
+    MAIL_OK=0
     for try in 1 2 3; do
-        if TEST_OUT="$("$MCP" account test "$ACCOUNT" 2>&1)"; then say "  邮箱连接正常"; break; fi
+        if TEST_OUT="$("$MCP" account test "$ACCOUNT" 2>&1)"; then say "  邮箱连接正常"; MAIL_OK=1; break; fi
         warn "  邮箱连接测试没通过：$TEST_OUT"
         [ "$YES" = 1 ] && break
         ask "要重新输入邮箱密码吗？输入 y 重输，直接回车跳过" ""
@@ -242,6 +277,7 @@ else
         "$MCP" account set-secret "$ACCOUNT" incoming < /dev/tty || warn "  收信密码没改成"
         "$MCP" account set-secret "$ACCOUNT" outgoing < /dev/tty || warn "  发信密码没改成"
     done
+    [ "$MAIL_OK" = 1 ] || report_problem "安装：邮箱没连通" "${TEST_OUT:-邮箱连接测试没通过}"
 fi
 # 回信、附件、移动邮件要用到的权限
 POLICY="$("$MCP" config policy 2>&1 || true)"
@@ -278,12 +314,16 @@ while [ "$BACKEND" != "codemaker" ] && [ "$BACKEND" != "claude" ]; do
     BACKEND="$(printf '%s' "$REPLY" | tr '[:upper:]' '[:lower:]')"
     [ "$YES" = 1 ] && [ "$BACKEND" != "codemaker" ] && [ "$BACKEND" != "claude" ] && die "--backend 只能是 codemaker 或 claude"
 done
+AI_PROBLEM=""
 if [ "$BACKEND" = "codemaker" ]; then
-    if [ -z "$CM" ]; then warn "  没找到 CodeMaker 命令行。请先按公司指引安装 CodeMaker CLI，装好后重新运行本脚本，KOL Mail 才能用上它。"
-    elif ! "$CM" quota >/dev/null 2>&1; then warn "  CodeMaker 还没登录：请在新的终端窗口运行 codemaker auth login，登录后 KOL Mail 就能用。"; fi
-elif [ -z "$CLAUDE" ]; then
+    if [ -z "$CM" ]; then AI_PROBLEM="没找到 CodeMaker 命令行"
+        warn "  没找到 CodeMaker 命令行。请先按公司指引安装 CodeMaker CLI，装好后重新运行本脚本，KOL Mail 才能用上它。"
+    elif ! QUOTA_OUT="$("$CM" quota 2>&1)"; then AI_PROBLEM="CodeMaker quota 失败（多半没登录）：$(printf '%s' "$QUOTA_OUT" | tail -n 3)"
+        warn "  CodeMaker 还没登录：请在新的终端窗口运行 codemaker auth login，登录后 KOL Mail 就能用。"; fi
+elif [ -z "$CLAUDE" ]; then AI_PROBLEM="没找到 Claude Code 命令行"
     warn "  没找到 Claude Code 命令行（claude）。装好并登录一次后，重新运行本脚本。"
 fi
+[ -z "$AI_PROBLEM" ] || report_problem "安装：AI 用不了" "$AI_PROBLEM"
 
 # ---------------------------------------------------------------- 6. 你的设置（只写安装器负责的键，其余保持原样）
 say "[6/8] 写设置…"

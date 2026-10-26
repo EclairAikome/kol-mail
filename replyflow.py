@@ -133,7 +133,11 @@ OWNER_NOTES says how to answer). If PREVIOUS_DRAFT and
 OWNER_FEEDBACK are present, rewrite PREVIOUS_DRAFT so that it does what OWNER_FEEDBACK asks, changing nothing else
 that the feedback does not touch. If MODE is translate, OWNER_NOTES is {owner}'s finished reply written in Chinese:
 translate it faithfully into the KOL's language with a natural tone, add no new offers, and use notes_zh to point out
-any conflict with the playbook.
+any conflict with the playbook. If MODE is comply, PREVIOUS_DRAFT broke the hard rules listed in COMPLIANCE_FEEDBACK
+(found by an automatic check, not by {owner}): rewrite PREVIOUS_DRAFT so that it breaks none of them, change nothing
+else, and keep everything OWNER_NOTES and OWNER_FEEDBACK asked for; notes_zh says in Chinese what was changed. If
+MODE is comply translate, PREVIOUS_DRAFT is the translation of {owner}'s finished Chinese reply in OWNER_NOTES: stay
+a faithful translation of it everywhere except where a listed rule has to be fixed.
 
 Output rules:
 - reply_language: the language of the KOL's latest email, in English (e.g. Spanish).

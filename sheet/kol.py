@@ -872,7 +872,7 @@ def file_lock(path: Path, wait: float, what: str):
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             break
         except OSError:
-            if time.monotonic() > deadline:
+            if time.monotonic() >= deadline:
                 f.close()
                 raise Unavailable(what)
             time.sleep(0.3)
@@ -996,7 +996,8 @@ def _run(ops: list[dict], source: str) -> dict:
                         reason = "Excel 在写入途中被关掉了"
                     else:
                         raise
-                if time.monotonic() > deadline:
+                # >=: before 3.13 Windows' clock ticks every 15.6 ms, so with no wait at all ">" would retry anyway
+                if time.monotonic() >= deadline:
                     break
                 time.sleep(2)
     except Unavailable as e:

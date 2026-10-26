@@ -43,6 +43,7 @@ from starlette.staticfiles import StaticFiles
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # python -I leaves the script's folder off sys.path
 import config  # noqa: E402
+import autoreport  # noqa: E402
 import accounts  # noqa: E402
 import autoreply  # noqa: E402
 import petfeed  # noqa: E402
@@ -54,6 +55,7 @@ import feedback  # noqa: E402
 import updater  # noqa: E402
 import outgoing  # noqa: E402
 import replyflow  # noqa: E402
+import compliance  # noqa: E402
 import onboarding  # noqa: E402
 from sheet import popogrid  # noqa: E402  (a POPO 在线表格 as the KOL sheet)
 from sheet import googlegrid  # noqa: E402  (a colleague's own Google 表格 as the KOL sheet)
@@ -145,6 +147,11 @@ TG_SERVICE_CHATS = {777000, 42777}  # Telegram's own notification accounts
 TG_HISTORY = 50  # messages of a chat read for an off-hours case (the AI draft sees all of them)
 AI = llm.Settings(backend=CFG["llm"]["backend"], models=CFG["llm"]["models"], claude_bin=CFG["llm"]["claude_bin"],
                   codemaker_bin=CFG["llm"]["codemaker_bin"], workdir=CLAUDE_CWD)
+# errors on this machine go to the maintainer's POPO group on their own (off in a dev copy or without a webhook)
+autoreport.configure(CFG["feedback"].get("popo_webhook") or "", config.version(), DATA / "autoreport.json",
+                     body_key=CFG["feedback"].get("body_key") or "message",
+                     who=f'{IDENTITY.get("name") or "?"} <{CFG["mail"].get("address") or "还没登录邮箱"}>',
+                     context=lambda: [f"AI {AI.label()} {AI.binary() or '（没找到命令行）'}"])
 ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 ALLOWED_ORIGINS = {f"http://{h}" for h in ALLOWED_HOSTS}
 BOUNCE_ADDRESS_MARKERS = ("amazonses.com", "mailer-daemon", "postmaster")
@@ -179,6 +186,7 @@ def strip_hidden(text: str) -> str:
 
 def log(*args):
     print(time.strftime("%H:%M:%S"), *args, flush=True)
+    autoreport.note_log(" ".join([time.strftime("%H:%M:%S"), *map(str, args)]))  # the last lines go with a report
 
 
 def err_text(e: BaseException) -> str:
@@ -773,6 +781,7 @@ def spawn(coro, what: str):
             raise
         except Exception as e:
             log(what, "failed:", err_text(e))
+            autoreport.report(f"后台任务 {what}", err_text(e), exc=e)
     task = asyncio.create_task(run())
     background.add(task)
     task.add_done_callback(background.discard)
@@ -2031,14 +2040,15 @@ async def push_strategies(case_id: int, reply_to: int | None = None):
 async def draft_case(case: dict, *, strategy: dict | None = None, chosen: int | None = None, notes: str = "",
                      previous: str = "", feedback: str = "", reply_to: int | None = None):
     ctx = await case_context(case)
-    draft = await write_draft(ctx, strategy=strategy, notes=notes, previous=previous, feedback=feedback)
+    draft, pairs = await checked_draft(ctx, strategy=strategy, notes=notes, previous=previous, feedback=feedback)
     await store_and_push_draft(case, draft["reply_body"], draft.get("notes_zh", ""), draft.get("needs_approval_zh", ""),
-                               draft.get("warnings", []), draft.get("reply_language", ""), chosen, reply_to)
+                               draft.get("warnings", []), draft.get("reply_language", ""), chosen, reply_to, pairs)
 
 
 async def store_and_push_draft(case: dict, body: str, notes: str, approval: str, warnings: list[str], language: str,
-                               chosen: int | None, reply_to: int | None):
-    pairs = await side_by_side(body)
+                               chosen: int | None, reply_to: int | None, pairs: dict | None = None):
+    """pairs: the side-by-side already made for exactly this body (enforce_rules makes one)."""
+    pairs = pairs or await side_by_side(body)
     fields = {"body": body, "pairs_ok": int(pairs["ok"]), "zh": "\n\n".join(r["zh"] for r in pairs["rows"]),
               "language": language or case.get("language") or ""}
     if chosen is not None:
@@ -2288,7 +2298,12 @@ async def on_owner_text(m: dict):
         await tell_owner(f"收到，#{case['id']} 处理中…", case_id=case["id"], reply_to=m.get("message_id"))
         if text in ("重新对照", "对照"):
             if case["body"]:
-                await store_and_push_draft(case, case["body"], "重新生成了中文对照", "", [], "", None, m.get("message_id"))
+                # The rules are checked again (no rewrite): a flagged draft never comes back looking clean.
+                draft, pairs = await enforce_rules(await case_context(case), {
+                    "reply_body": case["body"], "notes_zh": "重新生成了中文对照", "needs_approval_zh": "", "warnings": []},
+                    rewrites=0)
+                await store_and_push_draft(case, case["body"], draft["notes_zh"], draft["needs_approval_zh"],
+                                           draft["warnings"], "", None, m.get("message_id"), pairs)
             return
         if status == "strategies" or not case["body"]:
             await draft_case(case, notes=text, reply_to=m.get("message_id"))
@@ -2299,8 +2314,9 @@ async def on_owner_text(m: dict):
         if result["answer_zh"]:
             await tell_owner(result["answer_zh"], case_id=case["id"], reply_to=m.get("message_id"))
         if result["reply_body"]:
-            await store_and_push_draft(case, result["reply_body"], "按你的意见改了", result["needs_approval_zh"],
-                                       result["warnings"], "", None, m.get("message_id"))
+            draft, pairs = await enforce_rules(ctx, {**result, "notes_zh": "按你的意见改了"}, feedback=text)
+            await store_and_push_draft(case, draft["reply_body"], draft["notes_zh"], draft["needs_approval_zh"],
+                                       draft["warnings"], "", None, m.get("message_id"), pairs)
 
 
 async def handle_update(bot: mobile.Bot, u: dict):
@@ -2553,6 +2569,25 @@ async def api_feedback(request: Request):
     feedback_limit.record()
     log("feedback sent", kind, len(text))
     return JSONResponse({"ok": True})
+
+
+# ---------------------------------------------------------------- automatic error reports (autoreport.py)
+
+ERROR_FIELDS = {"claude_error": "AI", "scan_error": "收信检查", "notify_error": "桌面通知", "sheet_error": "KOL 总表",
+                "autoreply_error": "自动回复设置", "telegram_error": "Telegram", "mobile_error": "手机审稿",
+                "mail_error": "邮箱连接", "update_error": "自动更新"}
+
+
+async def autoreport_loop():
+    """What the status bar shows as an error goes to the maintainer's POPO group too, once per new error."""
+    watcher = autoreport.StateWatcher(ERROR_FIELDS)
+    while True:
+        await asyncio.sleep(60)
+        try:
+            watcher.check({**state, "mail_error": getattr(mail, "error", None) or getattr(bg, "error", None),
+                           "update_error": UPDATE.status.get("error")})
+        except Exception as e:  # noqa: BLE001  the watcher must never stop the app
+            log("autoreport check failed:", err_text(e))
 
 
 # ---------------------------------------------------------------- first use: signature and own negotiation style
@@ -5121,17 +5156,23 @@ def clean_reply(text: str, channel: str) -> tuple[str, list[str]]:
 
 
 async def write_draft(ctx: dict, *, mode: str = "draft", strategy: dict | None = None, notes: str = "",
-                      previous: str = "", feedback: str = "") -> dict:
+                      previous: str = "", feedback: str = "", broken: str = "") -> dict:
+    """broken: the rules PREVIOUS_DRAFT broke (compliance.revision_brief); the draft is then rewritten in MODE comply."""
     boundary = secrets.token_hex(8)
     channel = ctx.get("channel", "email")
     system = replyflow.draft_system(**prompt_args(boundary), signature=SIGNATURE, channel=channel)
-    parts = [f"MODE: {mode}", *replyflow.context_sections(boundary, ctx)]
+    parts = [f"MODE: {('comply translate' if mode == 'translate' else 'comply') if broken else mode}",
+             *replyflow.context_sections(boundary, ctx)]
     if strategy:
         parts.append(section(boundary, "CHOSEN_STRATEGY", replyflow.strategy_text(strategy)))
     if notes:
         parts.append(section(boundary, "OWNER_NOTES", notes))
+    if previous and (feedback or broken):
+        parts.append(section(boundary, "PREVIOUS_DRAFT", previous))
     if previous and feedback:
-        parts += [section(boundary, "PREVIOUS_DRAFT", previous), section(boundary, "OWNER_FEEDBACK", feedback)]
+        parts.append(section(boundary, "OWNER_FEEDBACK", feedback))
+    if previous and broken:
+        parts.append(section(boundary, "COMPLIANCE_FEEDBACK", broken))
     result = await run_claude(system, "\n\n".join(parts), replyflow.DRAFT_SCHEMA, DRAFT_MODEL, timeout=300)
     reply, warnings = clean_reply(result["reply_body"], channel)
     return {"reply_language": result.get("reply_language", ""), "reply_body": reply,
@@ -5195,6 +5236,76 @@ async def side_by_side(text: str) -> dict:
             "error": "" if not bad_rows else f"有 {len(bad_rows)} 段没能生成可信的中文对照，请点“重新对照”再试"}
 
 
+async def checked_draft(ctx: dict, *, mode: str = "draft", strategy: dict | None = None, notes: str = "",
+                        previous: str = "", feedback: str = "") -> tuple[dict, dict]:
+    """write_draft held to the hard rules (enforce_rules): the draft and its Chinese side-by-side."""
+    draft = await write_draft(ctx, mode=mode, strategy=strategy, notes=notes, previous=previous, feedback=feedback)
+    return await enforce_rules(ctx, draft, mode=mode, strategy=strategy, notes=notes, feedback=feedback)
+
+
+def unchecked(draft: dict, why: str) -> dict:
+    return {**draft, "warnings": [*draft.get("warnings", []), f"⚠️ 这版没做合规检查：{why}"],
+            "compliance": {"checked": False, "ok": False, "revisions": 0, "fixed": [], "broken": []}}
+
+
+async def enforce_rules(ctx: dict, draft: dict, *, mode: str = "draft", strategy: dict | None = None, notes: str = "",
+                        feedback: str = "", rewrites: int | None = None) -> tuple[dict, dict]:
+    """The draft and its side-by-side, checked against rules/negotiation_rules.yaml (compliance.py). A draft that
+    breaks a rule is rewritten with the broken rules as the brief, at most max_revisions times (rewrites=0: check
+    only); whatever is still broken then is flagged to the owner in warnings and draft["compliance"]. Rules no
+    rewrite can settle (amounts the owner must approve) go into needs_approval_zh. The owner's notes and feedback
+    are kept in every rewrite. Nothing about the check (a broken rule file, a failed rewrite) ever loses the draft."""
+    pairs = await side_by_side(draft["reply_body"])
+    try:
+        rules = compliance.load()
+        playbook = read_file(PLAYBOOK, "谈判手册")
+    except (compliance.RulesError, OSError) as e:
+        log("compliance check skipped", err_text(e))
+        return unchecked(draft, err_text(e)), pairs
+    owner = [t for t in (notes, feedback) if t]
+    limit = rules.max_revisions if rewrites is None else rewrites
+    notes_zh, warnings = draft.get("notes_zh", ""), list(draft.get("warnings", []))
+    fixed: list[str] = []
+    revisions = 0
+    while True:
+        try:
+            found = compliance.check(draft["reply_body"], compliance.context_for(
+                ctx, signature=SIGNATURE, playbook=playbook, owner_texts=owner,
+                zh="\n\n".join(r["zh"] for r in pairs["rows"] if not r.get("failed")),
+                needs_approval=draft.get("needs_approval_zh", "")), rules)
+        except Exception as e:  # noqa: BLE001  a rule that trips over this text never stops the draft
+            log("compliance check failed", err_text(e))
+            return unchecked({**draft, "notes_zh": notes_zh, "warnings": warnings}, f"检查出错：{err_text(e)}"), pairs
+        broken = [v for v in found if v.action == "revise"]
+        if not broken or revisions >= limit:
+            break
+        log("draft breaks rules, rewriting", revisions + 1, ",".join(v.rule for v in broken))
+        try:
+            rewritten = await write_draft(ctx, mode=mode, strategy=strategy, notes=notes, feedback=feedback,
+                                          previous=draft["reply_body"], broken=compliance.revision_brief(broken))
+            rewritten_pairs = await side_by_side(rewritten["reply_body"])
+        except ClaudeError as e:
+            log("compliance rewrite failed", err_text(e))
+            warnings.append(f"合规自动改写失败（{err_text(e)}），下面是改写前的版本")
+            break
+        revisions += 1
+        fixed += [v.title_zh for v in broken if v.title_zh not in fixed]
+        draft, pairs = rewritten, rewritten_pairs
+        warnings += [w for w in draft.get("warnings", []) if w not in warnings]
+    still = {v.title_zh for v in broken}
+    done = [t for t in fixed if t not in still]
+    if done:
+        warnings.append(f"合规检查自动改写了 {revisions} 次，已改掉：{'；'.join(done)}")
+    if broken:
+        warnings.append(f"⚠️ 合规检查没通过（自动改写 {revisions} 次后仍违反），请人工改过再发：{compliance.summary_zh(broken)}")
+    return {**draft, "notes_zh": notes_zh, "warnings": warnings,
+            "needs_approval_zh": materials.merge_approval(draft.get("needs_approval_zh", ""),
+                                                          compliance.review_notes(found)),
+            "compliance": {"checked": True, "ok": not broken, "revisions": revisions, "fixed": done,
+                           "broken": [{"rule": v.rule, "title_zh": v.title_zh, "evidence": v.evidence}
+                                      for v in broken]}}, pairs
+
+
 def reply_error(e: Exception):
     if isinstance(e, ReplyRefused):
         return bad(str(e))
@@ -5227,9 +5338,8 @@ async def api_reply_draft(request: Request):
     try:
         token, ctx = await reply_context(body)
         with feed.working("thinking"):
-            draft = await write_draft(ctx, mode=mode, strategy=strategy, notes=notes, previous=previous,
-                                      feedback=feedback)
-            pairs = await side_by_side(draft["reply_body"])
+            draft, pairs = await checked_draft(ctx, mode=mode, strategy=strategy, notes=notes, previous=previous,
+                                               feedback=feedback)
     except (ReplyRefused, OSError, ClaudeError) as e:
         return reply_error(e)
     return JSONResponse({"ctx": token, "to": ctx["kol"], "reply_subject": ctx["subject"], **draft, "pairs": pairs})
@@ -5409,6 +5519,8 @@ async def guard(scope, receive, send, app):
 
 
 async def handle_errors(request: Request, exc: Exception):
+    # a mail server's refusal too: one on sending or moving a mail never shows as 邮箱连接 (autoreport_loop)
+    autoreport.report(f"页面操作 {request.method} {request.url.path}", err_text(exc), exc=exc)
     return JSONResponse({"error": err_text(exc)}, status_code=502 if isinstance(exc, MailError) else 500)
 
 
@@ -5424,6 +5536,8 @@ async def lifespan(app):
                   case_worker()]
     if not DEV or os.environ.get("KOL_PET") == "1":  # a dev copy shows its own pet only when asked
         loops.append(keeper.run())
+    if autoreport.enabled():
+        loops.append(autoreport_loop())
     tasks = [asyncio.create_task(c) for c in loops]
     log(f"KOL Mail ready at http://{HOST}:{PORT}/  ({AI.label()}: {AI.binary()})"
         + ("  -- no mailbox yet: the page asks to sign in" if LOGGED_OUT else ""))

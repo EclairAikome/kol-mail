@@ -153,6 +153,18 @@ def test_refused_restart_says_so(monkeypatch, capsys):
     assert "没有重启" in out and "手动重启" in out
 
 
+def test_the_scan_knows_an_api_key_from_a_word_ending_in_sk(tmp_path, monkeypatch):
+    """A rule id like task-center-not-for-joining once stopped a release as an "sk-" API key."""
+    monkeypatch.setattr(publish, "ROOT", tmp_path)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "publish-denylist.txt").write_text("", encoding="utf-8")
+    (tmp_path / "rules.yaml").write_text("- id: task-center-not-for-joining\n", encoding="utf-8")
+    (tmp_path / "keys.py").write_text('KEY = "sk-' + "a1B2c3D4e5F6g7H8i9J0k" + '"\nauth = "Bearer sk-' + "z" * 24 + '"\n',
+                                      encoding="utf-8")
+    hits = publish.scan(tmp_path, ["rules.yaml", "keys.py"])
+    assert [h.split(":")[:2] for h in hits] == [["keys.py", "1"], ["keys.py", "2"]]
+
+
 def test_only_a_pushed_release_restarts_and_a_failure_never_fails_it():
     src = (app.BASE / "tools" / "publish.py").read_text(encoding="utf-8")
     tail = src[src.index('print(f"导出完成'):]

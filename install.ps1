@@ -34,8 +34,55 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 
-function Say($text) { Write-Host $text -ForegroundColor Cyan }
-function Warn($text) { Write-Host $text -ForegroundColor Yellow }
+$script:Step = ""
+$script:Recent = New-Object Collections.Generic.List[string]
+function Note($text) { $script:Recent.Add("$text"); if ($script:Recent.Count -gt 30) { $script:Recent.RemoveAt(0) } }
+function Say($text) {
+    Write-Host $text -ForegroundColor Cyan; Note $text
+    if ("$text" -match '^\[\d/8\]') { $script:Step = $Matches[0] }
+}
+function Warn($text) { Write-Host $text -ForegroundColor Yellow; Note $text }
+
+# 出了问题自动发到维护者的 POPO 反馈群（和页面上“反馈”按钮同一个机器人，消息里必须有 KOL Mail 这个关键词）：
+# 安装失败，以及装完了但 AI、邮箱用不了。地址来自 -Feedback，重装时也读旧设置里的。发不出去不影响安装。
+function Send-Problem($where, $message, $detail = "") {
+    try {
+        $url = $Feedback
+        $settingsFile = Join-Path $Dir "app\data\settings.json"
+        if (-not $url -and (Test-Path $settingsFile)) {
+            $s = Get-Content -Raw -Encoding UTF8 $settingsFile | ConvertFrom-Json
+            if ((Has $s "feedback") -and (Has $s.feedback "popo_webhook")) { $url = "$($s.feedback.popo_webhook)" }
+        }
+        if ("$url" -notmatch '^(https://|http://127\.0\.0\.1[:/])') { return }  # loopback: the tests' stand-in
+        # pip or a mail test can say a lot, and the robot cuts long messages off
+        if ("$message".Length -gt 1500) { $message = "$message".Substring(0, 1500) + "…" }
+        if ("$detail".Length -gt 1500) { $detail = "…" + "$detail".Substring("$detail".Length - 1500) }
+        $versionFile = Join-Path $Dir "app\VERSION"
+        $version = if ($Source -and (Test-Path (Join-Path $Source "VERSION"))) { (Get-Content -Raw (Join-Path $Source "VERSION")).Trim() }
+                   elseif ($tag) { "$tag".TrimStart("v") } elseif (Test-Path $versionFile) { (Get-Content -Raw $versionFile).Trim() } else { "?" }
+        $stuck = if ($script:Step) { $script:Step } else { "开始之前" }
+        $text = @(
+            "【KOL Mail 自动报错 · $where】", "错误：$message", "卡在：$stuck",
+            ("环境：{0} · PowerShell {1} · Python {2} · AI {3} · 邮箱 {4} · {5}" -f [Environment]::OSVersion.VersionString,
+                $PSVersionTable.PSVersion, $(if ($BasePy) { $BasePy } else { "没找到" }), $(if ($backend) { $backend } else { "还没选" }),
+                $(if ($email) { $email } else { "还没填" }), $env:USERNAME)
+        ) -join "`n"
+        if ($detail) { $text += "`n详情：`n$detail" }
+        $text += "`n最近输出：`n" + ($script:Recent -join "`n") + "`n`n(版本 $version)"
+        $body = [Text.Encoding]::UTF8.GetBytes((@{ message = $text } | ConvertTo-Json -Compress))
+        Invoke-WebRequest -UseBasicParsing -Method Post -Uri $url -Body $body -ContentType "application/json; charset=utf-8" `
+            -TimeoutSec 15 | Out-Null
+    } catch { }
+}
+$script:Reported = $false
+trap {  # anything that stops the install: report it, then fail as before
+    # not when the colleague closed the password window: that is a choice, not a failure
+    if (-not $script:Reported -and "$($_.Exception.Message)" -notmatch "^没有输入邮箱密码") {
+        $script:Reported = $true
+        Send-Problem "安装失败 Windows" "$($_.Exception.Message)" "$($_.InvocationInfo.PositionMessage)`n$($_.ScriptStackTrace)"
+    }
+    break
+}
 function Ask($question, $default = "") {
     $hint = if ($default) { "（直接回车用：$default）" } else { "" }
     $answer = Read-Host "$question$hint"
@@ -333,7 +380,10 @@ if ($webLogin) {
             Write-ConnectionProblem $failed
         }
     }
-    if ($mailOk) { Say "  邮箱连接测试通过" } else { Warn "  邮箱还没连通，KOL Mail 暂时收不到信。处理好后重新运行本脚本即可，已有的设置都会保留。" }
+    if ($mailOk) { Say "  邮箱连接测试通过" } else {
+        Warn "  邮箱还没连通，KOL Mail 暂时收不到信。处理好后重新运行本脚本即可，已有的设置都会保留。"
+        Send-Problem "安装：邮箱没连通" "邮箱连接测试没通过（$email）"
+    }
 }
 # 回信、附件、移动邮件要用到的权限
 $policy = (Run-Native { & $Mcp config policy }).Out
@@ -535,7 +585,10 @@ try {
     [IO.File]::WriteAllText($AiCheck, $aiCheckCode, (New-Object Text.UTF8Encoding $false))
     $aiOk = Connect-AI
 } finally { Remove-Item $AiCheck -ErrorAction SilentlyContinue }
-if (-not $aiOk) { Warn "  AI 还没连上：翻译和起草暂时用不了。处理好后在页面上方点“重新检测 AI”，或者重新运行本脚本。" }
+if (-not $aiOk) {
+    Warn "  AI 还没连上：翻译和起草暂时用不了。处理好后在页面上方点“重新检测 AI”，或者重新运行本脚本。"
+    Send-Problem "安装：AI 没连上" "$backend 的连接检测没通过（同事选了跳过）"
+}
 
 # ---------------------------------------------------------------- 6. 你的设置（只写安装器负责的键，其余保持原样）
 Say "[6/8] 写设置…"

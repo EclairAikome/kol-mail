@@ -336,12 +336,14 @@ def strategy_buttons(case_id: int, count: int) -> list[list[tuple[str, str]]]:
 
 
 def draft_text(case: dict, rows: list[dict], ok: bool, notes: str, approval: str, warnings: list[str]) -> str:
-    lines = [f"✍️ #{case['id']} 回复 {case['who']} 的草稿（中文对照）", ""]
+    """Every paragraph as it will go out, with its Chinese right under it."""
+    lines = [f"✍️ #{case['id']} 回复 {case['who']} 的草稿（原文 + 中文对照）", ""]
     for r in rows:
+        lines.append(r["orig"])
         if r.get("failed"):
-            lines.append("【这一段没能生成可信的中文对照】\n" + r["orig"])
-        else:
-            lines.append(r["zh"])
+            lines.append("【这一段没能生成可信的中文对照】")
+        elif not r.get("same"):
+            lines.append("〔中文〕" + r["zh"])
         lines.append("")
     if notes:
         lines.append(f"这一版：{notes}")
@@ -369,8 +371,11 @@ def draft_buttons(case_id: int, ok: bool, ver: str = "") -> list[list[tuple[str,
 
 def confirm_text(case: dict, to: str, subject: str, zh: str) -> str:
     where = f"收件人：{to}\n主题：{subject}" if case["channel"] == "email" else f"发给 Telegram：{to}"
-    gist = zh.strip()[:600] + ("…" if len(zh.strip()) > 600 else "")
-    return f"确认发送 #{case['id']}？发出后无法撤回。\n{where}\n\n要发出的内容（中文对照）：\n{gist}"
+
+    def gist(text: str) -> str:
+        return text.strip()[:600] + ("…" if len(text.strip()) > 600 else "")
+    return (f"确认发送 #{case['id']}？发出后无法撤回。\n{where}\n\n要发出的原文：\n{gist(case.get('body') or '')}"
+            f"\n\n中文对照：\n{gist(zh)}")
 
 
 def confirm_buttons(case_id: int, ver: str) -> list[list[tuple[str, str]]]:
