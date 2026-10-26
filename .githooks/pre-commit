@@ -1,0 +1,11 @@
+#!/bin/sh
+# Refuse a commit that changes any file's line endings (tools/check_line_endings.py says which and how to fix it).
+# Turn it on in a clone with: git config core.hooksPath .githooks
+for py in python3 python; do
+    if command -v "$py" >/dev/null 2>&1 && "$py" -c "" >/dev/null 2>&1; then  # skips the Windows Store stub
+        exec "$py" tools/check_line_endings.py
+    fi
+done
+if command -v py >/dev/null 2>&1; then exec py -3 tools/check_line_endings.py; fi
+echo "pre-commit: no Python found to check line endings, commit stopped (git commit --no-verify skips the check)" >&2
+exit 1

@@ -43,6 +43,7 @@ from starlette.staticfiles import StaticFiles
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # python -I leaves the script's folder off sys.path
 import config  # noqa: E402
+import autoreport  # noqa: E402
 import accounts  # noqa: E402
 import autoreply  # noqa: E402
 import petfeed  # noqa: E402
@@ -145,6 +146,11 @@ TG_SERVICE_CHATS = {777000, 42777}  # Telegram's own notification accounts
 TG_HISTORY = 50  # messages of a chat read for an off-hours case (the AI draft sees all of them)
 AI = llm.Settings(backend=CFG["llm"]["backend"], models=CFG["llm"]["models"], claude_bin=CFG["llm"]["claude_bin"],
                   codemaker_bin=CFG["llm"]["codemaker_bin"], workdir=CLAUDE_CWD)
+# errors on this machine go to the maintainer's POPO group on their own (off in a dev copy or without a webhook)
+autoreport.configure(CFG["feedback"].get("popo_webhook") or "", config.version(), DATA / "autoreport.json",
+                     body_key=CFG["feedback"].get("body_key") or "message",
+                     who=f'{IDENTITY.get("name") or "?"} <{CFG["mail"].get("address") or "还没登录邮箱"}>',
+                     context=lambda: [f"AI {AI.label()} {AI.binary() or '（没找到命令行）'}"])
 ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 ALLOWED_ORIGINS = {f"http://{h}" for h in ALLOWED_HOSTS}
 BOUNCE_ADDRESS_MARKERS = ("amazonses.com", "mailer-daemon", "postmaster")
@@ -179,6 +185,7 @@ def strip_hidden(text: str) -> str:
 
 def log(*args):
     print(time.strftime("%H:%M:%S"), *args, flush=True)
+    autoreport.note_log(" ".join([time.strftime("%H:%M:%S"), *map(str, args)]))  # the last lines go with a report
 
 
 def err_text(e: BaseException) -> str:
@@ -773,6 +780,7 @@ def spawn(coro, what: str):
             raise
         except Exception as e:
             log(what, "failed:", err_text(e))
+            autoreport.report(f"后台任务 {what}", err_text(e), exc=e)
     task = asyncio.create_task(run())
     background.add(task)
     task.add_done_callback(background.discard)
@@ -1317,17 +1325,6 @@ def sheet_state_dir(workbook: Path | None) -> Path:
     if workbook is None:
         return DATA / "sheet"
     return DATA / "sheet" / ("user-" + hashlib.sha1(os.path.normcase(str(workbook)).encode("utf-8")).hexdigest()[:12])
-
-
-def popo_cli() -> str:
-    """popo-cli's full path (kept in the settings once found: the background service starts with a bare PATH).
-    Defined before configure_sheet(), which needs it while app.py is still being read when a POPO sheet is linked."""
-    found = popogrid.find_popo_cli(CFG["paths"].get("popo_cli") or "")
-    if found and found != CFG["paths"].get("popo_cli"):
-        with contextlib.suppress(OSError):
-            config.update(["paths", "popo_cli"], found)
-            CFG["paths"]["popo_cli"] = found
-    return found
 
 
 def configure_sheet():
@@ -2555,6 +2552,25 @@ async def api_feedback(request: Request):
     return JSONResponse({"ok": True})
 
 
+# ---------------------------------------------------------------- automatic error reports (autoreport.py)
+
+ERROR_FIELDS = {"claude_error": "AI", "scan_error": "收信检查", "notify_error": "桌面通知", "sheet_error": "KOL 总表",
+                "autoreply_error": "自动回复设置", "telegram_error": "Telegram", "mobile_error": "手机审稿",
+                "mail_error": "邮箱连接", "update_error": "自动更新"}
+
+
+async def autoreport_loop():
+    """What the status bar shows as an error goes to the maintainer's POPO group too, once per new error."""
+    watcher = autoreport.StateWatcher(ERROR_FIELDS)
+    while True:
+        await asyncio.sleep(60)
+        try:
+            watcher.check({**state, "mail_error": getattr(mail, "error", None) or getattr(bg, "error", None),
+                           "update_error": UPDATE.status.get("error")})
+        except Exception as e:  # noqa: BLE001  the watcher must never stop the app
+            log("autoreport check failed:", err_text(e))
+
+
 # ---------------------------------------------------------------- first use: signature and own negotiation style
 
 PLAYBOOK_TEMPLATE = BASE / "templates" / "谈判手册.example.md"
@@ -2690,6 +2706,16 @@ async def user_sheet_tool(args: list[str], timeout: int = 120, mapping: dict | N
         tail = ((err or b"") + (out or b"")).decode("utf-8", "replace").strip()[-300:]
         data = {"error": tail or f"退出码 {proc.returncode}"}
     return proc.returncode, data if isinstance(data, dict) else {"error": str(data)[:300]}
+
+
+def popo_cli() -> str:
+    """popo-cli's full path (kept in the settings once found: the background service starts with a bare PATH)."""
+    found = popogrid.find_popo_cli(CFG["paths"].get("popo_cli") or "")
+    if found and found != CFG["paths"].get("popo_cli"):
+        with contextlib.suppress(OSError):
+            config.update(["paths", "popo_cli"], found)
+            CFG["paths"]["popo_cli"] = found
+    return found
 
 
 popo_links: dict[str, str] = {}  # pasted link -> popo:<docId>[:<teamSpaceId>], so a link is looked up once
@@ -5409,6 +5435,8 @@ async def guard(scope, receive, send, app):
 
 
 async def handle_errors(request: Request, exc: Exception):
+    if not isinstance(exc, MailError):  # a mail server's refusal shows as 邮箱连接 instead (autoreport_loop)
+        autoreport.report(f"页面操作 {request.method} {request.url.path}", err_text(exc), exc=exc)
     return JSONResponse({"error": err_text(exc)}, status_code=502 if isinstance(exc, MailError) else 500)
 
 
@@ -5424,6 +5452,8 @@ async def lifespan(app):
                   case_worker()]
     if not DEV or os.environ.get("KOL_PET") == "1":  # a dev copy shows its own pet only when asked
         loops.append(keeper.run())
+    if autoreport.enabled():
+        loops.append(autoreport_loop())
     tasks = [asyncio.create_task(c) for c in loops]
     log(f"KOL Mail ready at http://{HOST}:{PORT}/  ({AI.label()}: {AI.binary()})"
         + ("  -- no mailbox yet: the page asks to sign in" if LOGGED_OUT else ""))

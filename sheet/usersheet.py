@@ -728,7 +728,7 @@ def file_lock(name: str, wait: float, what: str):
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             break
         except OSError:
-            if time.monotonic() > deadline:
+            if time.monotonic() >= deadline:
                 f.close()
                 raise Unavailable(what) from None
             time.sleep(0.3)
@@ -838,7 +838,8 @@ def run(ops: list[dict], source: str, mapping: dict, grid_factory=open_grid) -> 
                     if not is_transient(e):
                         raise
                     reason = "Excel 正忙（可能正在编辑单元格或开着对话框）"
-                if time.monotonic() > deadline:
+                # >=: before 3.13 Windows' clock ticks every 15.6 ms, so with no wait at all ">" would retry anyway
+                if time.monotonic() >= deadline:
                     break
                 time.sleep(2)
     except Unavailable as e:

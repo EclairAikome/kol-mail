@@ -1,33 +1,27 @@
-"""macOS: the pet in a borderless, transparent, always-on-top Tk window.
+"""macOS: the pet in a borderless, transparent, always-on-top Tk window (Tk ships with Python from python.org).
 
-Tk takes the mouse, the menu and the bubble; the frames are shown by Core Animation layers under Tk's own picture
-(macdraw.py), because Tk 9 cannot draw anything see-through on a Mac: a transparent pixel comes out black and the
-last frame stays behind the new one. uv's and Homebrew's Pythons come with Tk 9, python.org's with Tk 8.6. Should the
-layers not come up, Tk 8.6 still draws her itself (below); Tk 9 gives up (exit code 4) and the app keeps using
-Notification Center, as when Tk is missing altogether and main.py's import fails.
-
-On a Mac the pet always has its normal size. Which frame shows follows the clock, as on Windows, about 60 times a
-second. Pictures hold five frames each: a tall one takes long to decode."""
+Tk can only scale images by whole numbers, so on a Mac the pet always has its normal size. When Tk is missing (some
+Homebrew Pythons), main.py's import fails, the pet exits with an error and the app keeps using Notification Center.
+Which frame shows follows the clock, as on Windows; Tk redraws about 60 times a second. A state made of a shared clip
+and props on top gets the clip's frame copied first, then the props over it, only where they can be (their box): Tk
+copies about 3 ms for a whole frame. Pictures hold five frames each, as Tk decodes one in some 60 ms, but takes
+seconds for a tall one."""
 
 from __future__ import annotations
 
 import collections
 import fcntl
-import os
 import time
 import tkinter as tk
 import webbrowser
 from pathlib import Path
 
-from . import macdraw
 from .brain import Brain
 from .client import Client, own_page
 from .sprites import Sprites
 
 CREAM, NAVY, INK, MUTED = "#FFFBF4", "#283070", "#1E2233", "#5A6075"
 DRAG_THRESHOLD = 4
-UNSUPPORTED = 4  # main.UNSUPPORTED: this Mac cannot show the pet, the app uses Notification Center
-WINDOW_TITLE = f"KOL Mail pet {os.getpid()}"  # how macdraw finds Tk's window; never shown (no title bar)
 
 
 RETRY_AFTER = 30.0  # seconds before a picture that could not be read is tried again
@@ -36,31 +30,29 @@ RETRY_AFTER = 30.0  # seconds before a picture that could not be read is tried a
 class Pictures:
     """The pictures used last, up to `budget` bytes in memory (Tk keeps 4 bytes a pixel; five frames of her are
     1.6 MB). The two newest always stay, as a frame may need a clip and the props on top of it. A picture that cannot
-    be read is said once and tried again RETRY_AFTER later; until then asking for it fails at once (OSError).
-    Tk photo images by default; macdraw strips with their own loader, size and release."""
+    be read is said once and tried again RETRY_AFTER later; until then asking for it fails at once."""
 
-    def __init__(self, budget: int, load=lambda path: tk.PhotoImage(file=str(path)),
-                 weight=lambda img: img.width() * img.height() * 4, drop=lambda img: None):
-        self.budget, self.load, self.weight, self.drop = budget, load, weight, drop
-        self.items: collections.OrderedDict = collections.OrderedDict()  # path -> picture
+    def __init__(self, budget: int):
+        self.budget = budget
+        self.items: collections.OrderedDict = collections.OrderedDict()  # path -> tk.PhotoImage
         self.failed: dict = {}  # path -> when to try it again
 
-    def get(self, path):
+    def get(self, path) -> tk.PhotoImage:
         img = self.items.get(path)
         if img is None:
             if time.monotonic() < self.failed.get(path, 0.0):
-                raise OSError(f"{path.name} could not be read a moment ago")
+                raise tk.TclError(f"{path.name} could not be read a moment ago")
             try:
-                img = self.load(path)
-            except (tk.TclError, OSError) as e:
+                img = tk.PhotoImage(file=str(path))
+            except tk.TclError as e:
                 if path not in self.failed:
                     print("pet picture:", path.name, e, flush=True)
                 self.failed[path] = time.monotonic() + RETRY_AFTER
                 raise
             self.failed.pop(path, None)
             self.items[path] = img
-            while len(self.items) > 2 and sum(self.weight(i) for i in self.items.values()) > self.budget:
-                self.drop(self.items.popitem(last=False)[1])
+            while len(self.items) > 2 and sum(i.width() * i.height() * 4 for i in self.items.values()) > self.budget:
+                self.items.popitem(last=False)
         self.items.move_to_end(path)
         return img
 
@@ -87,10 +79,6 @@ class PetApp:
         root.wm_attributes("-topmost", True)
         root.wm_attributes("-transparent", True)
         root.config(bg="systemTransparent")
-        self.layers: macdraw.Layers | None = None  # set in run(); None: Tk draws her (Tk 8.6 only)
-        self.strips = Pictures(64 << 20, load=lambda path: macdraw.Strip(path, sprites.cell),
-                               weight=lambda strip: strip.nbytes, drop=lambda strip: strip.close())
-        self.shown_strips = ()  # (strip, x, y) of the frame and the props on screen: which pixels are see-through
         self.pictures = Pictures(64 << 20)
         self.part_maps = Pictures(16 << 20)
         cw, ch = sprites.cell
@@ -129,9 +117,6 @@ class PetApp:
         once = bool(self.brain.oneshot) and self.brain.oneshot[0] == wanted
         step = st.frame_at((time.perf_counter() - self.started) * 1000, loop=not once)
         if step != self.frame or force:
-            if self.layers:
-                self.show_on_layers(st, step)
-                return min(st.durations)
             cell = cw, ch = self.sprites.cell
             try:
                 path, x, y = st.layer.at(st.base_frame(step), cell)
@@ -140,7 +125,7 @@ class PetApp:
                 if st.overlay:
                     path, ox, oy = st.overlay.at(st.over_frame(step), cell)
                     over = self.pictures.get(path)
-            except (tk.TclError, OSError):  # a picture that cannot be read right now: the last frame stays
+            except tk.TclError:  # a picture that cannot be read right now: the last frame stays
                 return min(st.durations)
             self.frame = step
             # "set": the clip's frame replaces everything, transparency included; then the props go over it
@@ -153,43 +138,10 @@ class PetApp:
                                        "-to", x0, y0, "-compositingrule", "overlay")
         return min(st.durations)
 
-    def show_on_layers(self, st, step: int):
-        """The frame on the Core Animation layers: the clip's cell, and the props' cell over it (no box needed, the
-        layers blend on the graphics card)."""
-        cell = self.sprites.cell
-        try:
-            path, x, y = st.layer.at(st.base_frame(step), cell)
-            shown = [(self.strips.get(path), x, y)]
-            if st.overlay:
-                path, ox, oy = st.overlay.at(st.over_frame(step), cell)
-                shown.append((self.strips.get(path), ox, oy))
-            images = [strip.frame(sx, sy) for strip, sx, sy in shown]
-        except OSError:  # a picture that cannot be read right now: the last frame stays
-            return
-        self.layers.show(images[0], images[1] if len(images) > 1 else None)
-        self.frame, self.shown_strips = step, tuple(shown)
-
-    def solid_at(self, x: int, y: int) -> bool:
-        """Whether the pixel (x, y) of the window shows any of her or her props right now."""
-        return any(strip.alpha(sx + x, sy + y) for strip, sx, sy in self.shown_strips)
-
-    def update_click_through(self):
-        """With the layers, the window takes clicks only where she is: from the pixel under the pointer. Never in
-        the middle of a press, so a drag that slips over a see-through pixel keeps going; a press whose release
-        never came (Mission Control mid-drag) stops counting once no button is held."""
-        if not self.layers or (self.press and self.layers.button_down()):
-            return
-        px, py = self.root.winfo_pointerxy()
-        x, y = px - self.pos[0], py - self.pos[1]
-        cw, ch = self.sprites.cell
-        if 0 <= x < cw and 0 <= y < ch:
-            self.layers.click_through(not self.solid_at(x, y))
-
     def tick(self):
         delay = 16
         try:
             delay = self.draw()
-            self.update_click_through()
             self.update_bubble()
         except Exception as e:  # noqa: BLE001  without the next after() the pet would stand still for good
             print("pet tick error:", repr(e), flush=True)
@@ -242,7 +194,7 @@ class PetApp:
         for path, px, py in self.sprites.part_lookups(self.shown, max(0, self.frame), x, y):
             try:
                 red = int(self.part_maps.get(path).get(px, py)[0])
-            except (tk.TclError, OSError, IndexError, ValueError, TypeError):
+            except (tk.TclError, IndexError, ValueError, TypeError):
                 continue
             if red:  # the props on top first: the letter wins over the hand holding it
                 return self.sprites.part_name(red)
@@ -336,37 +288,18 @@ class PetApp:
             self.bubble_win.destroy()
             self.bubble_win = None
 
-    def attach_layers(self) -> bool:
-        """Map the window unseen (alpha 0: Tk 9 would flash a black box) and put the layers in it. Tk gives the
-        NSWindow its title only once mapped, and the title is how macdraw finds it. False: no pet on this Mac."""
-        self.root.wm_attributes("-alpha", 0.0)
-        self.root.deiconify()
-        self.root.update()
-        self.root.title(WINDOW_TITLE)
-        try:
-            self.layers = macdraw.Layers(WINDOW_TITLE, self.sprites.cell)
-        except Exception as e:  # noqa: BLE001  ctypes and AppKit fail in many ways; each one means "no layers"
-            print("pet layers:", repr(e), "Tk", tk.TkVersion, flush=True)
-            if tk.TkVersion >= 9:  # Tk 9 by itself shows a black box with trails: rather no pet at all
-                return False
-        return True
-
-    def run(self) -> int:
-        if not self.attach_layers():
-            self.root.destroy()
-            return UNSUPPORTED
+    def run(self):
         self.draw(force=True)
-        self.root.wm_attributes("-alpha", 1.0)
+        self.root.deiconify()
         self.client.start()
         self.root.after(16, self.tick)
         self.root.after(250, self.poll)
         self.root.mainloop()
         self.client.stopped.set()
-        return 0
 
 
 def run(port: int, boot: str, settings: dict, sprites: Sprites) -> int:
     app = PetApp(sprites, port, boot, settings)
-    code = app.run()
-    print("pet stopped:", app.brain.quit_reason if code == 0 else "this Mac cannot show it", flush=True)
-    return code
+    app.run()
+    print("pet stopped:", app.brain.quit_reason, flush=True)
+    return 0

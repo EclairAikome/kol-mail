@@ -2,7 +2,7 @@
 
 Started by the app (petfeed.Keeper), never by hand in normal use. Exit codes: 0 the pet left on purpose (switched
 off, or it belongs to an older run of the app), 3 another pet already runs for this app, 4 this computer cannot show
-one (no Tk, or a Mac with Tk 9 where the layers of pet/macdraw.py did not come up), anything else a crash."""
+one (no Tk), anything else a crash."""
 
 from __future__ import annotations
 

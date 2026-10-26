@@ -152,7 +152,7 @@ class Keeper:
                 await asyncio.sleep(10)
                 continue
             if code == self.UNSUPPORTED:
-                self.error = "这台电脑显示不了桌宠（原因在 data/pet.log），来信改用系统通知"
+                self.error = "这台电脑显示不了桌宠（Python 没有带 Tk），来信改用系统通知"
                 await self.wake.wait()
                 continue
             quick_failures = quick_failures + 1 if time.monotonic() - started < 60 else 0

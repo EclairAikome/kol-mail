@@ -27,4 +27,12 @@ if /usr/sbin/lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     exit 0
 fi
 echo "[$(stamp)] starting kol-mail on 127.0.0.1:$PORT" >> "$LOG"
-exec "$PY" -I -X utf8 app.py >> "$LOG" 2>&1
+code=0
+"$PY" -I -X utf8 app.py >> "$LOG" 2>&1 || code=$?
+# an error exit (a restart for an update exits with 0) goes to the maintainer's POPO group, with the log's end;
+# not a stop (SIGINT, SIGKILL, SIGTERM: launchctl, a reinstall)
+if [ "$code" -ne 0 ] && [ "$code" -ne 130 ] && [ "$code" -ne 137 ] && [ "$code" -ne 143 ]; then
+    echo "[$(stamp)] exited with code $code" >> "$LOG"
+    "$PY" -I -X utf8 autoreport.py exited "$code" "$LOG" >> "$LOG" 2>&1
+fi
+exit "$code"
