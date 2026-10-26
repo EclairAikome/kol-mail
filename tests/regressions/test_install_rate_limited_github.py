@@ -102,7 +102,9 @@ def sh_tag_block() -> str:
     return m.group(1)
 
 
-@pytest.mark.skipif(not (shutil.which("bash") and shutil.which("curl")), reason="needs bash and curl")
+# install.sh is the Mac installer; on Windows "bash" may be WSL's launcher with no Linux installed
+@pytest.mark.skipif(sys.platform == "win32" or not (shutil.which("bash") and shutil.which("curl")),
+                    reason="the Mac installer, run where it runs")
 def test_mac_installer_reads_the_tag_from_the_redirect(github, tmp_path):
     mirror, seen, _ = github
     script = tmp_path / "tag.sh"

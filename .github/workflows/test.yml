@@ -72,10 +72,10 @@ jobs:
       - name: An old CodeMaker as the only AI, and the test password
         run: |
           python3 tests/fakes/fake_codemaker.py install "$HOME/.codemaker/bin" --version 1.15.11 --log "$RUNNER_TEMP/cm-calls.jsonl"
-          python3 -c 'import json, sys; json.dump("\ufeffKOL-p\xe4ssw\xf6rd-\u5bc6\u7801 #1", open(sys.argv[1], "w"))' "$RUNNER_TEMP/password.json"
+          python3 -c 'import json, sys; json.dump("KOL-p\ufeff\xe4ssw\xf6rd-\u5bc6\u7801 #1", open(sys.argv[1], "w"))' "$RUNNER_TEMP/password.json"
       - name: Install (unattended, from this checkout)
         run: |
-          pw="$(printf '\357\273\277KOL-p\303\244ssw\303\266rd-\345\257\206\347\240\201 #1')"  # the same password, BOM first
+          pw="$(printf 'KOL-p\357\273\277\303\244ssw\303\266rd-\345\257\206\347\240\201 #1')"  # the same password; a BOM in the middle, as macOS Keychain cannot keep one in front
           printf '%s\n%s\n' "$pw" "$pw" | /bin/bash install.sh --source "$ROOT" --yes \
             --email ci@example.com --name "CI Tester" --company Example --backend codemaker \
             --imap-host 127.0.0.1 --smtp-host 127.0.0.1 --password-stdin --no-open

@@ -204,14 +204,15 @@ def main(argv: list[str]) -> int:
     else:
         text = Path(args.source).read_text(encoding="utf-8-sig", errors="replace")
     results = triage(text, Path(args.out_dir), args.name, args.force, args.dry_run)
+    # the reports are Chinese: a console in another code page (cp1252, GBK) must not crash the summary
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if not results:
         print("nothing to triage: the text is empty")
         return 1
     for r in results:
         about = ", ".join(f"{k} {v}" for k, v in r["facts"].items() if v and k != "error")
         if r["known"]:
-            print(f"known bug {r['signature']}: {r['known'].relative_to(ROOT) if r['known'].is_relative_to(ROOT) else r['known']}"
-                  f" ({about})")
+            print(f"known bug {r['signature']}: {r['known']} ({about})")
         else:
             verb = "would write" if args.dry_run else "wrote"
             print(f"{verb} {r['path']} (signature {r['signature']}; {about}; error: {r['facts']['error'] or '-'})")
