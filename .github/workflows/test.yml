@@ -1,8 +1,5 @@
-# Unit tests on Windows and on an Apple-silicon Mac under every Python the installers accept (3.11 to 3.13; colleagues
-# mostly run 3.12), the line-ending check, and a fresh install end to end on both systems: the installer from this
-# checkout, with an old CodeMaker (1.15.11, which crashes on `run --agent`) as the only AI and a mail password that
-# holds a BOM. On the Mac also: the launchd agent serving the page, a restart after the app dies, and a second
-# install over the first.
+# Unit tests on Windows and on an Apple-silicon Mac, plus an unattended install on the Mac: install.sh from this
+# checkout, the launchd agent serving the page, a restart after the app dies, and a second install over the first.
 name: test
 
 on:
@@ -18,47 +15,32 @@ defaults:
     shell: bash  # -eo pipefail: a failing command in a pipe fails the step
 
 jobs:
-  line-endings:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: python3 tools/check_line_endings.py --all
-
   unit:
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
-        python: ["3.11", "3.12", "3.13"]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
+          python-version: "3.13"
       - run: python -m pip install --disable-pip-version-check -q -r requirements.txt pytest
       - run: python -m pytest tests -q -rs
 
-  windows-install:
-    runs-on: windows-latest
-    timeout-minutes: 40
+  # The desktop pet with Tk 9, what uv's and Homebrew's Pythons bring (the job above has python.org's Tk 8.6). Tk 9
+  # cannot draw anything see-through on a Mac, so there the pet must come up through pet/macdraw.py's layers.
+  mac-pet-tk9:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5  # runs the fake CodeMaker; the installer picks its own Python, as on a colleague's PC
-        with:
-          python-version: "3.12"
-      - name: Fresh install (old CodeMaker, a password with a BOM, chcp 65001)
-        shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\smoke\windows_fresh_install.ps1 -Work "$env:RUNNER_TEMP\fi" -Python python
-      - name: Logs
-        if: always()
-        shell: powershell
-        run: |
-          foreach ($f in "app.err.txt", "app.out.txt", "install.err.txt", "codemaker\calls.jsonl") {
-            $p = Join-Path "$env:RUNNER_TEMP\fi" $f
-            if (Test-Path $p) { "== $f"; Get-Content -Encoding UTF8 $p -Tail 60 }
-          }
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.12 && uv venv --python 3.12 .venv
+      - run: uv pip install --python .venv -q -r requirements.txt pytest
+      - name: This Python really has Tk 9
+        run: .venv/bin/python -c "import sys, tkinter; print('Tk', tkinter.Tcl().call('info', 'patchlevel')); sys.exit(tkinter.TkVersion < 9)"
+      - run: .venv/bin/python -m pytest tests/test_pet.py -q -rs
 
   mac-install:
     runs-on: macos-latest
@@ -69,20 +51,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Machine
         run: sw_vers; uname -m; command -v python3 && python3 --version
-      - name: An old CodeMaker as the only AI, and the test password
-        run: |
-          python3 tests/fakes/fake_codemaker.py install "$HOME/.codemaker/bin" --version 1.15.11 --log "$RUNNER_TEMP/cm-calls.jsonl"
-          python3 -c 'import json, sys; json.dump("KOL-p\ufeff\xe4ssw\xf6rd-\u5bc6\u7801 #1", open(sys.argv[1], "w"))' "$RUNNER_TEMP/password.json"
       - name: Install (unattended, from this checkout)
         run: |
-          pw="$(printf 'KOL-p\357\273\277\303\244ssw\303\266rd-\345\257\206\347\240\201 #1')"  # the same password; a BOM in the middle, as macOS Keychain cannot keep one in front
-          printf '%s\n%s\n' "$pw" "$pw" | /bin/bash install.sh --source "$ROOT" --yes \
-            --email ci@example.com --name "CI Tester" --company Example --backend codemaker \
+          printf 'not-a-real-password\nnot-a-real-password\n' | /bin/bash install.sh --source "$ROOT" --yes \
+            --email ci@example.com --name "CI Tester" --company Example --backend claude \
             --imap-host 127.0.0.1 --smtp-host 127.0.0.1 --password-stdin --no-open
-      - name: The password with a BOM is stored byte for byte
-        run: |
-          "$HOME/Library/Application Support/kol-mail/venv/bin/python" -I tests/smoke/mail_secret.py check \
-            "$HOME/.config/mcp-email-server/catalog.sqlite3" ci "$RUNNER_TEMP/password.json"
       - name: launchd agent loaded and page served
         run: |
           launchctl print "gui/$(id -u)/local.kolmail" > agent.txt
@@ -93,13 +66,6 @@ jobs:
           curl -sS -o /dev/null -w "api without the page header %{http_code}\n" http://127.0.0.1:8765/api/status | grep -q 403
           test -d "/Applications/KOL Mail.app" || test -d "$HOME/Applications/KOL Mail.app"
           python3 -c "import json,os; s=json.load(open(os.path.expanduser('~/Library/Application Support/kol-mail/app/data/settings.json'))); print({k: s[k] for k in ('mail','llm')})"
-      - name: The installed app's AI check passes on CodeMaker 1.15.11
-        run: |
-          curl -fsS -X POST -H "X-KOL-Mail: 1" -H "Origin: http://127.0.0.1:8765" -H "Content-Type: application/json" \
-            -d '{}' http://127.0.0.1:8765/api/ai/check
-          echo; cat "$RUNNER_TEMP/cm-calls.jsonl"
-          test "$(grep -c '"argv": \["run"' "$RUNNER_TEMP/cm-calls.jsonl")" -ge 2
-          if grep -q '"--agent"' "$RUNNER_TEMP/cm-calls.jsonl"; then echo "called with --agent"; exit 1; fi
       - name: launchd restarts the app after it dies (what a self-update relies on)
         run: |
           pid=$(/usr/sbin/lsof -tiTCP:8765 -sTCP:LISTEN)

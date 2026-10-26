@@ -136,6 +136,27 @@ def test_channel_links_come_from_the_mapped_columns(tmp_path):
         {"邮箱": "ana@gmail.com", "频道链接": "https://www.youtube.com/@ana", "阶段": "", "意向": ""}]
 
 
+def test_the_app_starts_with_a_popo_sheet_linked(tmp_path):
+    """configure_sheet() runs while app.py is still being read, so whatever it calls must be defined above it. The
+    tests above call it again after the import, when everything exists: only a fresh start shows a name used too
+    early (v0.4.0 crashed at every start once a POPO sheet was linked)."""
+    import json
+    import os
+    import subprocess
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({
+        "mail": {"account_name": "me", "address": "me@example.com", "company_domain": "@example.com"},
+        "paths": {"sheet_tool": str(app.USER_SHEET_TOOL), "sheet_workbook": "popo:doc123"},
+        "sheet_map": {"sheet": "KOL", "header_row": 1, "columns": {"email": "Email"}},
+    }), encoding="utf-8")
+    env = dict(os.environ, KOL_MAIL_SETTINGS=str(settings), KOL_MAIL_DATA=str(tmp_path / "data"))
+    script = "import sys; sys.path.insert(0, sys.argv[1]); import app; print(app.SHEET_MODE, 'KOL_POPO_CLI' in app.SHEET_ENV)"
+    out = subprocess.run([sys.executable, "-I", "-X", "utf8", "-c", script, str(app.BASE)], env=env,
+                         capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.splitlines()[-1].split() == ["mapped", "True"]  # the last line: the import may print before
+
+
 def test_an_earlier_install_can_move_to_a_mapping_from_the_page(tmp_path):
     link(app.BASE / "sheet" / "kol.py", tmp_path / "old.xlsx")
     assert app.SHEET_MODE == "legacy" and not app.SHEET_OWNER_FIXED

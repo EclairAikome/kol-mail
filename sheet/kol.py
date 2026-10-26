@@ -996,8 +996,7 @@ def _run(ops: list[dict], source: str) -> dict:
                         reason = "Excel 在写入途中被关掉了"
                     else:
                         raise
-                # >=: before 3.13 Windows' clock ticks every 15.6 ms, so with no wait at all ">" would retry anyway
-                if time.monotonic() >= deadline:
+                if time.monotonic() > deadline:
                     break
                 time.sleep(2)
     except Unavailable as e:

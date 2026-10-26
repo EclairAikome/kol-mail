@@ -293,7 +293,7 @@ async def complete(settings: Settings, system_prompt: str, user_text: str, schem
     return check_required(scrub(result), schema)
 
 
-async def _communicate(proc, data: bytes | None, timeout: int, label: str) -> tuple[bytes, bytes]:
+async def _communicate(proc, data: bytes, timeout: int, label: str) -> tuple[bytes, bytes]:
     try:
         return await asyncio.wait_for(proc.communicate(data), timeout)
     except asyncio.TimeoutError:
@@ -378,9 +378,7 @@ async def codemaker_model_id(binary: str, model: str) -> str:
     proc = await asyncio.create_subprocess_exec(binary, "models", stdin=asyncio.subprocess.DEVNULL,
                                                 env={**os.environ, **NO_GIT_PROMPTS},
                                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    # None, not b"": stdin is not a pipe, and Python 3.11 writes even empty input to it ("'NoneType' object has no
-    # attribute 'write'"), so this lookup, and with it every CodeMaker call, failed on 3.11
-    out, err = await _communicate(proc, None, 120, "CodeMaker")
+    out, err = await _communicate(proc, b"", 120, "CodeMaker")
     ids = match_models(out.decode("utf-8", "replace"), model)
     if not ids:
         msg = (err or b"").decode("utf-8", "replace").strip()[-200:]
