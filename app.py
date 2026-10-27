@@ -54,6 +54,7 @@ import mobile  # noqa: E402
 import feedback  # noqa: E402
 import updater  # noqa: E402
 import outgoing  # noqa: E402
+import received  # noqa: E402
 import replyflow  # noqa: E402
 import compliance  # noqa: E402
 import onboarding  # noqa: E402
@@ -227,6 +228,15 @@ class Cache:
             """CREATE TABLE IF NOT EXISTS account_messages (
                 account TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY (account, message_id))"""
         )
+        # When the server received a mail whose Date header looked wrong (received.py), per mailbox: the same mail
+        # can reach two mailboxes hours apart.
+        if "account" not in {r[1] for r in self.db.execute("PRAGMA table_info(received_times)")}:
+            self.db.execute("DROP TABLE IF EXISTS received_times")  # the first layout, one dev day old: looked up again
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS received_times (
+                account TEXT NOT NULL, message_id TEXT NOT NULL, received TEXT NOT NULL, checked_at REAL NOT NULL,
+                PRIMARY KEY (account, message_id))"""
+        )
         # Jobs live in memory only; anything still 'pending' was lost with the previous process.
         self.db.execute("UPDATE translations SET status='failed', error='服务重启，等待重新翻译' WHERE status='pending'")
         self.db.commit()
@@ -267,6 +277,19 @@ class Cache:
              current.get("body_zh"), current.get("error"), current.get("attempts", 0),
              current.get("body_hash"), time.time()),
         )
+        self.db.commit()
+
+    def received_many(self, account: str, ids: list[str]) -> dict[str, str]:
+        if not ids:
+            return {}
+        marks = ",".join("?" * len(ids))
+        rows = self.db.execute(f"SELECT message_id, received FROM received_times WHERE account=? AND message_id IN "
+                               f"({marks})", [account, *ids])
+        return {r[0]: r[1] for r in rows}
+
+    def put_received(self, account: str, message_id: str, when: str):
+        self.db.execute("INSERT OR REPLACE INTO received_times (account, message_id, received, checked_at) "
+                        "VALUES (?,?,?,?)", (account, message_id, when, time.time()))
         self.db.commit()
 
     def saved_channels(self, address: str) -> list[dict]:
@@ -471,7 +494,17 @@ class MailBridge:
         """Our earlier one-to-one emails to exactly this address (IMAP TO search is a substring match)."""
         if not sent_box():
             return []
-        meta = await self.call("list_emails_metadata", mailbox=sent_box(), to_address=address, page_size=20)
+        try:
+            meta = await self.call("list_emails_metadata", mailbox=sent_box(), to_address=address, page_size=20)
+        except MailError as e:
+            if "provider_failure" not in str(e):
+                raise
+            # Seen 2026-10-27: the server ends one IMAP session ("BYE Internal error occurred") and mcp-email-server
+            # reports any such failure as this generic error; the next call works. A reply draft waits on this search,
+            # so one hiccup must not fail it: try once more, as the folder index and the search do.
+            log("sent search retry", address)
+            await asyncio.sleep(2)
+            meta = await self.call("list_emails_metadata", mailbox=sent_box(), to_address=address, page_size=20)
         ids = [e["email_id"] for e in meta.get("emails", [])
                if [sender_address(r) for r in e.get("recipients") or []] == [address]][:limit]
         if not ids:
@@ -619,7 +652,7 @@ queued: set[str] = set()
 job_event = asyncio.Event()
 state = {"last_scan": None, "scan_error": None, "translating": None, "claude_error": None, "prefetched": None,
          "autoreply_error": None, "telegram_error": None, "sheet_error": None, "notify_error": None,
-         "unread_rev": 0,  # bumped whenever the unread state changes, so the page knows to repaint
+         "unread_rev": 0,  # bumped whenever the unread state (or a shown date) changes, so the page knows to repaint
          "autoreply_alert": None, "mobile_error": None}  # last off-hours failure; stays visible until the next successful auto-reply
 
 
@@ -800,9 +833,50 @@ async def fetch_list(bridge: MailBridge, mailbox: str, page: int) -> dict:
     async def run():
         data = await bridge.list_messages(mailbox, page)
         lists[(mailbox, page)] = (time.time(), data)
+        spawn(check_received(mailbox, data.get("emails", []), lists[(mailbox, page)][0]), "receipt times")
         return data
     # Keyed per session so a click never ends up waiting behind the bg session's queue.
     return await coalesced(("list", bridge.name, mailbox, page), run)
+
+
+RECEIVED_PER_LIST = 3      # suspects looked up per list fetch; each costs about a dozen searches
+RECEIVED_RETRY = 600       # seconds before a mail is looked up again (a mail error, or not in that folder any more)
+received_tried: dict[tuple[str, str], float] = {}  # (account, Message-ID) -> last lookup started
+
+
+async def check_received(mailbox: str, emails: list[dict], fetched_at: float):
+    """Look up when the server received the mails of a list page whose Date header lies after that (received.py),
+    so the page shows that time instead."""
+    account = current_account.get()
+    known = cache.received_many(account, [e["message_id"] for e in emails if e.get("message_id")])
+    fetched, now = datetime.fromtimestamp(fetched_at, timezone.utc), time.time()
+    todo = [(e, bound) for e, bound in received.suspects(emails, fetched, known)
+            if now - received_tried.get((account, e["message_id"]), 0) > RECEIVED_RETRY][:RECEIVED_PER_LIST]
+    for e, _ in todo:  # a list fetched again while these run must not look them up a second time
+        received_tried[(account, e["message_id"])] = now
+    for e, bound in todo:
+        mid = e["message_id"]
+        if mid in cache.received_many(account, [mid]):
+            continue  # an earlier list fetch found it meanwhile
+        try:
+            when = await coalesced(("received", mailbox, mid), lambda: received.find(
+                bg.call, mailbox, str(e["email_id"]), e.get("sender"), bound, fetched))
+        except MailError as err:
+            log("receipt time failed", mailbox, e["email_id"], err_text(err))
+            return
+        log("receipt time", mailbox, e["email_id"], "header", e.get("date"), "received", when)
+        if when is None:
+            continue  # moved meanwhile; tried again after RECEIVED_RETRY
+        cache.put_received(account, mid, received.stamp(when))
+        if received.shown(e.get("date"), received.stamp(when)) != e.get("date"):
+            state["unread_rev"] += 1  # the list repaints with the corrected time
+
+
+def shown_date(meta: dict):
+    """The date the page shows for a mail: its Date header, or the server's receipt time when the header is later."""
+    mid = meta.get("message_id")
+    return received.shown(meta.get("date"),
+                          cache.received_many(current_account.get(), [mid]).get(mid) if mid else None)
 
 
 async def fetch_folders(bridge: MailBridge) -> list[str]:
@@ -3553,7 +3627,7 @@ def list_row(mailbox: str, e: dict, rows: dict[str, dict]) -> dict:
     return {
         "mailbox": mailbox, "email_id": e["email_id"], "message_id": e.get("message_id"),
         "subject": e.get("subject"), "sender": e.get("sender"), "recipients": e.get("recipients"),
-        "date": e.get("date"), "skippable": is_skippable(e), "status": t.get("status"),
+        "date": shown_date(e), "skippable": is_skippable(e), "status": t.get("status"),
         "language": t.get("language"), "subject_zh": t.get("subject_zh"), "thread_key": thread_key(e),
         "unread": is_unread(mailbox, e["email_id"]),
     }
@@ -3575,7 +3649,8 @@ async def api_message(request: Request):
     if mid and not skippable and (not row or row["status"] == "failed" or mid in queued):
         enqueue(mid, mailbox, email_id, urgent=True)
         row = cache.get(mid)
-    return JSONResponse({"message": msg, "translation": row, "own": sender_address(msg.get("sender")) == self_address(),
+    return JSONResponse({"message": {**msg, "date": shown_date(msg)}, "translation": row,
+                         "own": sender_address(msg.get("sender")) == self_address(),
                          "replyable": not skippable})
 
 
@@ -3886,7 +3961,7 @@ async def thread_bodies(members: list[tuple[str, dict]]) -> dict[tuple[str, str]
 
 def thread_when(member: tuple[str, dict]) -> datetime:
     # Dates come from the sender's Date header: never let a future date push a message past "now".
-    d = parse_date(member[1].get("date")) or datetime.min.replace(tzinfo=timezone.utc)
+    d = parse_date(shown_date(member[1])) or datetime.min.replace(tzinfo=timezone.utc)
     return min(d, datetime.now(timezone.utc))
 
 
@@ -3985,7 +4060,7 @@ async def api_thread(request: Request):
             enqueue(mid, box, full["email_id"], urgent=is_opened)
             row = cache.get(mid)
         out.append({"mailbox": box, "email_id": str(full["email_id"]), "message_id": mid, "own": own,
-                    "sender": full.get("sender"), "recipients": full.get("recipients"), "date": full.get("date"),
+                    "sender": full.get("sender"), "recipients": full.get("recipients"), "date": shown_date(full),
                     "subject": full.get("subject"), "body": full.get("body", ""),
                     "attachments": full.get("attachments") or [], "translation": row, "opened": is_opened})
     if not msg.get("sender") or sender_address(msg.get("sender")) != self_address():
