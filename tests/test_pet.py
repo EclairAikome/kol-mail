@@ -233,6 +233,73 @@ def test_a_click_counts_what_was_under_the_cursor_when_pressed(monkeypatch):
     assert w.brain.state() == "spout"
 
 
+class Screens:
+    """Monitors as MonitorFromPoint and GetMonitorInfoW see them: (screen, work area) rectangles."""
+
+    def __init__(self, *screens):
+        self.screens = screens
+
+    def from_point(self, pt, flags):
+        from pet import win
+
+        def gap(r):  # how far the point is from the rectangle
+            return max(r[0] - pt.x, 0, pt.x - r[2] + 1) + max(r[1] - pt.y, 0, pt.y - r[3] + 1)
+        nearest = min(range(len(self.screens)), key=lambda i: gap(self.screens[i][0]))
+        if gap(self.screens[nearest][0]) and flags == win.MONITOR_DEFAULTTONULL:
+            return None
+        return nearest + 1
+
+    def info(self, mon, p):
+        from pet import win
+        p._obj.rcWork = win.W.RECT(*self.screens[mon - 1][1])
+        return True
+
+
+LAPTOP = ((0, 0, 1536, 864), (0, 0, 1536, 816))
+SECOND = ((1536, 0, 3456, 1080), (1536, 0, 3456, 1040))
+
+
+def pet_on(monkeypatch, screens, pos=(0, 0)):
+    from pet import win
+    monkeypatch.setattr(win, "MonitorFromPoint", screens.from_point)
+    monkeypatch.setattr(win, "GetMonitorInfoW", screens.info)
+    w = win.PetWindow.__new__(win.PetWindow)
+    w.size, w.pos, w.scale = (100, 200), pos, 1.0
+    return w
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows window code")
+def test_she_starts_where_she_was_left_unless_no_screen_shows_that_place(monkeypatch):
+    """A place saved on a monitor since unplugged once kept her off every screen, still running, out of sight."""
+    w = pet_on(monkeypatch, Screens(LAPTOP))
+    for saved, start in (((200, 300), (200, 300)),
+                         ((1480, 300), (1480, 300)),  # partly past the edge, her middle still on it: left alone
+                         ((1685, 715), (1436, 616)),  # past the right edge: just inside, above the taskbar
+                         ((None, None), (1412, 616))):  # never moved: bottom right
+        w.settings = {"x": saved[0], "y": saved[1]}
+        w.place_initially()
+        assert w.pos == start
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows window code")
+def test_when_her_screen_goes_away_she_comes_back_onto_the_nearest_one(monkeypatch):
+    from pet import win
+    screens = Screens(LAPTOP, SECOND)
+    w = pet_on(monkeypatch, screens, pos=(2000, 500))
+    moved = []
+    w.resize = lambda scale: None
+    w.move = lambda x, y: (moved.append((x, y)), setattr(w, "pos", (x, y)))
+    w._handle(None, win.WM_DISPLAYCHANGE, 0, 0)
+    assert moved == []  # still on the second screen
+    screens.screens = (LAPTOP,)  # unplugged
+    w._handle(None, win.WM_DISPLAYCHANGE, 0, 0)
+    assert moved == [(1436, 500)]
+    screens.screens = (LAPTOP, SECOND)
+    w.pos = (2000, 1500)  # below both: the second one is nearer
+    w._handle(None, win.WM_DISPLAYCHANGE, 0, 0)
+    assert moved[-1] == (2000, 840)
+
+
 # ---------------------------------------------------------------- sprites
 
 def png_size(path: Path) -> tuple[int, int]:

@@ -3050,6 +3050,17 @@ async def restart_when_idle(why: str = ""):
     os._exit(0)  # service/run.ps1 (launchd on macOS) starts the new code 15 s later
 
 
+def on_loop_error(loop, context):
+    """asyncio's Windows proactor closes the listening socket after a single failed accept (WinError 64 when a
+    network blip drops a connection mid-accept). The process keeps running without a page, and run.ps1 only
+    restarts it when it exits, so exit once nothing is being sent."""
+    if context.get("message") == "Accept failed on a socket" and not state.get("restart_scheduled"):
+        state["restart_scheduled"] = True
+        spawn(restart_when_idle("because the page stopped listening after a failed accept"),
+              "restart after a failed accept")
+    loop.default_exception_handler(context)
+
+
 async def api_update(request: Request):
     """POST on every page open: checks once a day, installs a newer release and restarts."""
     force = request.method == "POST" and (await request.json()).get("force") is True
@@ -5526,6 +5537,7 @@ async def handle_errors(request: Request, exc: Exception):
 
 @contextlib.asynccontextmanager
 async def lifespan(app):
+    asyncio.get_running_loop().set_exception_handler(on_loop_error)
     reconcile_unfinished()
     outbox.cleanup()  # attachments of drafts never sent, older than a week
     sweep_attachments(force=True)  # copies of received attachments unused for a week

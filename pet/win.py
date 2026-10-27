@@ -611,11 +611,21 @@ class PetWindow:
         GetMonitorInfoW(mon, ctypes.byref(info))
         return info.rcWork
 
+    def on_screen(self, x: int, y: int) -> tuple[int, int]:
+        """(x, y) while her middle is on a screen; otherwise as near it as the nearest screen's work area allows (a
+        monitor unplugged, or a place saved at a desk with more screens)."""
+        w, h = self.size
+        cx, cy = x + w // 2, y + h // 2
+        if MonitorFromPoint(W.POINT(cx, cy), MONITOR_DEFAULTTONULL):
+            return x, y
+        wa = self.work_area(cx, cy)
+        return max(wa.left, min(x, wa.right - w)), max(wa.top, min(y, wa.bottom - h))
+
     def place_initially(self):
         x, y = self.settings.get("x"), self.settings.get("y")
         w, h = self.size
-        if x is not None and y is not None and MonitorFromPoint(W.POINT(x + w // 2, y + h // 2), MONITOR_DEFAULTTONULL):
-            self.pos = (x, y)
+        if x is not None and y is not None:
+            self.pos = self.on_screen(x, y)
             return
         wa = self.work_area(0, 0)  # primary monitor: bottom right, just above the taskbar
         self.pos = (wa.right - w - 24, wa.bottom - h)
@@ -935,6 +945,9 @@ class PetWindow:
             return 0
         if msg in (WM_DISPLAYCHANGE, WM_DPICHANGED):
             self.resize(self.scale)
+            pos = self.on_screen(*self.pos)  # her screen may have just been unplugged
+            if pos != self.pos:
+                self.move(*pos)
             return 0
         if msg == WM_DESTROY:
             self.client.stopped.set()

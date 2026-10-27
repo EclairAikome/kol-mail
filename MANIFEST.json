@@ -5,9 +5,9 @@
   ".github/workflows/test.yml": "146bbbdaecabe77f55f44db2e9e703b1d0efcefb28a2a529609b1f1ed214cb00",
   ".gitignore": "cafbacdb252557b2be5bb6e37a1039449a99d9ff73cfad9406a4289611a89301",
   "README.md": "450a5a8e99ef34b9dd5cd4da76b93373ff1c7acacc38fd28da2eccd3cb873a6e",
-  "VERSION": "e2f7bb608ebc9e24092ffcb796ad0aa83f0015afe23635f017df52273150f00d",
+  "VERSION": "520a19075780a38b440395e2c70e20d7cddd96b8c2e2c2403b265cbb74a1b333",
   "accounts.py": "c3cde40ec68bd7c650edb449f895d009206274032ee579b517fda5ea829700a1",
-  "app.py": "363897eb4dd85026bad0e58c4f8536c5b3feb558e77cfe161f873cc96a462427",
+  "app.py": "7092b5bf3d808f5b4b4bc15007939ac4d30b1eecf933cadcf86a9e8775a31bd1",
   "autoreply.example.json": "edb9dfc884b466773254b6dafc1618d0babd49ca4b7b052fe0879749b3e5e5d1",
   "autoreply.py": "8381ad12338f4251c6e067435b0501f14ca9c5ee42e9821991b28e69ad3928b1",
   "autoreport.py": "48ae819c0d57acd549a8b77879fd12f2cff11d68534c712786e04b921c2dc2eb",
@@ -345,7 +345,7 @@
   "pet/whale-girl/waiting.overlay.1.png": "0ec932778ffff840e9698792f652c377860bc70d0b6918612b911c6e78f6b999",
   "pet/whale-girl/waiting.overlay.2.parts.png": "d8ca4503ed5a9a868e1bcb815b8664aa5199f11ce9ca2a8f30b57b57714e1b7f",
   "pet/whale-girl/waiting.overlay.2.png": "5030567218b656cc11c56b2e9aac6f1d2839854d7fef9df3d15d15e1fb5eb9a6",
-  "pet/win.py": "40f5622e0face9cd5269cab615615c00f54accd29a135d65fee1d2f5237a7e25",
+  "pet/win.py": "fb941e38567edf38f7c5da46c31dbc99692b79c13e5564160a008502fc2c66dd",
   "petfeed.py": "c5977a0266a0b8c0f874cf668b65e4b27e53119977fc40501163cbfbc85f86f2",
   "replyflow.py": "0a18af1a6c3a5535a581e8b595c895edca4ea04903d9ef57c942375658004b1b",
   "requirements.txt": "277e18efbec99859ee16408f9f1aaf9668977926001a35d401682a60ce33e3af",
@@ -389,6 +389,7 @@
   "tests/test_gsheet.py": "4cfe67cdf05c5fb8a9656501cb82cf650de60be4a0f9f0d5fc40dc7c48a13f67",
   "tests/test_install_aicheck.py": "f23016aa725b87706b89cefcbafc0ab7e5bba5500f231f21883064bba03b7a76",
   "tests/test_line_endings.py": "e99f368d896ed83af1318f9f9d16d59892f9c67ef4a27209dcd13afe65fd9d30",
+  "tests/test_listener_restart.py": "fe73a0e571aacfb15cab6bc1d4e86153831a3135084e4724b1aca795c14d1f1d",
   "tests/test_llm.py": "30138af42b30d8307d4700bfd32ee00eb4978c74910df51024ba92e81a887c06",
   "tests/test_macexcel.py": "818ee28431dd43af20903ebabc0e02794aff365ea85345b6852bfe20f7aabcc4",
   "tests/test_macos.py": "0c036c02df825b87cfc5bf9cdeb682873e8d1bee92f6944600a09c662f0cfb4d",
@@ -397,7 +398,7 @@
   "tests/test_offhours_switch.py": "67f627c96f724dc65ef380591ffb88fa42687cf3f52528cb339469ee5b425245",
   "tests/test_onboarding.py": "dc616bd4104cb9cfe1b2885813d7e48e6127c10eabb3e137b35468b73dd0e06d",
   "tests/test_outgoing.py": "bc06d4b3d07acd62b7e3cd40e424116fa9a7504949c916b9eac15ad0bd4e8825",
-  "tests/test_pet.py": "205e3c8e9969c4b82d39651bb5ba1de89cbcc17fdf453224ad6139a975f905c8",
+  "tests/test_pet.py": "4bc9771249ae6d120e972a7f9a541378cf75aa2772ef6207919327a72e06ca27",
   "tests/test_popogrid.py": "77e3f627f392bf15441ae72b54fb8cd663a04b305e73445b25d812fd24eeab88",
   "tests/test_reply_materials.py": "a76eb4e22921b537cd4b58331821f073bc66be4dd5dc7d45263adb932257e7ea",
   "tests/test_replyflow.py": "070f6896e2c83d54494f59e40f7a83cc19f28fef4d4aade1b9844e62fd3c18f7",
@@ -415,5 +416,5 @@
   "tools/publish.py": "c8c0994eb9c6b53c130ac33b1c7ba2479f5b7e82c78b72b4eac97bf8b81f0de7",
   "updater.py": "0c95084b5871fc5b71fcc6e7c46a321b23e0cc6d946c6ef8bf3bfa082c75b6f6"
  },
- "version": "0.4.2"
+ "version": "0.4.3"
 }
