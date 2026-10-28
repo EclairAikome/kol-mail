@@ -184,6 +184,10 @@
   .tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .tabs button.need::after { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--bad); margin-left: 6px; vertical-align: 2px; }
   [role=tabpanel][hidden] { display: none; }
+  /* 邮件格式: the pictures as the mail shows them (half their pixels), the preview on white like a mail program */
+  canvas.signame { display: block; margin: 4px 0 8px; background: #fff; border: 1px solid var(--line); border-radius: 6px; }
+  img.sigbanner { max-width: 220px; max-height: 60px; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 4px; }
+  iframe.sigpreview { width: 100%; height: 260px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
   #sheetMap { border-collapse: collapse; width: 100%; font-size: 13px; }
   #sheetMap td { padding: 4px 6px; border-top: 1px solid var(--line); vertical-align: middle; }
   #sheetMap td:first-child { white-space: nowrap; font-weight: 600; }
@@ -323,6 +327,7 @@ try {
   <h3>设置</h3>
   <div class="tabs" role="tablist" aria-label="设置分页">
     <button type="button" role="tab" id="tabMain" data-tab="setupMain" aria-controls="setupMain" aria-selected="true">签名和谈判方式</button>
+    <button type="button" role="tab" id="tabMail" data-tab="setupMail" aria-controls="setupMail" aria-selected="false">邮件格式</button>
     <button type="button" role="tab" id="tabSheet" data-tab="setupSheet" aria-controls="setupSheet" aria-selected="false">KOL 总表</button>
   </div>
   <section id="setupMain" role="tabpanel" aria-labelledby="tabMain">
@@ -339,6 +344,23 @@ try {
   <p class="note" id="setupOffhoursNote" style="margin:0">不在工作时间（周一到周五 10:00 到 18:00，GMT+8）收到的 KOL 邮件和 Telegram 私聊，自动回一段固定的“我现在下班了，回来再回复你”。默认关，需要时（比如休长假）再打开。</p>
   <div class="row2"><button class="act primary" id="setupSave" type="button">保存</button>
     <button class="act" id="setupClose" type="button">稍后再说</button><span class="note" id="setupNote"></span></div>
+  </section>
+  <section id="setupMail" role="tabpanel" aria-labelledby="tabMail" hidden>
+  <p class="note">发给 KOL 的邮件用什么字体、签名里加不加手写体名字和 banner。写草稿时还是纯文字，发出去时才排成这个样子。</p>
+  <p class="note err" id="mailHtmlOff" hidden>这台电脑的邮件组件不是配套版本，回信暂时还按纯文字发出，下面的设置等更新后生效。</p>
+  <div class="row2"><label>正文字体 <select id="mailFont"></select></label></div>
+  <label class="blk"><input type="checkbox" id="mailNameOn"> 签名里加手写体名字</label>
+  <div class="row2"><input type="text" id="mailNameText" maxlength="40" placeholder="名字，比如 Eclair" style="width:12em">
+    <label>字体 <select id="mailNameFont"></select></label></div>
+  <canvas id="mailNameCanvas" class="signame" hidden></canvas>
+  <label class="blk"><input type="checkbox" id="mailBannerOn"> 签名最后附上 banner</label>
+  <div class="row2"><img id="mailBannerImg" class="sigbanner" alt="banner">
+    <button class="act" id="mailBannerPick" type="button">换一张…</button><input type="file" id="mailBannerFile" accept="image/png,image/jpeg,image/webp" hidden>
+    <button class="act" id="mailBannerReset" type="button" hidden>用回团队 banner</button></div>
+  <label class="blk">预览</label>
+  <iframe id="mailPreview" class="sigpreview" sandbox="allow-same-origin" title="邮件预览"></iframe>
+  <div class="row2"><button class="act primary" id="mailSave" type="button">保存</button>
+    <button class="act" id="mailClose" type="button">关闭</button><span class="note" id="mailNote"></span></div>
   </section>
   <section id="setupSheet" role="tabpanel" aria-labelledby="tabSheet" hidden>
   <p class="note">连上以后，打开 KOL 的邮件会显示表里记的频道链接；每收到或发出一封 KOL 邮件，会把最近联系时间、轮到谁回和一句话进展写进你的表。只写下面对上的列，不加列、不加工作表、不改你的格式；格子里是你自己写的字不会被覆盖，只改空格子和程序自己写过的格子。表里还没有的 KOL 会在下面第一个整行都空的地方加一行，格式照抄上一行。</p>
@@ -508,7 +530,7 @@ try {
   <div class="channels" data-f="channels"></div>
   <div data-f="msgs"></div>
   <div class="reply" data-f="replybox">
-    <h3 style="margin:0 0 8px;font-size:14px">回复</h3>
+    <h3 style="margin:0 0 8px;font-size:14px">回复 <span class="note" data-f="savedNote" style="font-weight:normal"></span></h3>
     <div class="phonebar" data-f="phonebar"><span data-f="phoneText"></span><button class="act" data-f="phoneLoad">载入这版草稿</button></div>
     <textarea data-f="notes" placeholder="可以留空直接点“按手册起草”，AI 会先给出 2 到 3 种回复策略让你选；也可以先写几句要点（如“接受 120 美元一条，要求两条打包”）。写好完整的中文回复的话，点“翻译我写的中文”。"></textarea>
     <div class="btns">
@@ -1211,7 +1233,7 @@ async function openMessage(id, rowEl, mailbox) {
   catch (e) { loading.textContent = e.message; return; }
   if (!loading.isConnected) return;  // another conversation was opened meanwhile
   // Everything below is bound to this conversation; replies always go to its latest KOL message.
-  const ctx = { view, cards: new Map(), urls: [], opened: { mailbox, id: String(id) } };
+  const ctx = { view, cards: new Map(), urls: [], opened: { mailbox, id: String(id) }, account: st.account };
   if (st.current && st.current.outAtts) st.current.outAtts.forEach(a => a.url && URL.revokeObjectURL(a.url));
   st.current = ctx;
   view.append($("#readerTpl").content.cloneNode(true));
@@ -1224,8 +1246,9 @@ async function openMessage(id, rowEl, mailbox) {
   field(view, "pairsBtn").onclick = () => refreshPairs(ctx);
   field(view, "rbody").oninput = () => markStale(ctx);
   field(view, "sendBtn").onclick = () => send(ctx);
+  for (const f of ["notes", "rsubject", "rbody", "feedback"]) field(view, f).addEventListener("input", () => saveSoon(ctx));
   setupAttachments(ctx);
-  phoneDraft(ctx).catch(() => {});
+  restoreDraft(ctx, data.kol_address).catch(() => {}).finally(() => phoneDraft(ctx).catch(() => {}));
   if (!data.partial) return;
   let full;
   try { full = await api(path); }
@@ -1373,6 +1396,7 @@ async function draft(ctx, opts) {
     field(v, "sendNote").textContent = "";
     showPairs(ctx, r.pairs);
     if (opts.feedback) field(v, "feedback").value = "";
+    saveSoon(ctx);
     note.textContent = r.pairs && r.pairs.ok ? "草稿好了。对照的每一段都是单独回译的，核对无误再发送。"
       : "草稿好了，但中文对照没生成完整，先点“更新对照”。";
   } catch (e) { note.className = "note err"; note.textContent = (opts.feedback ? "修改失败：" : "起草失败：") + e.message; }
@@ -1428,6 +1452,70 @@ async function refreshPairs(ctx) {
   finally { busy(ctx, false); }
 }
 
+// The reply box is saved for this KOL a moment after each change, and comes back when the conversation is opened
+// again (also after a restart); sending drops it. Saved per mailbox on the server, never in the browser.
+const SAVE_DELAY = 1200;
+
+function draftFields(ctx) {
+  const v = ctx.view, shown = field(v, "draft").style.display === "block";
+  return { notes: field(v, "notes").value, feedback: field(v, "feedback").value,
+    to: shown ? field(v, "to2").value : "", subject: shown ? field(v, "rsubject").value : "",
+    body: shown ? field(v, "rbody").value : "", lang: field(v, "rlang").textContent,
+    summary: field(v, "rstrategy").textContent, approval: field(v, "rapproval").textContent };
+}
+
+function saveSoon(ctx) {
+  if (!ctx.kolAddress || ctx.sent) return;
+  clearTimeout(ctx.saveTimer);
+  ctx.saveTimer = setTimeout(() => saveDraft(ctx), SAVE_DELAY);
+}
+
+async function saveDraft(ctx) {
+  // A save still waiting when another mailbox was picked would go out under that mailbox: dropped instead.
+  if (!ctx.kolAddress || ctx.sent || ctx.account !== st.account) return;
+  const note = field(ctx.view, "savedNote");
+  try {
+    const r = await post("/api/reply/save", { address: ctx.kolAddress, draft: draftFields(ctx) });
+    note.className = "note";
+    note.textContent = r.saved_at ? "草稿已自动保存 " + new Date(r.saved_at * 1000).toTimeString().slice(0, 5) : "";
+  } catch (e) { note.className = "note err"; note.textContent = "草稿没保存上：" + e.message; }
+}
+
+function discardDraft(ctx) {
+  if (!ctx.kolAddress) return;
+  field(ctx.view, "savedNote").textContent = "";
+  post("/api/reply/discard", { address: ctx.kolAddress }).catch(() => {});
+}
+
+async function restoreDraft(ctx, address) {
+  ctx.kolAddress = address || "";
+  if (!ctx.kolAddress) return;
+  const r = await api("/api/reply/saved?address=" + encodeURIComponent(ctx.kolAddress));
+  const d = r.draft || {}, v = ctx.view;
+  // Only into an untouched box: what was typed or drafted while this loaded wins.
+  if (st.current !== ctx || !d.saved_at || ctx.drafted || field(v, "notes").value || field(v, "feedback").value) return;
+  field(v, "notes").value = d.notes || "";
+  field(v, "feedback").value = d.feedback || "";
+  if (d.body) {
+    field(v, "draft").style.display = "block";
+    field(v, "to2").value = d.to || ctx.kolAddress;
+    field(v, "rsubject").value = d.subject || "";
+    field(v, "rlang").textContent = d.lang || "";
+    field(v, "rbody").value = d.body;
+    field(v, "rstrategy").textContent = d.summary || "";
+    field(v, "rapproval").textContent = d.approval || "无";
+    showPairs(ctx, null);
+    const pn = field(v, "pairsNote");
+    pn.className = "stale"; pn.textContent = "这是自动保存的草稿，点“更新对照”重新核对后才能发送";
+  }
+  const when = new Date(d.saved_at * 1000), note = field(v, "savedNote");
+  note.textContent = `已恢复 ${when.toLocaleDateString()} ${when.toTimeString().slice(0, 5)} 自动保存的草稿`;
+  if (d.uncertain) {
+    note.className = "note err";
+    note.textContent += "。上次发送结果不确定，可能已经发出，先到“已发送”里确认，确实没有再发";
+  }
+}
+
 async function send(ctx) {
   const v = ctx.view, to = field(v, "to2").value, subject = field(v, "rsubject").value, body = field(v, "rbody").value;
   if (!body.trim() || st.current !== ctx || !ctx.pairs || ctx.pairs.text !== body) return;
@@ -1438,6 +1526,7 @@ async function send(ctx) {
   if (!confirm(`确认发送？发出后无法撤回。\n\n收件人：${to}\n主题：${subject}${attLine}\n\n${preview}`)) return;
   const note = field(v, "sendNote");
   ctx.sent = true; updateSend(ctx);  // locked from here on: a second click must never send twice
+  clearTimeout(ctx.saveTimer);
   ctx.sendingNow = true; renderOutAtts(ctx); field(v, "attachBtn").disabled = true;
   note.className = "note"; note.textContent = "发送中…";
   try {
@@ -1446,6 +1535,7 @@ async function send(ctx) {
     note.textContent = `已发送给 ${r.to}` + (atts.length ? `，带 ${atts.length} 个附件` : "") +
                        (r.warning ? `。${r.warning}。` : "，副本在“已发送”里。");
     if (r.warning) note.className = "note err";
+    discardDraft(ctx);  // the server dropped it already; this catches a save that was still on its way
     ctx.outAtts.forEach(a => a.url && URL.revokeObjectURL(a.url));
     ctx.outAtts = [];
   } catch (e) {
@@ -1703,7 +1793,7 @@ async function phoneDraft(ctx) {
     field(v, "to2").value = c.channel === "email" ? (c.who.match(/<([^>]+)>/) || [])[1] || "" : "";
     field(v, "rstrategy").textContent = "手机上起草的版本";
     field(v, "rapproval").textContent = "无";
-    showPairs(ctx, null); refreshPairs(ctx);
+    showPairs(ctx, null); refreshPairs(ctx); saveSoon(ctx);
   };
   bar.style.display = "block";
 }
@@ -1759,7 +1849,7 @@ function showSetupTab(id) {
   }
 }
 for (const t of document.querySelectorAll("#setupDlg [role=tab]")) {
-  t.onclick = safe(() => t.dataset.tab === "setupSheet" ? openSheet() : openSetup());
+  t.onclick = safe(() => t.dataset.tab === "setupSheet" ? openSheet() : t.dataset.tab === "setupMail" ? openMail() : openSetup());
   t.onkeydown = e => {
     if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
     const tabs = [...document.querySelectorAll("#setupDlg [role=tab]")], i = tabs.indexOf(t);
@@ -1797,6 +1887,146 @@ $("#setupSave").onclick = safe(async () => {
   try { await post("/api/setup", body); note.textContent = "已保存"; $("#setupDlg").close(); await loadStatus(); }
   catch (e) { note.className = "note err"; note.textContent = e.message; }
   finally { $("#setupSave").disabled = false; }
+});
+// ---------------------------------------------------------------- 邮件格式: font, handwritten name, banner (signature.py)
+// The handwriting is drawn here, in a font this computer has, and uploaded as a PNG at twice the size the mail shows
+// it; an uploaded banner is trimmed of its empty margins and scaled the same way.
+const HANDWRITING = ["Segoe Script", "Ink Free", "Lucida Handwriting", "Brush Script MT", "French Script MT",
+  "Edwardian Script ITC", "Kunstler Script", "Vivaldi", "Mistral", "Gabriola", "Snell Roundhand", "Bradley Hand",
+  "Savoye LET", "Apple Chancery", "Zapfino", "Noteworthy"];
+const NAME_PX = 72;            // drawing size of the handwriting (shown at half)
+const BANNER_MAX = [440, 160];  // pixels of an uploaded banner (shown at half)
+const NAME_INK = "#1f2a44";
+
+function fontAvailable(name) {
+  const c = document.createElement("canvas").getContext("2d"), probe = "Eclair mmmwwwlli 0123";
+  return ["monospace", "serif", "sans-serif"].some(fallback => {
+    c.font = `40px ${fallback}`; const plain = c.measureText(probe).width;
+    c.font = `40px "${name}", ${fallback}`; return c.measureText(probe).width !== plain;
+  });
+}
+
+function trimmed(canvas, pad) {
+  const ctx = canvas.getContext("2d"), { width: w, height: h } = canvas, px = ctx.getImageData(0, 0, w, h).data;
+  let top = h, left = w, right = -1, bottom = -1;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (px[(y * w + x) * 4 + 3] > 8) { top = Math.min(top, y); bottom = Math.max(bottom, y); left = Math.min(left, x); right = Math.max(right, x); }
+  }
+  if (right < 0) return null;
+  const out = document.createElement("canvas");
+  out.width = right - left + 1 + 2 * pad; out.height = bottom - top + 1 + 2 * pad;
+  out.getContext("2d").drawImage(canvas, left, top, right - left + 1, bottom - top + 1, pad, pad, right - left + 1, bottom - top + 1);
+  return out;
+}
+
+function drawName() {
+  const text = $("#mailNameText").value.trim(), font = $("#mailNameFont").value, view = $("#mailNameCanvas");
+  view.hidden = !text || !font;
+  if (view.hidden) return null;
+  const big = document.createElement("canvas"), ctx = big.getContext("2d");
+  ctx.font = `${NAME_PX}px "${font}"`;
+  big.width = Math.ceil(ctx.measureText(text).width + NAME_PX); big.height = Math.ceil(NAME_PX * 1.8);
+  ctx.font = `${NAME_PX}px "${font}"`; ctx.fillStyle = NAME_INK; ctx.textBaseline = "alphabetic";
+  ctx.fillText(text, NAME_PX / 2, NAME_PX * 1.25);
+  const out = trimmed(big, 6);
+  if (!out) { view.hidden = true; return null; }
+  view.width = out.width; view.height = out.height;
+  view.style.width = out.width / 2 + "px"; view.style.height = out.height / 2 + "px";
+  view.getContext("2d").drawImage(out, 0, 0);
+  return out;
+}
+
+async function sendSignaturePicture(kind, blob) {
+  const r = await fetch(`/api/signature/picture?kind=${kind}`, { method: "POST", body: blob,
+    headers: { "X-KOL-Mail": "1", "Content-Type": "image/png" } });
+  const d = await r.json().catch(() => ({ error: "响应无法解析" }));
+  if (!r.ok) throw new Error(d.error || r.statusText);
+  return d;
+}
+const pngOf = canvas => new Promise(ok => canvas.toBlob(ok, "image/png"));
+
+function mailChoices() {
+  return { font: $("#mailFont").value, name_on: $("#mailNameOn").checked, name_text: $("#mailNameText").value.trim(),
+    name_font: $("#mailNameFont").value, banner_on: $("#mailBannerOn").checked };
+}
+
+function showMail(d) {
+  st.mail = d;
+  $("#mailHtmlOff").hidden = d.html_ok;
+  $("#mailFont").textContent = "";
+  for (const f of d.fonts) { const o = new Option(f, f); o.style.fontFamily = `"${f}"`; $("#mailFont").add(o); }
+  $("#mailFont").value = d.font;
+  const fonts = HANDWRITING.filter(fontAvailable);
+  $("#mailNameFont").textContent = "";
+  for (const f of fonts) { const o = new Option(f, f); o.style.fontFamily = `"${f}"`; $("#mailNameFont").add(o); }
+  if (!fonts.length) $("#mailNameFont").add(new Option("这台电脑没有手写体字体", ""));
+  $("#mailNameFont").value = fonts.includes(d.name_font) ? d.name_font : fonts[0] || "";
+  $("#mailNameOn").checked = d.name_on;
+  $("#mailNameText").value = d.name_text || (d.signature || "").split("\n")[0].trim();
+  $("#mailBannerOn").checked = d.banner_on;
+  showBanner(d);
+  drawName();
+}
+
+// Only the banner: a new picture must not undo choices made above it and not saved yet.
+function showBanner(d) {
+  const b = d.pictures.banner;
+  $("#mailBannerImg").hidden = !b;
+  if (b) $("#mailBannerImg").src = `/signature/banner.png?v=${encodeURIComponent(b.version)}`;
+  $("#mailBannerReset").hidden = !(b && b.own);
+}
+
+async function previewMail() {
+  const r = await post("/api/signature/preview", mailChoices());
+  $("#mailPreview").srcdoc = `<!doctype html><meta charset="utf-8"><body style="margin:12px;background:#fff">${r.html}</body>`;
+}
+
+async function openMail() {
+  showSetupTab("setupMail");
+  if (!$("#setupDlg").open) $("#setupDlg").showModal();
+  if (st.setupLoaded && st.setupLoaded.mail) return;
+  st.setupLoaded = { ...(st.setupLoaded || {}), mail: true };
+  $("#mailNote").textContent = "";
+  showMail(await api("/api/signature"));
+  await previewMail();
+}
+
+for (const id of ["#mailNameText", "#mailNameFont"]) $(id).addEventListener("input", () => drawName());
+for (const id of ["#mailFont", "#mailNameOn", "#mailBannerOn"]) $(id).addEventListener("change", safe(previewMail));
+$("#mailClose").onclick = () => $("#setupDlg").close();
+$("#mailSave").onclick = safe(async () => {
+  const note = $("#mailNote"), choices = mailChoices();
+  if (choices.name_on && !choices.name_text) { note.className = "note err"; note.textContent = "手写体名字不能是空的"; return; }
+  $("#mailSave").disabled = true; note.className = "note"; note.textContent = "保存中…";
+  try {
+    const name = choices.name_on ? drawName() : null;
+    if (choices.name_on && !name) throw new Error("没画出手写体名字，换一种字体试试");
+    if (name) await sendSignaturePicture("name", await pngOf(name));
+    showMail(await post("/api/signature", choices));
+    await previewMail();
+    note.textContent = "已保存，之后发出的邮件都按这个样子";
+  } catch (e) { note.className = "note err"; note.textContent = e.message; }
+  finally { $("#mailSave").disabled = false; }
+});
+$("#mailBannerPick").onclick = () => $("#mailBannerFile").click();
+$("#mailBannerFile").onchange = safe(async () => {
+  const f = $("#mailBannerFile").files[0]; $("#mailBannerFile").value = "";
+  if (!f) return;
+  const note = $("#mailNote"); note.className = "note"; note.textContent = "处理图片…";
+  try {
+    const bmp = await createImageBitmap(f), full = document.createElement("canvas");
+    full.width = bmp.width; full.height = bmp.height; full.getContext("2d").drawImage(bmp, 0, 0);
+    const cut = trimmed(full, 0) || full, k = Math.min(1, BANNER_MAX[0] / cut.width, BANNER_MAX[1] / cut.height);
+    const out = document.createElement("canvas");
+    out.width = Math.max(2, Math.round(cut.width * k)); out.height = Math.max(2, Math.round(cut.height * k));
+    const ctx = out.getContext("2d"); ctx.imageSmoothingQuality = "high"; ctx.drawImage(cut, 0, 0, out.width, out.height);
+    showBanner(await sendSignaturePicture("banner", await pngOf(out)));
+    await previewMail(); note.textContent = "banner 已换好";
+  } catch (e) { note.className = "note err"; note.textContent = "图片没换成：" + e.message; }
+});
+$("#mailBannerReset").onclick = safe(async () => {
+  showBanner(await sendSignaturePicture("banner", new Blob([])));
+  await previewMail();
 });
 // ---------------------------------------------------------------- 外观: the desktop pet (and the page theme)
 function showPet(d) {

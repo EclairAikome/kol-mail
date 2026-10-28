@@ -392,11 +392,20 @@ rules:
     source: 主人 2026-10-23“我说的你就照做”
     action: revise
     check: owner_wording
-    # A Chinese clause of the owner's notes counts as a claim when it holds one of these markers, a number or a
-    # Latin word; it is covered when this share of its two-character pieces shows up in the Chinese back-translation.
+    # A Chinese clause of the owner's notes counts as a claim when it holds one of these markers (a selling point),
+    # says something about us (about_us) or gives a price or rate (terms, unless it is the KOL's own: their_terms);
+    # its numbers and names (LootBar, CPS) must then be in the draft, and a marker clause is covered when this share
+    # of its two-character pieces shows up in the Chinese back-translation. Background on the KOL ("粉丝 20w") and
+    # plain asks ("搞个 giveaway") are not claims.
     markers: '最|绝对|任何|确保|保证|100%|高达|远高于|高于|同行|别家|独特|唯一|独家|领先|第一|全网|没有之一|只有我们'
+    about_us: '我们|我方|我司|咱们|lootbar'
+    terms: '\d\s*(美元|美金|刀|usd|\$|%|％|欧元?|eur|卢布|rub|雷亚尔|brl)'
+    their_terms: '(他|她|对方|达人)(的)?(报价|报|要价|要|开价|开|说)'
+    # What stays in-house, clause by clause: our budget or bottom line, and what the owner says not to tell.
+    internal: '预算|底价|底线|心理价|最多(给|能|付|出|到)|最高(给|能|付|出|到)|不超过|上限(是|为|\s*\d)'
+    secret: '别说|不要说|先别说|不说|别告诉|不要告诉|别透露|不要透露|别提|不提(?!供)|内部'
     # Clauses that tell the AI what to do (remove this, ask that, why is this here) are never claims to keep.
-    instruction: '^(帮我|帮忙|问问|问他|问下|告诉他|跟他说|和他说|回复|回他|起草|就这么|你|请你|记得|顺便|把)|忽悠|去掉|拿掉|删|不提|不写|不用|不要|别(写|提|说|发|给|问|加|用|再)|改成|改为|写上|加上|换成|为什么|吗|呢|？|\?|语气|太长|太短|翻译'
+    instruction: '^(帮我|帮忙|问问|问他|问下|告诉他|跟他说|和他说|回复|回他|起草|就这么|你|请你|记得|顺便|把)|忽悠|去掉|拿掉|删|不提(?!供)|不写|不用|不要|别(写|提|说|发|给|问|加|用|再)|改成|改为|写上|加上|换成|为什么|吗|呢|？|\?|语气|太长|太短|翻译'
     min_coverage: 0.2
     number_tolerance: 0.1
     fix: >-

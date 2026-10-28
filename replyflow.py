@@ -66,7 +66,7 @@ CHAT_SCHEMA = {
 
 # ---------------------------------------------------------------- prompts
 
-def _common(owner: str, owner_role: str, company: str, boundary: str, playbook: str) -> str:
+def _common(owner: str, owner_role: str, company: str, boundary: str, playbook: str, hard_rules: str = "") -> str:
     return f"""You work for {owner}, {owner_role}, who negotiates paid promotions with overseas KOLs (influencers).
 Follow the negotiation playbook below strictly: budget lines, CPM rules, approval rules, payment rules and the honesty
 rules about official authorization. Its section "我的谈判方式", if present, is {owner}'s own way of negotiating in
@@ -91,11 +91,25 @@ The user message contains sections wrapped in markers of the form <<{boundary}:N
 
 ===== Negotiation playbook (internal; never quote it to the KOL) =====
 {playbook}
+{hard_rules_section(hard_rules)}"""
+
+
+def hard_rules_section(hard_rules: str) -> str:
+    """The hard rules (compliance.prompt_brief), which an automatic check holds every draft to: they win over the
+    playbook and over common sense."""
+    if not hard_rules.strip():
+        return ""
+    return f"""
+===== Hard rules (internal; every reply is checked against them automatically and sent back if it breaks one) =====
+They hold even where the playbook says nothing or is still the blank template. If OWNER_NOTES or OWNER_FEEDBACK
+explicitly asks for something a rule forbids, do what the owner asks and say so in notes_zh.
+{hard_rules.strip()}
 """
 
 
-def strategy_system(owner: str, owner_role: str, company: str, boundary: str, playbook: str) -> str:
-    return _common(owner, owner_role, company, boundary, playbook) + f"""
+def strategy_system(owner: str, owner_role: str, company: str, boundary: str, playbook: str,
+                    hard_rules: str = "") -> str:
+    return _common(owner, owner_role, company, boundary, playbook, hard_rules) + f"""
 ===== Task =====
 Do not write the email yet. Read the KOL's latest email and the history, then give {owner} the best 2 or 3 genuinely
 different ways to answer it, best first. Different means a different move (e.g. push pure CPS, ask for audience data
@@ -125,8 +139,8 @@ def body_format(channel: str, signature: str) -> str:
 
 
 def draft_system(owner: str, owner_role: str, company: str, boundary: str, playbook: str, signature: str,
-                 channel: str = "email") -> str:
-    return _common(owner, owner_role, company, boundary, playbook) + f"""
+                 channel: str = "email", hard_rules: str = "") -> str:
+    return _common(owner, owner_role, company, boundary, playbook, hard_rules) + f"""
 ===== Task =====
 Write the reply to the KOL following CHOSEN_STRATEGY and OWNER_NOTES (whichever are present; with no strategy,
 OWNER_NOTES says how to answer). If PREVIOUS_DRAFT and
@@ -152,8 +166,8 @@ Output rules:
 
 
 def chat_system(owner: str, owner_role: str, company: str, boundary: str, playbook: str, signature: str,
-                channel: str = "email") -> str:
-    return _common(owner, owner_role, company, boundary, playbook) + f"""
+                channel: str = "email", hard_rules: str = "") -> str:
+    return _common(owner, owner_role, company, boundary, playbook, hard_rules) + f"""
 ===== Task =====
 {owner} is reviewing PREVIOUS_DRAFT (a reply to the KOL) on the phone and wrote OWNER_FEEDBACK to you. It may be a
 question (about the KOL, the numbers, the draft) or a change request, or both.

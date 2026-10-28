@@ -353,3 +353,59 @@ def test_check_only_flags_without_rewriting(monkeypatch):
     draft, _ = asyncio.run(app.enforce_rules(CTX, {"reply_body": BAD, "notes_zh": "重新生成了中文对照",
                                                    "needs_approval_zh": "", "warnings": []}, rewrites=0))
     assert calls == [] and draft["reply_body"] == BAD and draft["compliance"]["ok"] is False
+
+
+@pytest.mark.parametrize("notes,body,zh", [
+    ("她是法国人，粉丝 20w，问她报价", "Hi Marie! Could you tell us your rate?", "您好 Marie！能告诉我们您的报价吗？"),
+    ("可以给他粉丝搞个 giveaway", "Nous pouvons organiser un concours pour vos abonnés.", "我们可以为您的订阅者组织一次抽奖。"),
+    ("预算最多 300，先别说，问他报价", "Could you share your rate for one video?", "您能告诉我们一条视频的报价吗？"),
+    ("我们打包可以给到 3k", "We can offer up to $3K for the package.", "打包我们最多可以给到 3K 美元。"),
+    ("我们的 giveaway 奖品很丰厚", "Les lots de notre concours sont généreux.", "我们抽奖的奖品很丰厚。"),
+])
+def test_background_asks_and_in_house_numbers_are_not_claims_to_keep(notes, body, zh):
+    """Seen on 2026-10-27: notes like these failed every rewrite, because any number or English word counted."""
+    assert "owner-wording-kept" not in found(body, owner_texts=[notes], zh=zh)
+
+
+@pytest.mark.parametrize("notes,body,zh", [
+    ("我们是全网最低价", "LootBar offers some of the best prices on the market.", "LootBar 提供市场上最优惠的价格之一。"),
+    ("我们在trustpilot有5w条评论", "Thanks!", "谢谢！"),
+    ("强调 LootBar 很安全", "Nuestra plataforma es segura.", "我们的平台很安全。"),
+])
+def test_selling_points_and_claims_about_us_must_still_be_kept(notes, body, zh):
+    assert "owner-wording-kept" in found(body, owner_texts=[notes], zh=zh)
+
+
+def test_every_prompt_carries_the_hard_rules():
+    brief = c.prompt_brief()
+    assert brief.count("\n") + 1 == len(c.load().rules) and "纯 CPS 先报默认档" in brief
+    args = {"owner": "Eclair", "owner_role": "BD", "company": "LootBar", "boundary": "b", "playbook": "",
+            "hard_rules": brief}
+    for system in (replyflow.strategy_system(**args), replyflow.draft_system(**args, signature="E"),
+                   replyflow.chat_system(**args, signature="E")):
+        assert "Hard rules" in system and "纯 CPS 先报默认档" in system
+    assert "Hard rules" not in replyflow.draft_system(**{**args, "hard_rules": ""}, signature="E")
+
+
+@pytest.mark.parametrize("notes,kept", [
+    ("预算最多 300，先别说，但我们的佣金远高于同行", ["但我们的佣金远高于同行"]),
+    ("我们保证数据保密", ["我们保证数据保密"]),
+    ("我们不提供保底", ["我们不提供保底"]),
+    ("接受 120 美元一条，要求两条打包", ["接受 120 美元一条"]),
+    ("CPS 佣金 12%", ["CPS 佣金 12%"]),
+    ("他报价 500 美元，太贵", []),
+    ("预算 300 美元", []),
+])
+def test_what_counts_as_a_claim_clause_by_clause(notes, kept):
+    rule = next(r for r in c.load().rules if r["id"] == "owner-wording-kept")
+    assert c.owner_claims(notes, rule)[1] == kept
+
+
+def test_a_price_the_owner_gave_must_be_the_one_in_the_draft():
+    notes = ["接受 120 美元一条，要求两条打包"]
+    assert "owner-wording-kept" in found("We can do 100 USD per video.", owner_texts=notes, zh="每条 100 美元。")
+    assert "owner-wording-kept" not in found("We can do 120 USD per video.", owner_texts=notes, zh="每条 120 美元。")
+
+
+def test_k_in_a_word_is_not_thousands():
+    assert c.amounts_in("20 K-pop fans, a 3K budget") == [20.0, 3.0, 3000.0]

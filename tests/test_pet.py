@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import app  # noqa: E402
 import petfeed  # noqa: E402
-from pet import brain, sprites  # noqa: E402
+from pet import brain, place, sprites  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
 PET_DIR = Path(__file__).resolve().parents[1] / "pet" / "whale-girl"
@@ -194,6 +194,7 @@ def test_dragging_works_again_after_a_click(monkeypatch):
     w.brain = brain.Brain(lambda s: 1000, "b")
     w.sprites = sprites.Sprites((10, 10), {}, "x")  # no part map: a click anywhere opens KOL Mail
     w.press, w.dragging, w.last_x, w.pos = None, False, None, (500, 500)
+    w.hwnd = None  # no window: nothing to remember in physical pixels
     w.client = type("C", (), {"save": lambda self, **k: None})()
     moved, cursor = [], [0, 0]
     monkeypatch.setattr(win, "GetCursorPos", lambda p: (setattr(p._obj, "x", cursor[0]), setattr(p._obj, "y", cursor[1])))
@@ -265,6 +266,7 @@ def pet_on(monkeypatch, screens, pos=(0, 0)):
     monkeypatch.setattr(win, "GetMonitorInfoW", screens.info)
     w = win.PetWindow.__new__(win.PetWindow)
     w.size, w.pos, w.scale = (100, 200), pos, 1.0
+    w.press, w.place, w.data, w.legacy_target = None, None, None, None
     return w
 
 
@@ -298,6 +300,155 @@ def test_when_her_screen_goes_away_she_comes_back_onto_the_nearest_one(monkeypat
     w.pos = (2000, 1500)  # below both: the second one is nearer
     w._handle(None, win.WM_DISPLAYCHANGE, 0, 0)
     assert moved[-1] == (2000, 840)
+
+
+# ---------------------------------------------------------------- her place in physical pixels (pet/place.py)
+
+# A laptop at 150 % with an external monitor at 100 % to its right, in physical pixels.
+PANEL = place.Screen(r"\\.\DISPLAY1", (0, 0, 2560, 1440), (0, 0, 2560, 1380), 144, True)
+DESK = place.Screen(r"\\.\DISPLAY2", (2560, 0, 4480, 1080), (2560, 0, 4480, 1040), 96)
+
+
+def at_96(screen):
+    """Her size there: 100 x 200 at 96 DPI, enlarged by the screen's scaling."""
+    return round(100 * screen.dpi / 96), round(200 * screen.dpi / 96)
+
+
+def test_a_place_on_the_second_screen_is_the_same_place_after_a_restart():
+    """Saved in 96-DPI coordinates, a place on a screen scaled otherwise meant somewhere else at the next start."""
+    saved = place.remember((3000, 600, 3100, 800), [PANEL, DESK], legacy=(2000, 400))
+    assert saved["device"] == DESK.device and saved["feet"] == [3050, 800]
+    x, y, screen, how = place.target(saved, [PANEL, DESK], at_96)
+    assert (x, y, screen, how) == (3000, 600, DESK, "her screen")
+    x, y, screen, _ = place.target(place.remember((900, 900, 1050, 1200), [PANEL, DESK], (600, 600)), [PANEL, DESK],
+                                   at_96)
+    assert (x, y, screen) == (900, 900, PANEL)  # on the 150 % panel she is 150 x 300: her feet stay where they were
+
+
+def test_before_her_screen_is_up_she_waits_on_the_nearest_one_and_goes_back_when_it_comes():
+    saved = place.remember((4300, 800, 4400, 1000), [PANEL, DESK], (0, 0))
+    x, y, screen, how = place.target(saved, [PANEL], at_96)  # logon: the external monitor is not there yet
+    assert screen == PANEL and how.startswith("the nearest") and (x, y) == (2410, 700)
+    assert place.target(saved, [PANEL, DESK], at_96)[:2] == (4300, 800)
+    assert place.target(saved, [], at_96) is None
+
+
+def test_her_screen_at_another_resolution_keeps_her_at_the_same_spot_of_it():
+    saved = place.remember((4300, 800, 4400, 1000), [PANEL, DESK], (0, 0))
+    bigger = place.Screen(DESK.device, (2560, 0, 5120, 1440), (2560, 0, 5120, 1400), 96)
+    x, y, screen, how = place.target(saved, [PANEL, bigger], at_96)
+    assert how == "her screen, resized or moved" and screen == bigger
+    assert (x + 50, y + 200) == (2560 + round((4350 - 2560) / 1920 * 2560), 1000 * 1400 // 1040)
+
+
+def test_screens_that_swapped_names_are_told_apart_by_where_they_are():
+    """\\\\.\\DISPLAY1 and 2 may swap after a restart: the name alone once put her, scaled, on the other screen."""
+    saved = place.remember((3000, 600, 3100, 800), [PANEL, DESK], legacy=(0, 0))
+    swapped = [place.Screen(DESK.device, PANEL.rect, PANEL.work, 144, True),
+               place.Screen(PANEL.device, DESK.rect, DESK.work, 96)]
+    x, y, screen, how = place.target(saved, swapped, at_96)
+    assert (x, y, screen.rect) == (3000, 600, DESK.rect) and "now named" in how
+    # her name went to a screen on the left, and a new screen stands where hers was: she goes to that one
+    left = place.Screen(DESK.device, (-1920, 0, 0, 1080), (-1920, 0, 0, 1040), 96)
+    new = place.Screen(r"\\.\DISPLAY3", (2560, 0, 4480, 1080), (2560, 0, 4480, 1040), 120)
+    x, y, screen, how = place.target(saved, [PANEL, left, new], at_96)
+    assert screen == new and "another screen now" in how and (x + 125 // 2, y + 250) == (3050, 800)
+
+
+def test_a_place_file_counts_only_while_pet_json_still_has_its_x_and_y(tmp_path):
+    saved = place.remember((3000, 600, 3100, 800), [PANEL, DESK], legacy=(2000, 400))
+    place.save(tmp_path, saved)
+    assert place.valid(place.load(tmp_path), {"x": 2000, "y": 400}) == saved
+    assert place.valid(place.load(tmp_path), {"x": 10, "y": 400}) is None  # an older version moved her since
+    newer = place.remember((900, 900, 1050, 1200), [PANEL, DESK], legacy=(600, 600), previous=(2000, 400))
+    place.save(tmp_path, newer)
+    assert place.valid(place.load(tmp_path), {"x": 2000, "y": 400}) == newer  # the app missed the last x, y
+    assert place.valid(place.load(tmp_path), {"x": 600, "y": 600}) == newer
+    assert place.valid({**newer, "previous": "x"}, {"x": 600, "y": 600}) is None
+    for broken in ({**saved, "feet": [1]}, {**saved, "version": 2}, {**saved, "device": None}, [], None):
+        assert place.valid(broken, {"x": 2000, "y": 400}) is None
+    (tmp_path / place.FILE).write_text("{not json", encoding="utf-8")
+    assert place.load(tmp_path) is None and place.load(None) is None
+
+
+def placed_pet(monkeypatch, tmp_path, screens, settings):
+    from pet import win
+    w = win.PetWindow.__new__(win.PetWindow)
+    w.size, w.pos, w.scale, w.settings, w.data, w.hwnd = (100, 200), (0, 0), 1.0, settings, tmp_path, 1
+    w.press, w.place, w.legacy_target, w.screens_seen = None, None, None, ()
+    w.found = list(screens)
+    w.screens = lambda: list(w.found)
+    moves = []
+
+    def move_physical(x, y):  # what Windows would report back in 96 DPI on that screen
+        s = place.holder(w.found, x, y) or w.found[0]
+        moves.append((x, y))
+        w.pos = (round(x * 96 / s.dpi), round(y * 96 / s.dpi))
+    w.move_physical = move_physical
+    w.move = lambda x, y: setattr(w, "pos", (x, y))
+    monkeypatch.setattr(win, "SetThreadDpiAwarenessContext", lambda ctx: None)  # truthy check only
+    return w, moves
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows window code")
+def test_she_starts_on_her_place_and_follows_it_when_screens_come_late_but_not_after_a_drag(monkeypatch, tmp_path):
+    from pet import win
+    place.save(tmp_path, place.remember((3000, 600, 3100, 800), [PANEL, DESK], legacy=(2000, 400)))
+    w, moves = placed_pet(monkeypatch, tmp_path, [PANEL], {"x": 2000, "y": 400})
+    w.place_initially()  # logon: only the panel so far
+    assert moves[-1] == (2410, 500)
+    w.found = [PANEL, DESK]
+    w.check_screens()  # no message came: the next TIMER_CHECK notices
+    assert moves[-1] == (3000, 600)
+    w.check_screens()
+    assert len(moves) == 2  # nothing changed, nothing moved
+    # she is dragged onto the panel: that is her place from now on
+    w.window_rect = lambda: win.W.RECT(900, 900, 1050, 1200)
+    w.remember()
+    assert place.load(tmp_path)["device"] == PANEL.device
+    w._handle(None, win.WM_SETTINGCHANGE, win.SPI_SETWORKAREA, 0)  # an app bar: nothing of hers changed
+    assert len(moves) == 2
+    w.resize = lambda scale: None
+    w.found = [PANEL]  # the monitor unplugged and plugged back: she stays on the panel, where she was put last
+    w._handle(None, win.WM_DISPLAYCHANGE, 0, 0)
+    w.found = [PANEL, DESK]
+    w._handle(None, win.WM_DISPLAYCHANGE, 0, 0)
+    assert moves[-1] == (900, 900) and (3000, 600) not in moves[2:]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows window code")
+def test_a_drag_cut_short_by_a_lost_capture_is_still_her_new_place(monkeypatch, tmp_path):
+    from pet import win
+    w, moves = placed_pet(monkeypatch, tmp_path, [PANEL, DESK], {"x": 2000, "y": 400})
+    w.brain = brain.Brain(lambda s: 1000, "b")
+    saved = []
+    w.client = type("C", (), {"save": lambda self, **k: saved.append(k)})()
+    w.press, w.dragging, w.pos = (0, 0, 600, 600), True, (600, 600)
+    w.window_rect = lambda: win.W.RECT(900, 900, 1050, 1200)
+    w._handle(None, win.WM_MOUSEMOVE, 0, 0)  # Alt+Tab mid-drag: the button is up without a WM_LBUTTONUP
+    assert saved == [{"x": 600, "y": 600}] and not w.dragging and w.press is None
+    assert place.load(tmp_path)["feet"] == [975, 1200] and place.load(tmp_path)["previous"] == [2000, 400]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows window code")
+def test_a_dead_polling_thread_is_noticed_even_when_the_screen_check_fails(monkeypatch, tmp_path):
+    from pet import win
+    w, _ = placed_pet(monkeypatch, tmp_path, [PANEL], {})
+    w.client = type("C", (), {"is_alive": lambda self: False})()
+    w.check_screens = lambda: 1 / 0
+    destroyed = []
+    monkeypatch.setattr(win, "DestroyWindow", lambda h: destroyed.append(h))
+    w._handle(None, win.WM_TIMER, win.TIMER_CHECK, 0)
+    assert destroyed == [1]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows window code")
+def test_an_outdated_place_file_leaves_her_at_pet_json_s_x_and_y(monkeypatch, tmp_path):
+    place.save(tmp_path, place.remember((3000, 600, 3100, 800), [PANEL, DESK], legacy=(2000, 400)))
+    w, moves = placed_pet(monkeypatch, tmp_path, [PANEL, DESK], {"x": 300, "y": 200})
+    monkeypatch.setattr("pet.win.MonitorFromPoint", lambda pt, flags: 1)  # (300, 200) is on a screen
+    w.place_initially()
+    assert moves == [] and w.pos == (300, 200) and w.place is None and w.legacy_target == (300, 200)
 
 
 # ---------------------------------------------------------------- sprites

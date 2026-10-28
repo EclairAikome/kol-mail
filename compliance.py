@@ -65,7 +65,7 @@ _cache: dict = {"mtime": None, "path": None, "rules": None}
 
 
 REGEX_KEYS = ("near", "exempt", "kol_mentions", "unless_owner", "trigger", "reminder", "games", "markers",
-              "instruction")
+              "instruction", "about_us", "internal", "secret", "terms", "their_terms")
 NUMBER_KEYS = ("cap", "min_coverage", "number_tolerance")
 
 
@@ -371,8 +371,11 @@ def check_reasking_received(rule: dict, body: str, ctx: Context, v: dict) -> lis
 
 
 def owner_claims(text: str, rule: dict) -> tuple[list[str], list[str]]:
-    """(phrases quoted in a foreign language, which must appear word for word; Chinese claim clauses). Clauses that
-    tell the AI what to do ("把这句去掉", "为什么写了 CPS？") are instructions, not claims."""
+    """(phrases quoted in a foreign language, which must appear word for word; Chinese claim clauses). A claim is a
+    selling point (a marker such as 最 or 远高于), something said about us (about_us) or a price or rate we give
+    (terms: "120 美元一条", "佣金 12%"). The rest of the owner's notes is instructions ("把这句去掉", "为什么写了
+    CPS？") and background ("粉丝 20w", "她是法国人"), not words to keep, and neither is what stays in-house: a clause
+    that says not to tell (secret) or one about our budget or bottom line (internal)."""
     quoted, claims = [], []
     for q in re.findall(r"[“\"「『]([^”\"」』\n]{3,})[”\"」』]", text or ""):
         (claims if HAN_RUN.search(q) else quoted).append(q.strip())
@@ -382,17 +385,36 @@ def owner_claims(text: str, rule: dict) -> tuple[list[str], list[str]]:
             continue
         for clause in re.split(r"[，,、]+", sentence):
             clause = clause.strip(" “”\"「」『』。！!；;\n")
-            if not HAN_RUN.search(clause) or (rule.get("instruction") and rule["instruction"].search(clause)):
+            if not HAN_RUN.search(clause) or any(rule.get(k) and rule[k].search(clause)
+                                                 for k in ("instruction", "internal", "secret")):
                 continue
-            if (rule.get("markers") and rule["markers"].search(clause)) or owner_numbers(clause) or LATIN.search(clause):
+            if any(rule.get(k) and rule[k].search(clause) for k in ("markers", "about_us")):
+                claims.append(clause)
+            elif rule.get("terms") and rule["terms"].search(clause) \
+                    and not (rule.get("their_terms") and rule["their_terms"].search(clause)):
                 claims.append(clause)
     return quoted, list(dict.fromkeys(claims))
 
 
+def names_in(text: str) -> list[str]:
+    """The Latin words of a claim that no translation changes: names and codes such as LootBar, Trustpilot, CPS or
+    TikTok (a capital or a digit in them). Lower-case words ("giveaway", "brief") come out in the KOL's language."""
+    return [w for w in LATIN.findall(text or "") if any(ch.isupper() or ch.isdigit() for ch in w)]
+
+
+THOUSANDS = re.compile(r"(\d+(?:[.,]\d+)?)\s?(?:k(?![-\w])|mil\b|тыс)", re.IGNORECASE)
+
+
+def amounts_in(text: str) -> list[float]:
+    """numbers_in, plus "3K", "50 mil" and "50 тыс." read as thousands."""
+    return numbers_in(text) + [float(n.replace(",", ".")) * 1000 for n in THOUSANDS.findall(text or "")]
+
+
 def check_owner_wording(rule: dict, body: str, ctx: Context, v: dict) -> list[str]:
     plain = " ".join(body.split()).casefold()
+    zh_plain = ctx.zh.casefold()
     zh_grams = bigrams(ctx.zh)
-    body_numbers = numbers_in(body)
+    body_numbers = amounts_in(body)
     tolerance = float(rule.get("number_tolerance", 0.1))
     need = float(rule.get("min_coverage", 0.2))
     missing = []
@@ -402,7 +424,7 @@ def check_owner_wording(rule: dict, body: str, ctx: Context, v: dict) -> list[st
         for clause in claims:
             nums = owner_numbers(clause)
             lost_number = any(not any(abs(b - n) <= tolerance * max(abs(n), 1) for b in body_numbers) for n in nums)
-            lost_word = any(w.casefold() not in plain for w in LATIN.findall(clause))
+            lost_word = any(w.casefold() not in plain and w.casefold() not in zh_plain for w in names_in(clause))
             grams = bigrams(clause)
             weak = bool(rule.get("markers") and rule["markers"].search(clause) and grams
                         and len(grams & zh_grams) / len(grams) < need)
@@ -478,6 +500,13 @@ def revision_brief(violations: list[Violation]) -> str:
         quotes = "; ".join(f'"{e}"' for e in v.evidence)
         blocks.append(f"{n}. Rule {v.rule}. Found: {quotes}\n   Fix: {v.fix}")
     return "\n".join(blocks)
+
+
+def prompt_brief(rules: Rules | None = None) -> str:
+    """Every rule in one line, for the model to keep while it writes: a draft that knows the rules up front does not
+    have to break one before it is told (the playbook on a colleague's machine may be the empty template)."""
+    rules = rules or load()
+    return "\n".join(f"- {r['title_zh']}" for r in rules.rules)
 
 
 def summary_zh(violations: list[Violation]) -> str:

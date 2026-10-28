@@ -34,7 +34,7 @@ def main() -> int:
         from pet import win
         if not win.single_instance(args.port):
             return ANOTHER
-        return win.run(args.port, args.boot, settings, sprites)
+        return win.run(args.port, args.boot, settings, sprites, args.data)
     if sys.platform == "darwin":
         try:
             from pet import mac

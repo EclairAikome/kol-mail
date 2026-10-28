@@ -23,6 +23,7 @@ import threading
 import time
 
 from . import brain as brain_mod
+from . import place as place_mod
 from .client import Client, own_page
 from .sprites import Sprites
 
@@ -39,6 +40,7 @@ WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE = 0x80000, 0x8,
 WM_DESTROY, WM_TIMER, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE = 0x0002, 0x0113, 0x0201, 0x0202, 0x0200
 WM_RBUTTONUP, WM_SETCURSOR, WM_COMMAND, WM_APP, WM_DISPLAYCHANGE, WM_DPICHANGED = 0x0205, 0x0020, 0x0111, 0x8000, 0x007E, 0x02E0
 WM_MOUSEACTIVATE, MA_NOACTIVATE = 0x0021, 3
+WM_SETTINGCHANGE, SPI_SETWORKAREA = 0x001A, 0x002F
 MK_LBUTTON = 0x0001
 QUNS_BUSY, QUNS_RUNNING_D3D_FULL_SCREEN, QUNS_PRESENTATION_MODE = 2, 3, 4
 SW_HIDE, SW_SHOWNOACTIVATE = 0, 4
@@ -49,6 +51,7 @@ MF_STRING, MF_SEPARATOR, MF_CHECKED, MF_POPUP = 0x0, 0x800, 0x8, 0x10
 TPM_RETURNCMD, TPM_RIGHTBUTTON = 0x100, 0x2
 IDC_HAND, IDC_ARROW = 32649, 32512
 MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL = 2, 0
+MONITORINFOF_PRIMARY, MDT_EFFECTIVE_DPI = 1, 0
 ERROR_ALREADY_EXISTS = 183
 TIMER_CHECK, TIMER_QUIT = 2, 3
 WM_TICK = 0x8001  # WM_APP + 1: the animation beat
@@ -79,6 +82,11 @@ class BLENDFUNCTION(ctypes.Structure):
 
 class MONITORINFO(ctypes.Structure):
     _fields_ = [("cbSize", W.DWORD), ("rcMonitor", W.RECT), ("rcWork", W.RECT), ("dwFlags", W.DWORD)]
+
+
+class MONITORINFOEXW(ctypes.Structure):
+    _fields_ = [("cbSize", W.DWORD), ("rcMonitor", W.RECT), ("rcWork", W.RECT), ("dwFlags", W.DWORD),
+                ("szDevice", W.WCHAR * 32)]
 
 
 class GdiplusStartupInput(ctypes.Structure):
@@ -142,6 +150,16 @@ SHQueryUserNotificationState = _sig(ctypes.WinDLL("shell32"), "SHQueryUserNotifi
                                     ctypes.POINTER(ctypes.c_int))
 MonitorFromPoint = _sig(user32, "MonitorFromPoint", W.HMONITOR, W.POINT, W.DWORD)
 GetMonitorInfoW = _sig(user32, "GetMonitorInfoW", W.BOOL, W.HMONITOR, ctypes.POINTER(MONITORINFO))
+GetMonitorInfoExW = user32["GetMonitorInfoW"]  # a second function object: the same call with the longer struct
+GetMonitorInfoExW.restype, GetMonitorInfoExW.argtypes = W.BOOL, [W.HMONITOR, ctypes.POINTER(MONITORINFOEXW)]
+MONITORENUMPROC = ctypes.WINFUNCTYPE(W.BOOL, W.HMONITOR, W.HDC, ctypes.POINTER(W.RECT), W.LPARAM)
+EnumDisplayMonitors = _sig(user32, "EnumDisplayMonitors", W.BOOL, W.HDC, ctypes.POINTER(W.RECT), MONITORENUMPROC,
+                           W.LPARAM)
+try:  # Windows 8.1+
+    GetDpiForMonitor = _sig(ctypes.WinDLL("shcore"), "GetDpiForMonitor", ctypes.c_long, W.HMONITOR, ctypes.c_int,
+                            ctypes.POINTER(W.UINT), ctypes.POINTER(W.UINT))
+except (AttributeError, OSError):
+    GetDpiForMonitor = None
 CreateCompatibleDC = _sig(gdi32, "CreateCompatibleDC", W.HDC, W.HDC)
 DeleteDC = _sig(gdi32, "DeleteDC", W.BOOL, W.HDC)
 CreateDIBSection = _sig(gdi32, "CreateDIBSection", W.HBITMAP, W.HDC, ctypes.POINTER(BITMAPINFOHEADER), W.UINT, PVP,
@@ -493,8 +511,9 @@ class Cache:
 
 
 class PetWindow:
-    def __init__(self, sprites: Sprites, port: int, boot: str, settings_hint: dict):
+    def __init__(self, sprites: Sprites, port: int, boot: str, settings_hint: dict, data=None):
         self.sprites = sprites
+        self.data = data  # the app's data folder, for pet-place.json
         self.client = Client(port, wake=lambda: PostMessageW(self.hwnd, WM_APP, 0, 0))
         self.brain = brain_mod.Brain(lambda s: sprites.get(s).loop_ms, boot)
         self.settings = dict(settings_hint)
@@ -507,7 +526,10 @@ class PetWindow:
         self.bubble_key = None
         self.shown_state, self.frame, self.started = "", -1, 0.0
         self.shown_key = None  # the state and the one-off move it belongs to
-        self.pos = (0, 0)
+        self.pos = (0, 0)  # 96-DPI coordinates, as the window itself sees them
+        self.place: dict | None = None  # where she was put, in physical pixels (place.py); None: only pet.json's x, y
+        self.legacy_target: tuple[int, int] | None = None  # pet.json's x, y while there is no place yet
+        self.screens_seen = ()  # place.signature of the screens she was last placed on
         self.size = (1, 1)
         self.scale = 1.0
         self.press: tuple[int, int, int, int] | None = None  # cursor and window position at mouse down
@@ -622,17 +644,95 @@ class PetWindow:
         return max(wa.left, min(x, wa.right - w)), max(wa.top, min(y, wa.bottom - h))
 
     def place_initially(self):
+        self.place = place_mod.valid(place_mod.load(self.data), self.settings)
+        if self.place and self.restore("start"):
+            return
         x, y = self.settings.get("x"), self.settings.get("y")
         w, h = self.size
         if x is not None and y is not None:
+            self.legacy_target = (x, y)
             self.pos = self.on_screen(x, y)
+            log_place("start", f"saved x/y {x},{y} (96 dpi, no {place_mod.FILE})", self.pos)
             return
         wa = self.work_area(0, 0)  # primary monitor: bottom right, just above the taskbar
         self.pos = (wa.right - w - 24, wa.bottom - h)
+        log_place("start", "never moved: bottom right of the primary screen", self.pos)
+
+    # ---------------------------------------------------------------- her place in physical pixels (place.py)
+
+    def screens(self) -> list[place_mod.Screen]:
+        return screens()
+
+    def size_on(self, screen: place_mod.Screen) -> tuple[int, int]:
+        """Her size in physical pixels on that screen: the compositor enlarges the DPI-unaware window by its scaling."""
+        if not SetThreadDpiAwarenessContext:  # older Windows: drawn at the screen's DPI already
+            return self.size
+        k = screen.dpi / 96.0
+        return round(self.size[0] * k), round(self.size[1] * k)
+
+    def restore(self, why: str, found: list[place_mod.Screen] | None = None) -> bool:
+        """Put her where self.place says, on the screens there are now. False without any screen to go by."""
+        found = self.screens() if found is None else found
+        aim = place_mod.target(self.place, found, self.size_on)
+        if not aim:
+            return False
+        x, y, screen, how = aim
+        self.screens_seen = place_mod.signature(found)
+        self.move_physical(x, y)
+        log_place(why, f"saved feet {self.place['feet']} on {self.place['device']}; {how} {screen.device}, "
+                       f"physical {x},{y}", self.pos, found)
+        return True
+
+    def remember(self):
+        """Her place after a drag or a new size, kept in physical pixels next to pet.json's x and y."""
+        if not self.hwnd:
+            return
+        found = self.screens()
+        with dpi_context(DPI_PER_MONITOR_V2):
+            r = self.window_rect()
+        previous = self.place["legacy"] if self.place else (self.settings.get("x"), self.settings.get("y"))
+        place = place_mod.remember((r.left, r.top, r.right, r.bottom), found, self.pos,
+                                   None if None in previous else previous)
+        self.legacy_target = None  # she was put somewhere on purpose: no older place to go back to
+        if place:
+            self.place, self.screens_seen = place, place_mod.signature(found)
+            place_mod.save(self.data, place)
+
+    def screens_changed(self, why: str):
+        """A screen came or went, changed its scaling or its taskbar: back to her place, as near as it now allows."""
+        if self.press:  # mid-drag: the drop decides
+            return
+        if self.place:
+            found = self.screens()
+            if place_mod.signature(found) == self.screens_seen:  # nothing of hers changed (an app bar, say)
+                return
+            if self.restore(why, found):
+                return
+        pos = self.on_screen(*(self.legacy_target or self.pos))  # her screen may have just been unplugged
+        if pos != self.pos:
+            self.move(*pos)
+            log_place(why, "no place in physical pixels: onto the nearest screen", self.pos)
+
+    def check_screens(self):
+        """The same without a message from Windows (one may be missed at logon): every TIMER_CHECK, microseconds."""
+        if self.place and not self.press:
+            found = self.screens()
+            if place_mod.signature(found) != self.screens_seen:
+                self.restore("screens changed", found)
 
     def move(self, x: int, y: int):
         self.pos = (x, y)
         SetWindowPos(self.hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE)
+        self.place_bubble()
+
+    def move_physical(self, x: int, y: int):
+        """Move in physical pixels (asked in the per-monitor context), then read back what that is in her own 96-DPI
+        coordinates, which every later frame is drawn at."""
+        with dpi_context(DPI_PER_MONITOR_V2):
+            SetWindowPos(self.hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE)
+        with dpi_context(DPI_UNAWARE):
+            r = self.window_rect()
+        self.pos = (r.left, r.top)
         self.place_bubble()
 
     # ---------------------------------------------------------------- drawing
@@ -866,6 +966,7 @@ class PetWindow:
             scale = (0.75, 1.0, 1.25)[cmd - 11]
             self.resize(scale)
             self.client.save(scale=scale, x=self.pos[0], y=self.pos[1])
+            self.remember()
         elif cmd == 3:
             self.client.save(enabled=False)
             self.brain.quit_reason = "hidden from the menu"
@@ -873,6 +974,13 @@ class PetWindow:
             ShowWindow(self.bubble_hwnd, SW_HIDE)
             # the save goes out on the client thread's next turn: give it that long before the process ends
             SetTimer(self.hwnd, TIMER_QUIT, 2500, None)
+
+    def drop(self):
+        """The end of a drag, by letting go or by a lost capture: where she is now is her place."""
+        self.dragging = False
+        self.brain.on_drop()
+        self.client.save(x=self.pos[0], y=self.pos[1])
+        self.remember()
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
         try:
@@ -887,10 +995,12 @@ class PetWindow:
             return 0
         if msg == WM_TIMER:
             if wparam == TIMER_CHECK:
-                self.fullscreen_check()
                 if not self.client.is_alive():  # without it the pet would never hear "leave" again
                     print("pet stopped: the polling thread died", flush=True)
                     DestroyWindow(self.hwnd)
+                    return 0
+                self.fullscreen_check()
+                self.check_screens()
             elif wparam == TIMER_QUIT:
                 DestroyWindow(self.hwnd)
             return 0
@@ -914,8 +1024,10 @@ class PetWindow:
             SetCapture(hwnd)
             return 0
         if msg == WM_MOUSEMOVE and self.press:
-            if not wparam & MK_LBUTTON:  # the capture was lost mid-drag (Alt+Tab, a dialog): forget the press
-                self.press, self.dragging, self.last_x = None, False, None
+            if not wparam & MK_LBUTTON:  # the capture was lost mid-drag (Alt+Tab, a dialog): she stays there
+                self.press, self.last_x = None, None
+                if self.dragging:
+                    self.drop()
                 return 0
             pt = W.POINT()
             GetCursorPos(ctypes.byref(pt))
@@ -933,9 +1045,7 @@ class PetWindow:
             self.press = None
             self.last_x = None
             if self.dragging:
-                self.dragging = False
-                self.brain.on_drop()
-                self.client.save(x=self.pos[0], y=self.pos[1])
+                self.drop()
             else:
                 self.click(self.press_part)
             self.render()
@@ -945,9 +1055,10 @@ class PetWindow:
             return 0
         if msg in (WM_DISPLAYCHANGE, WM_DPICHANGED):
             self.resize(self.scale)
-            pos = self.on_screen(*self.pos)  # her screen may have just been unplugged
-            if pos != self.pos:
-                self.move(*pos)
+            self.screens_changed("display change")
+            return 0
+        if msg == WM_SETTINGCHANGE and wparam == SPI_SETWORKAREA:  # a taskbar came up, moved or changed size
+            self.screens_changed("work area change")
             return 0
         if msg == WM_DESTROY:
             self.client.stopped.set()
@@ -987,6 +1098,42 @@ class PetWindow:
             DispatchMessageW(ctypes.byref(msg))
 
 
+def monitor_dpi(mon) -> int:
+    x, y = W.UINT(), W.UINT()
+    if GetDpiForMonitor and GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, ctypes.byref(x), ctypes.byref(y)) == 0:
+        return x.value
+    return 96
+
+
+def screens() -> list[place_mod.Screen]:
+    """The screens in physical pixels, primary first, with their names and scaling."""
+    found = []
+
+    def each(mon, dc, rect, data):
+        info = MONITORINFOEXW()
+        info.cbSize = ctypes.sizeof(MONITORINFOEXW)
+        if GetMonitorInfoExW(mon, ctypes.byref(info)):
+            m, wk = info.rcMonitor, info.rcWork
+            found.append(place_mod.Screen(info.szDevice, (m.left, m.top, m.right, m.bottom),
+                                          (wk.left, wk.top, wk.right, wk.bottom), monitor_dpi(mon),
+                                          bool(info.dwFlags & MONITORINFOF_PRIMARY)))
+        return True
+
+    callback = MONITORENUMPROC(each)  # kept referenced for the call
+    with dpi_context(DPI_PER_MONITOR_V2):
+        EnumDisplayMonitors(None, None, callback, 0)
+    return sorted(found, key=lambda s: not s.primary)
+
+
+def log_place(why: str, what: str, pos: tuple[int, int], found: list | None = None):
+    """Into data/pet.log: enough to tell, from a colleague's machine, why she stood where she did."""
+    try:
+        shown = place_mod.describe(screens() if found is None else found)
+    except Exception as e:  # noqa: BLE001  a log line must never stop her
+        shown = repr(e)
+    print(f"pet place ({why}): {what}; now at {pos[0]},{pos[1]} (96 dpi); screens: {shown}", flush=True)
+
+
 def single_instance(port: int) -> bool:
     """A named mutex per port: a second pet for the same app sees it and leaves."""
     single_instance.handle = CreateMutexW(None, False, f"Local\\kol-mail-pet-{port}")
@@ -1000,9 +1147,9 @@ def dpi_aware():
         user32.SetProcessDPIAware()
 
 
-def run(port: int, boot: str, settings: dict, sprites: Sprites) -> int:
+def run(port: int, boot: str, settings: dict, sprites: Sprites, data=None) -> int:
     dpi_aware()
-    w = PetWindow(sprites, port, boot, settings)
+    w = PetWindow(sprites, port, boot, settings, data)
     w.create()
     w.loop()
     print("pet stopped:", w.brain.quit_reason, flush=True)

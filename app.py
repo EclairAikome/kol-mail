@@ -58,6 +58,8 @@ import received  # noqa: E402
 import replyflow  # noqa: E402
 import compliance  # noqa: E402
 import onboarding  # noqa: E402
+import mailserver  # noqa: E402
+import signature  # noqa: E402
 from sheet import popogrid  # noqa: E402  (a POPO 在线表格 as the KOL sheet)
 from sheet import googlegrid  # noqa: E402  (a colleague's own Google 表格 as the KOL sheet)
 
@@ -200,6 +202,9 @@ def body_hash(text: str) -> str:
 
 # ---------------------------------------------------------------- cache
 
+DRAFT_KEEP = 60 * 24 * 3600  # seconds an autosaved reply nobody came back to is kept
+
+
 class Cache:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -237,6 +242,12 @@ class Cache:
                 account TEXT NOT NULL, message_id TEXT NOT NULL, received TEXT NOT NULL, checked_at REAL NOT NULL,
                 PRIMARY KEY (account, message_id))"""
         )
+        # The reply being written to a KOL, saved as it is typed, per mailbox; gone once the reply is sent.
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS reply_drafts (
+                account TEXT NOT NULL, address TEXT NOT NULL, draft TEXT NOT NULL, saved_at REAL NOT NULL,
+                PRIMARY KEY (account, address))"""
+        )
         # Jobs live in memory only; anything still 'pending' was lost with the previous process.
         self.db.execute("UPDATE translations SET status='failed', error='服务重启，等待重新翻译' WHERE status='pending'")
         self.db.commit()
@@ -249,8 +260,35 @@ class Cache:
         cur = self.db.execute("DELETE FROM translations WHERE message_id IN "
                               "(SELECT message_id FROM account_messages WHERE account=?)", (account,))
         self.db.execute("DELETE FROM account_messages WHERE account=?", (account,))
+        self.db.execute("DELETE FROM reply_drafts WHERE account=?", (account,))
         self.db.commit()
         return cur.rowcount
+
+    def draft(self, account: str, address: str) -> dict | None:
+        row = self.db.execute("SELECT draft, saved_at FROM reply_drafts WHERE account=? AND address=?",
+                              (account, address)).fetchone()
+        return {**json.loads(row["draft"]), "saved_at": row["saved_at"]} if row else None
+
+    def save_draft(self, account: str, address: str, draft: dict):
+        """Keeps the mark of a send whose outcome was unknown, and forgets drafts nobody came back to for long."""
+        old = self.draft(account, address)
+        if old and old.get("uncertain"):
+            draft = {**draft, "uncertain": True}
+        self.db.execute("DELETE FROM reply_drafts WHERE saved_at < ?", (time.time() - DRAFT_KEEP,))
+        self.db.execute("INSERT OR REPLACE INTO reply_drafts (account, address, draft, saved_at) VALUES (?,?,?,?)",
+                        (account, address, json.dumps(draft, ensure_ascii=False), time.time()))
+        self.db.commit()
+
+    def draft_uncertain(self, account: str, address: str):
+        """A send of this draft may have gone out: reopened later, it says so before it can be sent again."""
+        old = self.draft(account, address)
+        if old:
+            old.pop("saved_at", None)
+            self.save_draft(account, address, {**old, "uncertain": True})
+
+    def drop_draft(self, account: str, address: str):
+        self.db.execute("DELETE FROM reply_drafts WHERE account=? AND address=?", (account, address))
+        self.db.commit()
 
     def get(self, message_id: str):
         row = self.db.execute("SELECT * FROM translations WHERE message_id=?", (message_id,)).fetchone()
@@ -333,7 +371,24 @@ class NotReady(MailError):
     """The backend was not connected, so the request was never sent."""
 
 
+def server_python() -> Path | None:
+    """The Python of the venv mcp-email-server is installed in, which can run mailserver.py; None when there is none
+    (a hand-made setup pointing mcp_exe somewhere else): the server then runs unpatched and replies stay plain text."""
+    exe = Path(MCP_EXE or "")
+    if not MCP_EXE or not exe.is_file():
+        return None
+    python = exe.with_name("python.exe" if os.name == "nt" else "python")
+    return python if python.is_file() and mailserver.supported() else None
+
+
+SERVER_PYTHON = server_python()
+HTML_MAIL = SERVER_PYTHON is not None  # font, handwritten name and banner (signature.py) need the patched server
+
+
 def mail_params() -> StdioServerParameters:
+    if SERVER_PYTHON:
+        return StdioServerParameters(command=str(SERVER_PYTHON), args=[str(BASE / "mailserver.py"), "stdio"],
+                                     env=dict(os.environ))
     return StdioServerParameters(command=MCP_EXE, args=["stdio"], env=dict(os.environ))
 
 
@@ -1836,7 +1891,7 @@ async def offhours_email_reply(cfg, meta: dict, address: str, received: datetime
     refs = " ".join(x for x in [msg.get("references"), msg.get("message_id")] if x)
     body = cfg.reply_text("email", language) + "\n" + SIGNATURE
     try:
-        result = await bg.send(recipients=[address], subject=subject, body=body,
+        result = await bg.send(recipients=[address], subject=subject, **mail_args(body),
                                in_reply_to=msg.get("message_id"), references=refs or None)
         delivered, warning, message_id = send_outcome(result, [address])
         status = "sent" if delivered else "uncertain"
@@ -2190,11 +2245,12 @@ async def _send_case(case: dict) -> tuple[str, str]:
         return "handled", "这封邮件已经变了（可能被移动），没有发送，请到电脑上处理"
     received = parse_date(msg.get("date")) or datetime.fromisoformat(case["created_at"])
     if answered_by_hand(await _checked(bg.sent_to(kol, limit=3)), received, kol):
+        cache.drop_draft(ACCOUNT, kol)  # answered already: a half-written reply to it is not work left
         return "handled", "你已经在电脑上回过这封了，这版不再发送"
     subject = strip_hidden(re.sub(r"[\r\n]+", " ", reply_subject(msg.get("subject") or ""))).strip()
     refs = " ".join(x for x in [msg.get("references"), msg.get("message_id")] if x)
     try:
-        result = await mail.send(recipients=[kol], subject=subject, body=case["body"],
+        result = await mail.send(recipients=[kol], subject=subject, **mail_args(case["body"]),
                                  in_reply_to=msg.get("message_id"), references=refs or None)
     except NotReady as e:
         return "drafted", f"邮件后端没连上，没有发出：{err_text(e)}"
@@ -2203,6 +2259,7 @@ async def _send_case(case: dict) -> tuple[str, str]:
     delivered, warning, message_id = send_outcome(result, [kol])
     if not delivered:
         return "uncertain", f"发送结果不确定：{result[:150]}"
+    cache.drop_draft(ACCOUNT, kol)  # answered from the phone: a reply half-written on the PC is no longer needed
     sent_changed()
     sheet_guard("记录手机审批回信", sheet_after_send, kol, subject, "我方回信（手机审批）：" + gist(case["zh"] or case["body"]),
                 "", message_id)
@@ -3224,6 +3281,20 @@ async def api_pet_settings(request: Request):
 
 
 looks = skin.Skin(DATA)
+signing = signature.Signature(DATA)
+
+
+def mail_args(text: str, files: list[str] | None = None) -> dict:
+    """send_email arguments for a reply's text and its own attachments: HTML in the chosen font with the handwritten
+    name and the banner (signature.py) when the patched server runs, plain text otherwise or when that fails."""
+    out = {"body": text}
+    if HTML_MAIL:
+        try:
+            out = signing.outgoing(text, SIGNATURE)
+        except OSError as e:  # a picture that cannot be read never stops a reply: it goes as plain text
+            log("signature pictures left out", err_text(e))
+    attachments = [*out.pop("attachments", []), *(files or [])]
+    return {**out, **({"attachments": attachments} if attachments else {})}
 
 
 async def api_skin(request: Request):
@@ -3256,6 +3327,70 @@ async def page_wallpaper(request: Request):
     if not s["wallpaper"]:
         return Response(status_code=404)
     return FileResponse(looks.wallpaper_path(s), media_type=skin.TYPES[s["wallpaper"]["ext"]],
+                        headers={"Cache-Control": "private, max-age=31536000, immutable"})
+
+
+# ---------------------------------------------------------------- 邮件格式: font and signature pictures (signature.py)
+
+PREVIEW_TEXT = "Hi Ana,\n\nThanks for getting back to us! Here is how our replies will look.\n\nBest regards,"
+
+
+def signature_state() -> dict:
+    s = signing.load()
+    pictures = {k: signing.shown(k) for k in signature.KINDS}
+    return {**{k: v for k, v in s.items() if k != "versions"}, "fonts": list(signature.FONTS), "html_ok": HTML_MAIL,
+            "pictures": pictures, "signature": SIGNATURE}
+
+
+async def api_signature(request: Request):
+    if request.method == "POST":
+        body = await request.json()
+        if not isinstance(body, dict):
+            return bad("参数不完整")
+        try:
+            signing.save({k: body[k] for k in ("font", "name_on", "name_text", "name_font", "banner_on") if k in body})
+        except OSError as e:
+            return bad(f"保存失败：{err_text(e)}", 500)
+    return JSONResponse(signature_state())
+
+
+async def api_signature_picture(request: Request):
+    """?kind=name|banner, the PNG as the raw body (drawn or trimmed by the page at twice its shown size); an empty
+    body removes the owner's own picture (the banner then goes back to the team's)."""
+    kind = request.query_params.get("kind", "")
+    data = bytearray()
+    async for chunk in request.stream():
+        data += chunk
+        if len(data) > signature.MAX_PICTURE:
+            return bad("图片最大 1 MB")
+    try:
+        if data:
+            await asyncio.to_thread(signing.set_picture, kind, bytes(data))
+        else:
+            signing.remove_picture(kind)
+    except (signature.SignatureError, OSError) as e:
+        return bad(str(e))
+    return JSONResponse(signature_state())
+
+
+async def api_signature_preview(request: Request):
+    """The HTML a reply would have, with the pictures from /signature/ instead of cid:, for the settings preview."""
+    body = await request.json()
+    current = signing.load()
+    changes = {k: body[k] for k in ("font", "name_on", "name_text", "name_font", "banner_on")
+               if isinstance(body, dict) and k in body}
+    s = signature.clean({**current, **changes})
+    sizes = {k: signing.shown(k) for k in signing.pictures(s)}
+    sources = {k: f"/signature/{k}.png?v={size['version']}" for k, size in sizes.items() if size}
+    text = PREVIEW_TEXT + "\n" + SIGNATURE
+    return JSONResponse({"html": signature.render(text, SIGNATURE, s, sources, sizes)})
+
+
+async def page_signature_picture(request: Request):
+    path = signing.picture(request.path_params["kind"]) if request.path_params["kind"] in signature.KINDS else None
+    if not path:
+        return Response(status_code=404)
+    return FileResponse(path, media_type="image/png",
                         headers={"Cache-Control": "private, max-age=31536000, immutable"})
 
 
@@ -4062,7 +4197,9 @@ async def api_thread(request: Request):
         out.append({"mailbox": box, "email_id": str(full["email_id"]), "message_id": mid, "own": own,
                     "sender": full.get("sender"), "recipients": full.get("recipients"), "date": shown_date(full),
                     "subject": full.get("subject"), "body": full.get("body", ""),
-                    "attachments": full.get("attachments") or [], "translation": row, "opened": is_opened})
+                    "attachments": [a for a in full.get("attachments") or []
+                                    if not (own and mailserver.is_signature_picture(a))],  # our signature's pictures
+                    "translation": row, "opened": is_opened})
     if not msg.get("sender") or sender_address(msg.get("sender")) != self_address():
         spawn(mark_read_later(mailbox, email_id), "mark read")
     others = collections.defaultdict(list)  # the whole conversation is on screen: its unread KOL mails too
@@ -5217,7 +5354,16 @@ async def reply_context(body: dict) -> tuple[str, dict]:
 
 def prompt_args(boundary: str) -> dict:
     return {"owner": OWNER, "owner_role": OWNER_ROLE, "company": COMPANY, "boundary": boundary,
-            "playbook": read_file(PLAYBOOK, "谈判手册")}
+            "playbook": read_file(PLAYBOOK, "谈判手册"), "hard_rules": hard_rules()}
+
+
+def hard_rules() -> str:
+    """The rule list for the prompts; "" when the rule file is broken (enforce_rules then says the check was skipped)."""
+    try:
+        return compliance.prompt_brief()
+    except compliance.RulesError as e:
+        log("hard rules left out of the prompt", err_text(e))
+        return ""
 
 
 async def propose_strategies(ctx: dict, notes: str) -> dict:
@@ -5442,6 +5588,46 @@ async def api_reply_pairs(request: Request):
         return reply_error(e)
 
 
+DRAFT_FIELDS = ("notes", "to", "subject", "body", "lang", "summary", "approval", "feedback")
+DRAFT_LIMIT = 50_000  # characters of one field; a reply is a few thousand
+
+
+def draft_address(value) -> str:
+    address = str(value or "").strip().lower()
+    return address if re.fullmatch(r"[^@\s]+@[^@\s]+", address) and len(address) <= 320 else ""
+
+
+async def api_reply_saved(request: Request):
+    """The reply saved for this KOL in this mailbox, or {} when there is none."""
+    address = draft_address(request.query_params.get("address"))
+    if not address:
+        return bad("缺少对方地址")
+    return JSONResponse({"draft": cache.draft(current_account.get(), address) or {}})
+
+
+async def api_reply_save(request: Request):
+    """Saves what the reply box holds while it is typed (the page waits for a pause); an empty box drops the save."""
+    body = await request.json()
+    address = draft_address(body.get("address"))
+    if not address or not isinstance(body.get("draft"), dict):
+        return bad("参数不完整")
+    draft = {k: str(body["draft"].get(k) or "")[:DRAFT_LIMIT] for k in DRAFT_FIELDS}
+    if not (draft["notes"].strip() or draft["body"].strip() or draft["feedback"].strip()):
+        cache.drop_draft(current_account.get(), address)
+        return JSONResponse({"ok": True, "saved_at": None})
+    cache.save_draft(current_account.get(), address, draft)
+    return JSONResponse({"ok": True, "saved_at": time.time()})
+
+
+async def api_reply_discard(request: Request):
+    body = await request.json()
+    address = draft_address(body.get("address"))
+    if not address:
+        return bad("缺少对方地址")
+    cache.drop_draft(current_account.get(), address)
+    return JSONResponse({"ok": True})
+
+
 outbox = outgoing.Store(DATA / "outgoing")
 
 
@@ -5519,20 +5705,23 @@ async def send_reply(body: dict, mailbox: str, email_id: str, to: str, subject: 
     close_cases_for("email", kol)  # before sending: a phone confirmation arriving now must find the case closed
     refs = " ".join(x for x in [msg.get("references"), msg.get("message_id")] if x)
     try:
-        extra = {"attachments": [str(p) for p in attachments], "timeout": 420} if attachments else {}
-        result = await mail.send(recipients=[kol], subject=subject, body=text,
+        extra = {"timeout": 420} if attachments else {}
+        result = await mail.send(recipients=[kol], subject=subject, **mail_args(text, [str(p) for p in attachments]),
                                  in_reply_to=msg.get("message_id"), references=refs or None, **extra)
     except MailError as e:
         # The connection may have dropped after SMTP accepted the message: treat as "maybe sent", never retry blindly.
         log("send outcome unknown", kol, err_text(e))
+        cache.draft_uncertain(current_account.get(), kol)
         return JSONResponse({"error": f"发送结果不确定：{err_text(e)}", "uncertain": True}, status_code=502)
     delivered, warning, message_id = send_outcome(result, [kol])
     if not delivered:
         log("send not confirmed", kol, result[:200])
+        cache.draft_uncertain(current_account.get(), kol)
         return JSONResponse({"error": f"发送结果不确定：{result[:300]}", "uncertain": True}, status_code=502)
     log("sent reply to", kol, f"with {len(attachments)} attachment(s)" if attachments else "",
         f"(no Sent copy: {result[:200]})" if warning else "")
     try:  # the mail is out: bookkeeping problems below must never look like a failed send (and invite a resend)
+        cache.drop_draft(current_account.get(), kol)  # sent: the saved draft must not come back as unsent work
         for item in body.get("attachments") or []:
             outbox.remove(str(item))
         sent_changed()  # reopening the conversation must show this reply, or it invites a second send
@@ -5572,7 +5761,7 @@ async def guard(scope, receive, send, app):
         if cross_site or bad_origin or headers.get("x-kol-mail") != "1":
             await JSONResponse({"error": "forbidden"}, status_code=403)(scope, receive, send)
             return
-    elif scope["path"].startswith("/skin/"):  # the user's own wallpaper: only this page may show it
+    elif scope["path"].startswith(("/skin/", "/signature/")):  # the user's own pictures: only this page shows them
         if headers.get("sec-fetch-site") not in (None, "same-origin", "none"):
             await JSONResponse({"error": "forbidden"}, status_code=403)(scope, receive, send)
             return
@@ -5651,7 +5840,11 @@ routes = [
     Route("/api/accounts/primary", api_accounts_primary, methods=["POST"]),
     Route("/api/skin", api_skin, methods=["GET", "POST"]),
     Route("/api/skin/wallpaper", api_skin_wallpaper, methods=["POST"]),
+    Route("/api/signature", api_signature, methods=["GET", "POST"]),
+    Route("/api/signature/picture", api_signature_picture, methods=["POST"]),
+    Route("/api/signature/preview", api_signature_preview, methods=["POST"]),
     Route("/skin/wallpaper", page_wallpaper),
+    Route("/signature/{kind}.png", page_signature_picture),
     Route("/api/folders", api_folders),
     Route("/api/messages", api_messages),
     Route("/api/message", api_message),
@@ -5665,6 +5858,9 @@ routes = [
     Route("/api/reply/strategies", api_reply_strategies, methods=["POST"]),
     Route("/api/reply/draft", api_reply_draft, methods=["POST"]),
     Route("/api/reply/pairs", api_reply_pairs, methods=["POST"]),
+    Route("/api/reply/saved", api_reply_saved),
+    Route("/api/reply/save", api_reply_save, methods=["POST"]),
+    Route("/api/reply/discard", api_reply_discard, methods=["POST"]),
     Route("/api/reply/upload", api_reply_upload, methods=["POST"]),
     Route("/api/reply/unupload", api_reply_unupload, methods=["POST"]),
     Route("/api/feedback", api_feedback, methods=["POST"]),
