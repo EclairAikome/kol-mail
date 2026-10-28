@@ -12,7 +12,8 @@ of the log. Every report contains "KOL Mail", the robot's security keyword, and 
 feedback message, so scripts/triage_report.py reads it too.
 
 The same error from one machine is sent once every 6 hours, and one machine sends at most 30 an hour: a broken loop
-must not use up the robot's sending limit and crowd out the next new error. What was sent when is kept in
+must not use up the robot's sending limit and crowd out the next new error. A status-bar error the app is already
+retrying on its own waits half an hour first (StateWatcher): most are gone by then. What was sent when is kept in
 data/autoreport.json, so a crash-and-restart loop does not resend either; an error counts as sent only once the
 robot took it, so one that met no network goes again next time. Secrets (tokens, webhooks, keys) are
 masked; nothing is sent from a dev copy (KOL_DEV=1) or when no webhook is configured. Sending never raises.
@@ -47,17 +48,24 @@ LOG_LINES = 25        # last log lines in a report
 HINTS = [
     (r"No context found for instance", "CodeMaker 版本太旧：在同事电脑上运行 codemaker upgrade", "ai"),
     (r"or newer is required", "Claude Code 版本太旧：运行 claude update，或重新运行安装命令", "ai"),
+    (r"POPO 授权过期|没有 popo-cli|popo-cli auth login",  # before the AI's "auth login"
+     "popo-cli 没装好、没登录或 POPO 授权过期：让同事在终端运行 popo-cli auth login，并在 POPO 里确认授权卡片", None),
     (r"not logged in|API Error: 401|/login\b|oauth (access )?token|auth login|没登录|登录已过期",
      "AI 没登录或登录过期：让同事运行 codemaker auth login（或 claude 里 /login）", "ai"),
     (r"provider policy rejected|LOGIN failed|Authentication failed|AUTHENTICATIONFAILED|Credential is unavailable",
      "邮箱服务器不接受密码：密码或授权码不对，或者邮箱没开 IMAP/SMTP；让同事在登录页重新登录", "mail"),
+    (r"spend limit|用量到上限", "AI 账号的用量到上限了（比如 Claude 的月度花费上限）：账号主人调高上限，或者等它重置", "ai"),
     (r"\bquota\b|usage limit|额度|credit balance", "AI 额度用完或被限流：等额度恢复，或换 AI 后端", "ai"),
     (r"rate limit exceeded", "GitHub 匿名接口限流（公司网络共用出口 IP）：稍后再试，或换手机热点", None),
     (r"CERTIFICATE_VERIFY_FAILED|certificate verify failed|SSLCertVerificationError",
      "HTTPS 证书验证失败：多半是公司网络或代理软件拦截了 HTTPS", None),
     (r"getaddrinfo|Name or service not known|nodename nor servname|Temporary failure in name resolution|"
-     r"ConnectTimeout|ConnectError|timed out|WinError 10060|WinError 10061|Connection refused|Network is unreachable",
+     r"ConnectTimeout|ConnectError|ReadTimeout|WriteTimeout|PoolTimeout|RemoteProtocolError|timed out|"
+     r"WinError 10060|WinError 10061|Connection refused|Network is unreachable",
      "网络不通：服务器连不上（断网、VPN、代理或防火墙）", None),
+    (r"Bad Gateway|Gateway Time-?out|Service Unavailable|HTTP 50[0234]\b|下游服务|FABRIC_ENDPOINT_TIMEOUT|"
+     r"POPO 返回错误 (0|5\d\d)：",
+     "对方服务器临时出错（Telegram、POPO 这类服务端）：程序会自己重试，一直不好才需要处理", None),
     (r"WinError 206|filename or extension is too long|File name too long", "路径太长：安装目录或文件名太深", None),
     (r"No space left|WinError 112|磁盘空间", "磁盘满了", None),
     (r"database is locked", "数据库被占用：可能同时开着两个 KOL Mail，或者杀毒软件在扫描 data 目录", None),
@@ -329,24 +337,74 @@ def report_exit(code: int, log_file: Path, app_dir: Path = Path(__file__).resolv
     return report("程序退出", error[:600], detail[-2500:], wait=True)
 
 
+# Errors the app gets over by itself, which only matter when they last: its own words for a retry in progress
+# (mobile_loop, tell_owner, a mail session reconnecting), and a sheet change queued because a server or the network
+# had a moment. A change queued for something a person has to fix (POPO or Google authorisation, no popo-cli, a
+# read-only workbook) is not one of them: that goes at once.
+SELF_HEALING = re.compile(
+    r"自动重试中|自动补发|正在重连|"
+    r"(POPO 返回错误 (0|5\d\d)：|下游服务|FABRIC_ENDPOINT_TIMEOUT|popo-cli 两分钟没有返回|暂时忙|连不上 Google（检查网络|"
+    r"ConnectError|ConnectTimeout|ReadTimeout|Bad Gateway|Gateway Time-?out|Service Unavailable).*改动已排队")
+PATIENCE = 30 * 60  # seconds such an error must last before it is reported
+CLEAR_CHECKS = 3    # checks in a row without an error before an outage counts as over (a minute between two failures
+                    # is still the same outage)
+SLEEP_GAP = 5 * 60  # a gap this long between two checks: the computer slept, so nothing has "lasted" across it
+
+
+def self_healing(value: str) -> bool:
+    """Every part of it (the mail scan joins one error per mailbox with "；") is an error the app gets over itself."""
+    parts = [p for p in value.split("；") if p.strip()]
+    return bool(parts) and all(SELF_HEALING.search(p) for p in parts)
+
+
 class StateWatcher:
     """Reports each new value of the app's error fields (state["claude_error"], mail errors ...) once: the same
     error stays on the status bar for hours, a changed one is a new report. A value that could not go out yet (the
-    hourly limit, no network) is tried again on the next check."""
+    hourly limit, no network) is tried again on the next check.
 
-    def __init__(self, names: dict[str, str]):
+    An error the app gets over by itself (self_healing) is reported only once the field has shown errors for
+    PATIENCE, and then once per likely cause until the outage is over: one night of a colleague's patchy VPN sent five
+    Telegram reports and three POPO ones on 2026-10-28, each gone a minute later."""
+
+    def __init__(self, names: dict[str, str], clock=time.monotonic):
         self.names = names  # field -> where, e.g. {"claude_error": "AI"}
         self.seen: dict[str, str] = {}
+        self.since: dict[str, float] = {}  # field -> when this outage began
+        self.clear: dict[str, int] = {}    # field -> checks in a row without an error
+        self.told: dict[str, str] = {}     # field -> likely cause (diagnose) of the lasting outage already reported
+        self.last: float | None = None
+        self.clock = clock
 
     def check(self, values: dict) -> list[str]:
-        sent = []
+        sent, now = [], self.clock()
+        if self.last is not None and now - self.last > SLEEP_GAP:
+            self.since.clear()
+        self.last = now
         for field, where in self.names.items():
             value = str(values.get(field) or "")
             if not value:
-                self.seen.pop(field, None)
-            elif value != self.seen.get(field) and report(where, value):
+                self.clear[field] = self.clear.get(field, 0) + 1
+                if self.clear[field] >= CLEAR_CHECKS:
+                    self.seen.pop(field, None)
+                    self.since.pop(field, None)
+                    self.told.pop(field, None)
+                continue
+            self.clear[field] = 0
+            since = self.since.setdefault(field, now)
+            if value == self.seen.get(field):
+                continue
+            if not self_healing(value):
+                if report(where, value):
+                    sent.append(field)
+                    self.seen[field] = value
+                continue
+            cause = diagnose(value, where)
+            if now - since < PATIENCE or self.told.get(field) == cause:
+                continue
+            if report(where, f"{value}（已经持续 {int(now - since) // 60} 分钟）"):
                 sent.append(field)
                 self.seen[field] = value
+                self.told[field] = cause
         return sent
 
 

@@ -148,6 +148,83 @@ def test_known_errors_get_a_likely_cause():
     assert autoreport.diagnose("something nobody has seen") == ""
 
 
+def test_what_one_night_sent_the_group_now_gets_a_likely_cause():
+    # The reports of 2026-10-27/28 that said 没认出来
+    for error, where, words in [
+            ("手机审稿机器人：连不上 Telegram：ReadTimeout", "手机审稿", "网络不通"),
+            ("手机审稿机器人：Bad Gateway", "手机审稿", "服务器临时出错"),
+            ("总表暂时写不进去（POPO 返回错误 0：操作失败），改动已排队，稍后自动补写", "KOL 总表", "服务器临时出错"),
+            ("有改动没写进总表：x@y.com: Unavailable: POPO 返回错误 500：下游服务调用失败, HTTP -1", "KOL 总表",
+             "服务器临时出错"),
+            ("AI 账号的用量到上限了：…（原始信息：You've hit your monthly spend limit · raise it at "
+             "https://claude.ai/settings/usage）", "AI", "调高上限")]:
+        assert words in autoreport.diagnose(error, where), error
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def watch(clock, values_by_minute):
+    """Feed the watcher one sample a minute, as autoreport_loop does; returns the fields reported at each sample."""
+    w = autoreport.StateWatcher({"mobile_error": "手机审稿", "sheet_error": "KOL 总表", "scan_error": "收信检查"},
+                                clock=clock)
+    out = []
+    for values in values_by_minute:
+        out.append(w.check(values))
+        clock.now += 60
+    return w, out
+
+
+def test_errors_the_app_is_already_retrying_are_reported_only_when_they_last(sent):
+    clock = Clock()
+    blip = {"mobile_error": "手机审稿机器人：连不上 Telegram：ConnectError（自动重试中）"}
+    # a five-minute outage, then Telegram answers for good: nothing to tell
+    w, out = watch(clock, [blip] * 5 + [{}] * 5)
+    assert not any(out) and sent == []
+    # an outage that flaps (a minute up now and then) for half an hour is one outage
+    w, out = watch(clock, ([blip] * 4 + [{}]) * 6 + [blip])
+    assert [n for n, fields in enumerate(out) if fields] == [30]
+    # more of the same cause while it lasts is not news; another cause is
+    gateway = {"mobile_error": "手机审稿机器人：Bad Gateway（自动重试中）"}
+    assert w.check({"mobile_error": "手机审稿机器人：连不上 Telegram：ReadTimeout（自动重试中）"}) == []
+    assert w.check(gateway) == ["mobile_error"]
+    assert w.check({"mobile_error": "手机审稿推送失败：Forbidden: bot was blocked by the user"}) == ["mobile_error"]
+    autoreport.flush(10)
+    assert "ConnectError（自动重试中）（已经持续 30 分钟）" in sent[0] and "网络不通" in sent[0]
+    assert "服务器临时出错" in sent[1] and len(sent) == 3
+
+
+def test_errors_a_person_has_to_fix_go_at_once_even_when_the_change_is_queued(sent):
+    clock = Clock()
+    for error in ["总表暂时写不进去（POPO 授权过期或还没确认：在终端运行 popo-cli auth login，并在 POPO 里确认授权卡片），"
+                  "改动已排队，稍后自动补写",
+                  "总表暂时写不进去（总表在 Excel 里是以只读方式打开的，存不进去。请关掉后正常打开），改动已排队，稍后自动补写",
+                  "写总表失败，稍后重试：Traceback (most recent call last): KeyError: 'name'",
+                  "有改动没写进总表：x@y.com: KeyError: 'name'"]:
+        w = autoreport.StateWatcher({"sheet_error": "KOL 总表"}, clock=clock)
+        assert w.check({"sheet_error": error}) == ["sheet_error"], error
+    autoreport.flush(10)
+    assert "popo-cli auth login" in sent[0].split("可能原因：")[1].split("\n")[0]  # not "AI 没登录"
+    # a server hiccup behind the queued change waits; one mailbox reconnecting does not hide another one's password
+    hiccup = "总表暂时写不进去（POPO 返回错误 500：下游服务调用失败, HTTP -1），改动已排队，稍后自动补写"
+    assert autoreport.self_healing(hiccup)
+    assert autoreport.self_healing("邮件后端 180 秒没有响应，正在重连")
+    assert not autoreport.self_healing("邮件后端 180 秒没有响应，正在重连；Lynn：LOGIN failed")
+
+
+def test_an_error_from_before_the_computer_slept_has_not_lasted(sent):
+    clock = Clock()
+    blip = {"mobile_error": "手机审稿机器人：连不上 Telegram：ConnectError（自动重试中）"}
+    w, out = watch(clock, [blip] * 3)
+    clock.now += 8 * 3600  # the lid was closed overnight with the error on the status bar
+    assert w.check(blip) == []  # the network is not up yet a moment after waking: not an eight-hour outage
+
+
 def test_a_long_report_is_cut_but_keeps_its_version(sent):
     autoreport.report("AI", "boom", "x" * 10000, wait=True)
     [text] = sent

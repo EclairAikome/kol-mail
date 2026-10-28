@@ -63,6 +63,15 @@ def test_an_old_claude_code_counts_as_unavailable():
     assert not isinstance(e.value, llm.LLMUnavailable)
 
 
+def test_a_spend_limit_says_to_raise_it_or_wait():
+    # Claude Code on the owner's PC at 04:27 on 2026-10-28, while it drafted for the phone overnight
+    raw = ("You've hit your monthly spend limit · raise it at https://claude.ai/settings/usage?from=cc_cli_limit_message"
+           " · your session limit resets 7:10am (Asia/Singapore)")
+    msg = llm.explain(raw, "claude")
+    assert msg.startswith("AI 账号的用量到上限了") and raw in msg and "/login" not in msg
+    assert llm.unavailable(msg)
+
+
 def test_other_errors_pass_through_unchanged():
     assert llm.explain("AI 没有按格式返回结果", "claude") == "AI 没有按格式返回结果"
     assert llm.explain("", "codemaker") == ""

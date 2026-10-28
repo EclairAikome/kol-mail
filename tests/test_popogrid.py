@@ -158,6 +158,73 @@ def test_failures_queue_instead_of_losing_changes(tmp_path):
     assert res["status"] == "queued" and "权限" in res["reason"] and us.PENDING.exists()
 
 
+def command_type(args) -> str:
+    path = next((a for a in args if a.startswith("command=@file:")), "")[len("command=@file:"):]
+    return json.loads(Path(path).read_text(encoding="utf-8"))["type"] if path else ""
+
+
+def failing(fake, command: str, times: int):
+    """popo-cli that answers `command` with POPO's 500 the first `times` times, everything else as `fake` does."""
+    left = [times]
+
+    def run(args):
+        if command_type(args) == command and left[0]:
+            left[0] -= 1
+            return wrap(500, message="下游服务调用失败, HTTP -1")
+        return fake(args)
+    return run
+
+
+NEW_KOL = {"op": "event", "dir": "in", "email": "new@example.com", "name": "New", "subject": "hi",
+           "time": "2026-10-20T11:00:00"}
+
+
+def test_a_popo_hiccup_while_adding_a_row_is_tried_again(tmp_path):
+    # Seen 2026-10-27 (Lynn, Mac): POPO answered the sheet.insertRows for a new KOL with 500 下游服务调用失败, and
+    # that change was dropped as "有改动没写进总表" instead of tried again like any other POPO hiccup.
+    fake = FakePopo(colleague_sheet(), row_count=3)
+    run = failing(fake, "sheet.insertRows", 1)
+    res = us.run([us.norm_op(NEW_KOL)], "test", MAP, grid_factory=lambda: grid(run))
+    assert res["status"] == "ok" and [r["status"] for r in res["results"]] == ["ok"], res
+    assert fake.cells[(3, 1)] == "new@example.com" and fake.row_count == 4 and not us.PENDING.exists()
+
+
+def test_popo_failing_while_adding_a_row_queues_the_change(tmp_path, monkeypatch):
+    monkeypatch.setattr(us, "UNAVAILABLE_WAIT_SECONDS", 0)
+    fake = FakePopo(colleague_sheet(), row_count=3)
+    run = failing(fake, "sheet.insertRows", 1)
+    ops = [us.norm_op({"op": "event", "dir": "in", "email": "ana@gmail.com", "subject": "Re",
+                       "time": "2026-10-20T09:00:00"}), us.norm_op(NEW_KOL)]
+    res = us.run(ops, "test", MAP, grid_factory=lambda: grid(run))
+    assert res["status"] == "queued" and "500" in res["reason"] and us.PENDING.exists(), res
+    assert (3, 1) not in fake.cells and fake.cells[(1, 4)] == "我方回信：brief"  # nothing half written
+    res = us.run([], "补写队列", MAP, grid_factory=lambda: grid(run))  # POPO answers again
+    assert res["status"] == "ok" and res["flushed_from_queue"] == 2 and not us.PENDING.exists()
+    assert fake.cells[(3, 1)] == "new@example.com" and fake.cells[(1, 4)] == "对方来信：Re"
+
+
+def test_a_queued_change_that_keeps_failing_half_way_is_set_aside_not_blocking_the_rest(tmp_path, monkeypatch):
+    monkeypatch.setattr(us, "UNAVAILABLE_WAIT_SECONDS", 0)
+    monkeypatch.setattr(us, "FAILED", tmp_path / "state" / "pending.failed.jsonl")
+    fake = FakePopo(colleague_sheet(), row_count=3)
+    run = failing(fake, "sheet.insertRows", 10**6)  # this sheet never takes a new row (say it is at POPO's limit)
+    us.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    old = (us.now() - us.SET_ASIDE_AFTER - us.dt.timedelta(minutes=1)).isoformat()
+    us.PENDING.write_text(json.dumps({"queued_at": old, "source": "kol-mail", "reason": "POPO 500",
+                                      "ops": [us.jsonable(us.norm_op(NEW_KOL))]}, ensure_ascii=False) + "\n",
+                          encoding="utf-8")
+    ana = us.norm_op({"op": "event", "dir": "in", "email": "ana@gmail.com", "subject": "Re",
+                      "time": "2026-10-20T09:00:00"})
+    us.queue([ana], "kol-mail", "POPO 500")  # queued just now, behind the stuck one
+    res = us.run([], "补写队列", MAP, grid_factory=lambda: grid(run))
+    assert res["status"] == "ok" and res["flushed_from_queue"] == 2 and not us.PENDING.exists(), res
+    assert fake.cells[(1, 4)] == "对方来信：Re"  # the later change went in
+    [err] = res["queue_errors"]
+    assert err["error"].startswith("new@example.com: Unavailable: POPO 返回错误 500")
+    [kept] = [json.loads(line) for line in us.FAILED.read_text(encoding="utf-8").splitlines()]
+    assert kept["ops"][0]["email"] == "new@example.com"  # kept for a human, not lost
+
+
 def test_the_command_file_is_removed(tmp_path):
     fake = FakePopo(colleague_sheet())
     grid(fake).rows("KOLs")

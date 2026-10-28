@@ -25,10 +25,18 @@ API = "https://api.telegram.org/bot{token}/{method}"
 TEXT_LIMIT = 3900  # Telegram allows 4096 characters per message; leave room for the header
 PAIRING_TTL = 600
 PAIRING_TRIES = 5  # wrong codes before the current one is void; with 8 digits a guess is hopeless
+HOLD_MAX = 30                # pushes kept while Telegram cannot be reached
+HOLD_SECONDS = 12 * 3600     # a push older than this is not sent any more
 
 
 class BotError(Exception):
-    pass
+    """transient: Telegram could not be reached or had a server error (5xx, 429), so the same call can work later
+    (seen on a colleague's Mac 2026-10-28: ConnectError, ReadTimeout, Bad Gateway within one night). Otherwise
+    Telegram refused the call itself: a wrong token, a blocked bot, a message it will never take."""
+
+    def __init__(self, message: str, transient: bool = False):
+        super().__init__(message)
+        self.transient = transient
 
 
 class Bot:
@@ -40,13 +48,17 @@ class Bot:
         try:
             r = await self.client.post(API.format(token=self.token, method=method), json=params)
         except httpx.HTTPError as e:
-            raise BotError(f"连不上 Telegram：{type(e).__name__}") from e
+            raise BotError(f"连不上 Telegram：{type(e).__name__}", transient=True) from e
         try:
             data = r.json()
         except ValueError:
-            raise BotError(f"Telegram 返回了无法解析的内容（HTTP {r.status_code}）")
+            data = None
+        if not isinstance(data, dict):  # not Telegram's answer at all: a VPN or proxy page, a gateway in between
+            raise BotError(f"Telegram 返回了无法解析的内容（HTTP {r.status_code}）", transient=True)
         if not data.get("ok"):
-            raise BotError(str(data.get("description") or f"HTTP {r.status_code}")[:200])
+            code = data.get("error_code") if isinstance(data.get("error_code"), int) else r.status_code
+            raise BotError(str(data.get("description") or f"HTTP {r.status_code}")[:200],
+                           transient=code == 429 or code >= 500)
         return data.get("result")
 
     async def updates(self, offset: int, timeout: int = 50) -> list[dict]:
@@ -249,6 +261,94 @@ class Cases:
     def recent(self, limit: int = 50) -> list[dict]:
         rows = self.db.execute("SELECT id FROM cases ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [self.get(r[0]) for r in rows]
+
+    # Pushes Telegram could not take (unreachable, a server error), kept here so a restart does not lose them.
+
+    def held(self) -> list[dict]:
+        try:
+            items = json.loads(self.get_kv("tg_outbox", "[]"))
+        except ValueError:
+            return []
+        return [p for p in items if isinstance(p, dict) and p.get("id")] if isinstance(items, list) else []
+
+    def hold(self, chat_id: int, text: str, buttons, case_id: int | None, reply_to: int | None,
+             now: float | None = None):
+        push = {"id": secrets.token_hex(6), "at": time.time() if now is None else now, "chat": chat_id,
+                "text": text, "buttons": buttons or None, "case_id": case_id, "reply_to": reply_to, "tries": 0}
+        items = self.held() + [push]
+        self.set_kv("tg_outbox", json.dumps(items[-HOLD_MAX:], ensure_ascii=False))
+        return items[:-HOLD_MAX]  # pushed out by newer ones
+
+    def unhold(self, push_id: str):
+        self.set_kv("tg_outbox", json.dumps([p for p in self.held() if p["id"] != push_id], ensure_ascii=False))
+
+    def tried(self, push_id: str) -> int:
+        items = self.held()
+        for p in items:
+            if p["id"] == push_id:
+                p["tries"] = int(p.get("tries") or 0) + 1
+                self.set_kv("tg_outbox", json.dumps(items, ensure_ascii=False))
+                return p["tries"]
+        return 0
+
+    def drop_held(self):
+        self.set_kv("tg_outbox", "[]")
+
+
+HOLD_TRIES = 5  # failed resends while Telegram does answer the bot: by then the push itself is the problem
+BUTTON_VERSION = re.compile(r"^[pc]:(\d+):(\w+)$")  # 发送 / 确认发送 carry the draft they were shown with
+
+
+def stale_push(push: dict, case: dict | None, chat_id: int, now: float) -> str:
+    """Why a held push is not worth sending any more, or "" when it still is."""
+    if push.get("chat") and push["chat"] != chat_id:
+        return "the phone was paired again"
+    if push.get("buttons") and case:
+        if case["status"] not in OPEN:
+            return f"case {case['id']} is {case['status']}"
+        for row in push["buttons"]:
+            for _label, data in row:
+                m = BUTTON_VERSION.match(str(data))
+                if m and m.group(2) != version(case.get("body") or ""):
+                    return f"case {case['id']} has a newer draft"
+        return ""  # waiting for the owner: it stays however long Telegram is away (HOLD_MAX still bounds it)
+    if now - float(push.get("at") or 0) > HOLD_SECONDS:
+        return "too old"
+    return ""
+
+
+async def resend_held(bot: Bot, chat_id: int, cases: Cases, now: float | None = None, note=lambda *a: None) -> int:
+    """Send the held pushes, oldest first, and stop at the first one Telegram still cannot take. Pushes that
+    stale_push rules out are dropped: buttons for a case closed meanwhile (sent, skipped, answered on the computer) or
+    for an older draft could only ask for something already done or replaced. A long text that failed after its first
+    piece arrives with that piece twice; a lost push is worse. note(...) gets a line for every push dropped. Returns
+    how many went out."""
+    now = time.time() if now is None else now
+    sent = 0
+    for push in cases.held():
+        case = cases.get(push["case_id"]) if push.get("case_id") else None
+        why = stale_push(push, case, chat_id, now)
+        if why:
+            cases.unhold(push["id"])
+            note("held push dropped:", why)
+            continue
+        try:
+            ids = await bot.send(chat_id, push["text"], push.get("buttons"), push.get("reply_to"))
+        except BotError as e:
+            if not e.transient:
+                cases.unhold(push["id"])  # refused for good (too long, blocked bot): trying again cannot help
+                note("held push dropped: Telegram refused it:", str(e))
+                continue
+            if cases.tried(push["id"]) >= HOLD_TRIES:
+                cases.unhold(push["id"])
+                note(f"held push dropped after {HOLD_TRIES} failed resends:", str(e))
+                continue
+            break
+        cases.unhold(push["id"])
+        if case:
+            cases.remember_message(case["id"], ids)
+        sent += 1
+    return sent
 
 
 # ---------------------------------------------------------------- owner commands

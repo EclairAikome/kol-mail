@@ -51,6 +51,8 @@ OLD_CLI_HINT = {
 # Git Credential Manager window in front of a colleague.
 NO_GIT_PROMPTS = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
 QUOTA = re.compile(r"quota|credit|rate limit|usage limit|overloaded|额度", re.IGNORECASE)
+# Claude Code on 2026-10-28: "You've hit your monthly spend limit · raise it at https://claude.ai/settings/usage ..."
+SPEND_LIMIT = re.compile(r"spend limit|hit your (?:usage|session|daily|weekly|monthly) limit", re.IGNORECASE)
 # Context the CLIs inject into the user turn. A model that copies its input (a lazy "translation") copies these too.
 INJECTED_TAG = re.compile(r"<(system-reminder|ip_reminder|user-prompt-submit-hook|env|context)\b[^>]*>.*?</\1>\s*",
                           re.DOTALL | re.IGNORECASE)
@@ -216,6 +218,8 @@ def explain(message: str, backend: str) -> str:
         hint = OLD_CLI_HINT.get(backend, OLD_CLI_HINT["claude"])
     elif LOGGED_OUT.search(message):
         hint = LOGIN_HINT.get(backend, LOGIN_HINT["claude"])
+    elif SPEND_LIMIT.search(message):
+        hint = "AI 账号的用量到上限了：在账号的用量设置里调高上限，或者等它重置（重置时间见原始信息）"
     elif QUOTA.search(message):
         hint = "AI 额度用完或服务繁忙，稍后再试"
     else:

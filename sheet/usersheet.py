@@ -46,6 +46,7 @@ KEEP_BACKUPS = 14
 KEEP_KEYS = 5000
 BUSY_WAIT_SECONDS = 60
 UNAVAILABLE_WAIT_SECONDS = 8
+SET_ASIDE_AFTER = dt.timedelta(hours=6)  # a queued change still failing half way by then goes to FAILED (apply_ops)
 STALE_TOLERANCE = dt.timedelta(minutes=10)  # covers senders whose clocks run slow
 DEFAULT_DATE_FORMAT = "yyyy-mm-dd hh:mm"
 
@@ -780,13 +781,21 @@ def queue(ops: list[dict], source: str, reason: str):
                                 "ops": [jsonable(o) for o in ops]}, ensure_ascii=False) + "\n")
 
 
-def apply_ops(sheet: UserSheet, ops: list[dict]) -> list[dict]:
+def apply_ops(sheet: UserSheet, ops: list[dict], set_aside: bool = False) -> list[dict]:
     out = []
     for op in ops:
         try:
             out.append(sheet.event(op) if op["op"] == "event" else sheet.upsert(op))
         except UsageError:
             raise
+        except Unavailable as e:
+            # The online sheet failed one call half way (POPO's 500 on adding a row, seen 2026-10-27). That is not
+            # this row's fault: the whole run is tried again and then queued, like a failure at the start. A queued
+            # change that still fails so after SET_ASIDE_AFTER (set_aside) becomes a row error instead, so one that
+            # can never go in (a protected sheet on the Mac) does not hold up every later change.
+            if not set_aside:
+                raise
+            out.append({"status": "error", "error": f"{op.get('email')}: {type(e).__name__}: {e}"[:300]})
         except Exception as e:  # noqa: BLE001  one odd row must not stop the rest
             if is_transient(e):
                 raise
@@ -799,6 +808,13 @@ def is_transient(e: BaseException) -> bool:
         return False
     import kol
     return kol.is_com_error(e, kol.BUSY_HRESULTS | kol.GONE_HRESULTS)
+
+
+def queued_long_ago(entry: dict) -> bool:
+    try:
+        return now() - dt.datetime.fromisoformat(str(entry.get("queued_at"))) > SET_ASIDE_AFTER
+    except (TypeError, ValueError):
+        return False
 
 
 def run(ops: list[dict], source: str, mapping: dict, grid_factory=open_grid) -> dict:
@@ -818,17 +834,26 @@ def run(ops: list[dict], source: str, mapping: dict, grid_factory=open_grid) -> 
                         except OSError as e:
                             print(f"backup skipped: {e}", file=sys.stderr)
                         sheet = UserSheet(grid, mapping, state)
-                        flushed = 0
+                        flushed, failed = 0, []
                         for entry in entries:
                             queued_ops = [from_jsonable(o) for o in entry.get("ops", [])]
-                            apply_ops(sheet, queued_ops)
+                            done = apply_ops(sheet, queued_ops, set_aside=queued_long_ago(entry))
+                            failed += [{**entry, "ops": [jsonable(o)], "error": r["error"]}
+                                       for o, r in zip(queued_ops, done) if r.get("status") == "error"]
                             flushed += len(queued_ops)
                         results = apply_ops(sheet, ops)
                         grid.save()
                         mode = grid.mode
                     save_state(state)
+                    if failed:  # kept for a human, and named on the status bar (app.py run_sheet)
+                        with FAILED.open("a", encoding="utf-8") as f:
+                            for entry in failed:
+                                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
                     trim_pending(done_lines)
-                    return {"status": "ok", "mode": mode, "results": results, "flushed_from_queue": flushed}
+                    out = {"status": "ok", "mode": mode, "results": results, "flushed_from_queue": flushed}
+                    if failed:
+                        out["queue_errors"] = [{"error": entry["error"]} for entry in failed]
+                    return out
                 except Unavailable as e:
                     reason = str(e)
                     deadline = min(deadline, started + UNAVAILABLE_WAIT_SECONDS)
@@ -1006,7 +1031,8 @@ def main(argv=None):
                 res["rejected"] = rejected
         if res.get("status") != "ok":
             emit(res, 3)
-        problems = res.get("rejected") or [r for r in res.get("results", []) if r.get("status") == "error"]
+        problems = res.get("rejected") or [r for r in res.get("results", []) if r.get("status") == "error"] \
+            or res.get("queue_errors")
         emit(res, 4 if problems else 0)
     except UsageError as e:
         emit({"status": "error", "error": str(e)}, 2)

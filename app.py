@@ -1018,7 +1018,16 @@ def refresh_unread_if_stale(box: str):
     entry = unread.get(box)
     fresh = max(entry[0] if entry else 0, unread_tried.get(box, 0))
     if box in thread_boxes() and time.time() - fresh > UNREAD_FRESH:
-        spawn(refresh_unread(bg, box), "unread refresh")
+        spawn(refresh_unread_quietly(box), "unread refresh")
+
+
+async def refresh_unread_quietly(box: str):
+    """A mail server that fails this search fails the list refresh next to it too, which api_messages now lets pass;
+    the next list load tries again, and a mailbox that stays down shows on the status bar (收信检查, 邮箱连接)."""
+    try:
+        await refresh_unread(bg, box)
+    except MailError as e:
+        log("unread refresh failed", box, err_text(e))
 
 
 def is_unread(box: str, email_id) -> bool:
@@ -1685,6 +1694,7 @@ async def run_sheet(args: list[str], ops: list[dict] | None) -> bool:
         result = json.loads(text)
         problems += [r.get("error", "") for r in result.get("rejected", [])]
         problems += [r.get("error", "") for r in result.get("results", []) if r.get("status") in ("error", "needs_review")]
+        problems += [r.get("error", "") for r in result.get("queue_errors", [])]  # usersheet.py: set aside from the queue
     if proc.returncode == 3:  # queued: the tool says why (Excel busy, offline, Google authorisation, an edit)
         reason = ""
         with contextlib.suppress(ValueError, AttributeError):
@@ -2034,15 +2044,22 @@ def current_bot() -> mobile.Bot | None:
 
 async def tell_owner(text: str, buttons=None, case_id: int | None = None, reply_to: int | None = None) -> list[int]:
     """Push to the owner's phone. Failing to reach Telegram never breaks mail handling: it shows in the status bar
-    and the case stays visible in kol-mail."""
+    and the case stays visible in kol-mail. A push that met no network is held and goes out once the bot gets
+    through again (mobile_loop): until 2026-10-28 it was lost, and the owner never saw that case on the phone."""
     bot, chat = current_bot(), owner_chat()
     if not bot or not chat:
         return []
     try:
         ids = await bot.send(chat, text, buttons, reply_to)
     except mobile.BotError as e:
-        state["mobile_error"] = f"手机审稿推送失败：{err_text(e)}"
-        log("mobile push failed", err_text(e))
+        if e.transient:
+            if cases.hold(chat, text, buttons, case_id, reply_to):
+                log("mobile held push dropped: more than", mobile.HOLD_MAX, "waiting")
+            state["mobile_error"] = f"手机审稿推送没发出去（{err_text(e)}），连上 Telegram 后自动补发"
+            log("mobile push held", err_text(e))
+        else:
+            state["mobile_error"] = f"手机审稿推送失败：{err_text(e)}"
+            log("mobile push failed", err_text(e))
         return []
     if case_id:
         cases.remember_message(case_id, ids)
@@ -2546,9 +2563,10 @@ async def mobile_loop():
         offset = int(cases.get_kv("tg_offset", "0") or 0)
         try:
             updates = await bot.updates(offset)
-            state["mobile_error"] = None
+            state["mobile_error"] = held_note()
         except mobile.BotError as e:
-            state["mobile_error"] = f"手机审稿机器人：{err_text(e)}"
+            # "自动重试中": autoreport waits to see whether a network blip lasts before telling the maintainer
+            state["mobile_error"] = f"手机审稿机器人：{err_text(e)}" + ("（自动重试中）" if e.transient else "")
             await asyncio.sleep(20)
             continue
         except asyncio.CancelledError:
@@ -2560,6 +2578,32 @@ async def mobile_loop():
         for u in updates:
             cases.set_kv("tg_offset", str(int(u["update_id"]) + 1))
             spawn(handle_update(bot, u), "mobile update")
+        if owner_chat() and cases.held() and not bot_state.get("resending"):
+            # Telegram answers again: what it could not take meanwhile goes now, beside the polling (one send can
+            # take a minute), so a tap is never kept waiting behind it
+            bot_state["resending"] = True
+            spawn(resend_pushes(bot), "mobile resend")
+
+
+HELD_NOTE = "手机审稿有 {} 条推送还没发出去，连上 Telegram 后自动补发"
+
+
+def held_note() -> str | None:
+    """The status bar while pushes wait: Telegram answering the poll but not the sends would otherwise show nothing.
+    "自动补发" lets autoreport wait to see whether it lasts."""
+    held = len(cases.held())
+    return HELD_NOTE.format(held) if held else None
+
+
+async def resend_pushes(bot: mobile.Bot):
+    try:
+        if sent := await mobile.resend_held(bot, owner_chat(), cases, note=log):
+            log("mobile held pushes sent", sent)
+    finally:
+        bot_state["resending"] = False
+        shown = str(state.get("mobile_error") or "")
+        if not shown or shown.startswith(HELD_NOTE.split("{")[0]):  # a poll failure meanwhile says more
+            state["mobile_error"] = held_note()
 
 
 async def case_worker():
@@ -2637,6 +2681,7 @@ async def api_mobile_token(request: Request):
     if changed:
         new = config.update(["mobile", "owner_chat_id"], 0)  # a new bot must be paired again
         cases.set_kv("tg_offset", "0")
+        cases.drop_held()  # what the old bot could not send stays with it
     config.S["mobile"].update(new["mobile"])
     bot_state["username"] = me.get("username") or ""
     return JSONResponse({"ok": True, "bot_username": bot_state["username"], "pairing_code": pairing.new()})
@@ -3747,8 +3792,18 @@ async def api_messages(request: Request):
     if mode == "cached" or (mode == "revalidate" and entry and time.time() - entry[0] < LIST_FRESH):
         fetched, data = entry
     else:
-        data = await fetch_list(bg if mode == "revalidate" else mail, mailbox, page)
-        fetched = lists[(mailbox, page)][0]
+        try:
+            data = await fetch_list(bg if mode == "revalidate" else mail, mailbox, page)
+            fetched = lists[(mailbox, page)][0]
+        except MailError as e:
+            if mode != "revalidate" or not entry:
+                raise
+            # The page refreshes its list every minute in the background and already shows one. A server that fails
+            # that refresh (provider_failure, a colleague's page left open at night 2026-10-28) is no error to show
+            # or report: the page keeps the newest list there is (a live fetch may have stored one meanwhile) and
+            # the next minute tries again. The 刷新 button (live) still says when it fails.
+            log("list refresh failed, kept the last one", mailbox, page, err_text(e))
+            fetched, data = lists.get((mailbox, page)) or entry
     emails = data.get("emails", [])
     rows = cache.get_many([e["message_id"] for e in emails if e.get("message_id")])
     out = [list_row(mailbox, e, rows) for e in emails]
