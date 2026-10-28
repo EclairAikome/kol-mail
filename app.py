@@ -60,6 +60,7 @@ import compliance  # noqa: E402
 import onboarding  # noqa: E402
 import mailserver  # noqa: E402
 import signature  # noqa: E402
+import folders  # noqa: E402
 from sheet import popogrid  # noqa: E402  (a POPO 在线表格 as the KOL sheet)
 from sheet import googlegrid  # noqa: E402  (a colleague's own Google 表格 as the KOL sheet)
 
@@ -505,28 +506,40 @@ class MailBridge:
 
     async def list_folders(self) -> tuple[list[str], dict[str, str]]:
         """The selectable folders, and the special ones the server marks (\\Sent, \\Junk, \\Drafts, \\Trash)."""
+        listing = await self.folder_listing()
+        return listing["names"], listing["roles"]
+
+    async def folder_listing(self) -> dict:
+        """list_folders plus every folder the server marks special in any way (Gmail's \\All or \\Important too:
+        the folder menu leaves those alone) and the hierarchy delimiter ("/" on WorkMail, "" when flat)."""
         data = await self.call("list_mailboxes")
         items = data.get("result", data if isinstance(data, list) else [])
-        names, roles = [], {}
+        names, roles, special, delimiters = [], {}, [], collections.Counter()
         for m in items:
             flags = {str(f).casefold() for f in m.get("flags", [])}
+            if m.get("delimiter"):
+                delimiters[str(m["delimiter"])] += 1
             if "\\noselect" in flags:
                 continue
             names.append(m["name"])
+            if flags & SPECIAL_USE:
+                special.append(m["name"])
             for flag, role in (("\\sent", "sent"), ("\\junk", "junk"), ("\\drafts", "drafts"), ("\\trash", "trash")):
                 if flag in flags:
                     roles.setdefault(role, m["name"])
-        return names, roles
+        delimiter = delimiters.most_common(1)[0][0] if delimiters else ""
+        return {"names": names, "roles": roles, "special": special, "delimiter": delimiter}
 
     async def list_messages(self, mailbox: str, page: int, page_size: int = 30) -> dict:
         try:
             return await self.call("list_emails_metadata", mailbox=mailbox, page=page, page_size=page_size)
         except MailError as e:
-            if "provider_failure" not in str(e):
+            if "provider_failure" not in str(e) and "projection is unavailable" not in str(e):
                 raise
         # Seen for page 1 of the small KOL folders on 2026-10-16 while their index call worked. An unfiltered list may
         # be served from the server's metadata projection plus a flag re-read, and any failure there comes back as
         # this generic error; any filter makes the server search IMAP directly instead (same order, newest first).
+        # A folder just made or renamed in the folder menu met "Operational metadata projection is unavailable".
         log("list fallback", mailbox, page)
         return await self.call("list_emails_metadata", mailbox=mailbox, page=page, page_size=page_size,
                                since="1970-01-01T00:00:00Z")
@@ -835,9 +848,39 @@ def deal_boxes() -> tuple[str, ...]:
     return tuple(b for b in DEAL_BOXES if b in names)
 
 
+# Special-use flags (RFC 6154 and Gmail's): such folders are the server's own, never renamed or filed into by hand.
+SPECIAL_USE = {"\\all", "\\archive", "\\drafts", "\\flagged", "\\junk", "\\sent", "\\trash", "\\important"}
+
+
+def hidden_boxes() -> set[str]:
+    """Folders the page never shows (its HIDDEN_FOLDERS): Outbox, and a leftover "Trash" next to Deleted Items."""
+    trash = folder_role("trash")
+    return {"Outbox"} | ({"Trash"} if trash != "Trash" else set())
+
+
+def locked_boxes() -> set[str]:
+    """Folders the folder menu never renames, moves or deletes (folders.py says why); INBOX is locked by name."""
+    roles = {folder_role(role) for role in WORKMAIL} - {""}
+    return roles | set(DEAL_BOXES) | set(folder_info.get("special") or ()) | hidden_boxes()
+
+
+CUSTOM_MAX = 15  # folders the owner made that count as conversation folders; each costs a few searches per scan
+
+
+def custom_boxes() -> tuple[str, ...]:
+    """The folders the owner made in the primary mailbox: mails filed there still belong to their conversations, so
+    the conversation view, the drafts' context, unread counts and search see them. Another mailbox keeps INBOX and
+    the deal folders only (a Gmail's labels are folders too, often dozens of big ones). Their mails' bodies are not
+    prefetched (prefetch_account): a click reads them."""
+    names = folder_info.get("names")
+    if not names or not is_primary():
+        return ()
+    return folders.custom(names, locked_boxes(), hidden_boxes())[:CUSTOM_MAX]
+
+
 def thread_boxes() -> tuple[str, ...]:
     """Where a KOL's mails are: the conversations, the unread counts and the drafts' context come from these."""
-    return ("INBOX",) + deal_boxes()
+    return ("INBOX",) + deal_boxes() + custom_boxes()
 
 
 def index_boxes() -> tuple[str, ...]:
@@ -886,7 +929,11 @@ async def coalesced(key: tuple, factory):
 
 async def fetch_list(bridge: MailBridge, mailbox: str, page: int) -> dict:
     async def run():
-        data = await bridge.list_messages(mailbox, page)
+        for _ in range(2):  # mails moved out of the folder while it was read: read it once more
+            generation = box_gen.get(mailbox, 0)
+            data = await bridge.list_messages(mailbox, page)
+            if box_gen.get(mailbox, 0) == generation:
+                break
         lists[(mailbox, page)] = (time.time(), data)
         spawn(check_received(mailbox, data.get("emails", []), lists[(mailbox, page)][0]), "receipt times")
         return data
@@ -936,9 +983,14 @@ def shown_date(meta: dict):
 
 async def fetch_folders(bridge: MailBridge) -> list[str]:
     async def run():
-        names, roles = await bridge.list_folders()
-        folder_info["names"], folder_info["roles"] = names, roles
-        return names
+        for _ in range(2):  # a folder was created, renamed or deleted while the list was read: read it once more
+            generation = folder_info.get("generation", 0)
+            listing = await bridge.folder_listing()
+            if folder_info.get("generation", 0) == generation:
+                break
+        folder_info["names"], folder_info["roles"] = listing["names"], listing["roles"]
+        folder_info["special"], folder_info["delimiter"] = listing["special"], listing["delimiter"]
+        return listing["names"]
     return await coalesced(("folders", bridge.name), run)
 
 
@@ -1000,7 +1052,10 @@ unread_tried = PerAccount(dict)  # mailbox -> last attempt, so a failing folder 
 async def refresh_unread(bridge: MailBridge, box: str):
     async def run():
         unread_tried[box] = started = time.time()
+        generation = box_gen.get(box, 0)
         data = await bridge.call("list_emails_metadata", mailbox=box, seen=False, page_size=100)
+        if box_gen.get(box, 0) != generation:
+            return  # mails left the folder meanwhile (forget_moved): this answer may still hold them
         found = {str(e["email_id"]): e for e in data.get("emails", [])}
         total = max(int(data.get("total") or 0), len(found))
         old = unread.get(box)
@@ -1045,6 +1100,135 @@ def unread_counts() -> dict[str, int]:
     return counts
 
 
+# ---------------------------------------------------------------- flags (待处理 marks)
+# The server's own \Flagged mark, the one Outlook and the web mail show as a flag: marked in either, it shows in
+# both. Kept like the unread state: one search (flagged=True) per folder, refreshed by the bg prefetch and when a
+# shown list is older than FLAG_FRESH. A flag set or cleared here counts at once (flag_marks) until a search that
+# started after the server confirmed it has come back.
+
+FLAG_FRESH = 60
+FLAG_FLAG = "\\Flagged"
+flagged = PerAccount(dict)       # mailbox -> (fetched_at, {uid: metadata}, total)
+flag_tried = PerAccount(dict)    # mailbox -> last attempt
+flag_marks = PerAccount(dict)    # (mailbox, uid) -> (flagged, when the server confirmed it; None while in flight)
+box_gen = PerAccount(dict)       # mailbox -> bumped whenever mails leave it or it is renamed or deleted
+
+
+def bump(box: str):
+    """A refresh of this folder that started before now must not store what it read: mails left it meanwhile."""
+    box_gen[box] = box_gen.get(box, 0) + 1
+
+
+def flag_boxes() -> tuple[str, ...]:
+    """Where the 已标记 view looks: the conversation folders and Sent Items (a sent mail can wait for an answer)."""
+    names = folder_info.get("names")
+    return tuple(b for b in index_boxes() if names is None or b in names)
+
+
+async def refresh_flagged(bridge: MailBridge, box: str):
+    async def run():
+        flag_tried[box] = started = time.time()
+        generation = box_gen.get(box, 0)
+        data = await bridge.call("list_emails_metadata", mailbox=box, flagged=True, page_size=100)
+        if box_gen.get(box, 0) != generation:
+            return  # mails left the folder meanwhile: this answer may still hold them
+        found = {str(e["email_id"]): e for e in data.get("emails", [])}
+        total = max(int(data.get("total") or 0), len(found))
+        old = flagged.get(box)
+        flagged[box] = (time.time(), found, total)
+        for key, (_, confirmed) in list(flag_marks.items()):
+            if key[0] == box and confirmed is not None and confirmed < started:
+                del flag_marks[key]
+        if not old or set(old[1]) != set(found) or old[2] != total:
+            state["unread_rev"] += 1
+    return await coalesced(("flagged", bridge.name, box), run)
+
+
+def flag_fresh(box: str) -> bool:
+    entry = flagged.get(box)
+    return time.time() - max(entry[0] if entry else 0, flag_tried.get(box, 0)) <= FLAG_FRESH
+
+
+def refresh_flagged_if_stale(box: str):
+    if box in flag_boxes() and not flag_fresh(box):
+        spawn(refresh_flagged_quietly(box), "flag refresh")
+
+
+async def refresh_flagged_quietly(box: str):
+    try:
+        await refresh_flagged(bg, box)
+    except MailError as e:
+        log("flag refresh failed", box, err_text(e))
+
+
+def is_flagged(box: str, email_id) -> bool:
+    mark = flag_marks.get((box, str(email_id)))
+    if mark is not None:
+        return mark[0]
+    entry = flagged.get(box)
+    return bool(entry) and str(email_id) in entry[1]
+
+
+def known_meta(box: str, email_id: str) -> dict | None:
+    """A mail's list metadata from whatever cache has it (a list page, the folder index, the unread search)."""
+    for (b, _), (_, data) in list(lists.items()):
+        if b == box:
+            for e in data.get("emails", []):
+                if str(e.get("email_id")) == email_id:
+                    return e
+    for e in (folder_index.get(box) or (0, []))[1]:
+        if str(e.get("email_id")) == email_id:
+            return e
+    entry = unread.get(box)
+    return entry[1].get(email_id) if entry else None
+
+
+def flagged_mails() -> list[tuple[str, dict]]:
+    """Every flagged mail known now, (mailbox, metadata), marks made here included."""
+    out = []
+    for box in flag_boxes():
+        entry = flagged.get(box)
+        metas = dict(entry[1]) if entry else {}
+        for (b, uid), (on, _) in list(flag_marks.items()):
+            if b != box:
+                continue
+            if not on:
+                metas.pop(uid, None)
+            elif uid not in metas and (meta := known_meta(box, uid)):
+                metas[uid] = meta
+        out += [(box, m) for m in metas.values()]
+    return out
+
+
+def flagged_count() -> int:
+    """Flagged mails over all flag folders; beyond the newest 100 of a folder they are counted as they are."""
+    extra = sum(max(0, entry[2] - len(entry[1])) for box in flag_boxes() if (entry := flagged.get(box)))
+    return len(flagged_mails()) + extra
+
+
+def forget_moved(box: str, ids: list[str]):
+    """Mails that left a folder (moved, deleted): their UIDs there mean nothing any more."""
+    gone = set(ids)
+    bump(box)
+    for key in [k for k in lists if k[0] == box]:
+        lists.pop(key, None)
+    for uid in gone:
+        bodies.pop((box, uid), None)
+        marked_read.pop((box, uid), None)
+        flag_marks.pop((box, uid), None)
+    for store in (unread, flagged):
+        entry = store.get(box)
+        if entry:
+            kept = {u: m for u, m in entry[1].items() if u not in gone}
+            store[box] = (entry[0], kept, max(len(kept), entry[2] - (len(entry[1]) - len(kept))))
+    if is_primary() and any(str(e.get("email_id")) in gone for e in saved_index(box)):
+        store_index(box, [e for e in saved_index(box) if str(e.get("email_id")) not in gone])  # the copy on disk too
+    entry = folder_index.get(box)
+    if entry:
+        folder_index[box] = (entry[0], [e for e in entry[1] if str(e.get("email_id")) not in gone])
+    state["unread_rev"] += 1
+
+
 async def prefetch_loop():
     """Keep the folder list, page 1 of the main folders and the bodies of their conversations warm, so most clicks
     never wait on IMAP."""
@@ -1068,7 +1252,8 @@ async def prefetch_loop():
 
 async def prefetch_account():
     names = await fetch_folders(bg)
-    for box in (b for b in prefetch_boxes() if b in names):
+    custom = set(custom_boxes())  # the owner's own folders: searched below, but no list pages or bodies kept warm
+    for box in (b for b in prefetch_boxes() if b in names and b not in custom):
         try:
             await fetch_list(bg, box, 1)
         except MailError as exc:  # one bad folder must not stop the rest, or the bodies below
@@ -1079,6 +1264,11 @@ async def prefetch_account():
                 await refresh_unread(bg, box)
             except MailError as exc:
                 log("prefetch unread failed", box, err_text(exc))
+    for box in flag_boxes():
+        try:
+            await refresh_flagged(bg, box)
+        except MailError as exc:
+            log("prefetch flags failed", box, err_text(exc))
     for box in index_boxes():  # conversations are assembled from these, so a click never searches IMAP
         if box in names:
             try:
@@ -1092,7 +1282,7 @@ async def prefetch_account():
     # A folder whose page 1 failed to list (the provider refuses some small folders) uses the first 30 of its
     # index instead: same order, newest first.
     # Another mailbox than the primary one: only page 1 of its INBOX, so adding one never means hundreds of logins.
-    boxes = [b for b in index_boxes() if b in names] if is_primary() else ["INBOX"]
+    boxes = [b for b in index_boxes() if b in names and b not in custom] if is_primary() else ["INBOX"]
     pages = {box: lists[(box, 1)][1].get("emails", []) if (box, 1) in lists
              else folder_index.get(box, (0, []))[1][:30] for box in boxes}
     people = {counterpart(e) for metas in pages.values() for e in metas if not is_bounce(e)} - {""}
@@ -2726,6 +2916,18 @@ def feedback_ready() -> bool:
     return str(CFG["feedback"].get("popo_webhook") or "").startswith("https://")
 
 
+async def api_selfcheck(request: Request):
+    """The page found its 反馈 button not visible (hidden by a style it did not set, covered by something laid over
+    the page, or out of the window) and says what it saw: the maintainer learns why, nobody has to ask. Sent like
+    any automatic report (autoreport.py: once per machine and cause every 6 hours)."""
+    body = await request.json()
+    kind = str(body.get("kind") or "unknown")[:40]
+    detail = json.dumps(body, ensure_ascii=False)[:1500]
+    log("page self-check", detail)
+    autoreport.report("页面自检", f"反馈按钮看不见（{kind}）", detail, with_log=False)  # no KOL addresses from the log
+    return JSONResponse({"ok": True})
+
+
 async def api_feedback(request: Request):
     body = await request.json()
     text = strip_hidden(str(body.get("text") or "")).strip()
@@ -3289,8 +3491,8 @@ async def api_status(request: Request):
                          "self_address": self_address(), "version": config.version(), "pid": os.getpid(), "dev": DEV,
                          "telegram_error": tg_error,
                          "mail_error": mail.error or bg.error, "autoreply": autoreply_info,
-                         "unread_counts": unread_counts(), "account": current_account.get(),
-                         "accounts": accounts_summary()})
+                         "unread_counts": unread_counts(), "flagged_count": flagged_count(),
+                         "account": current_account.get(), "accounts": accounts_summary()})
 
 
 async def api_autoreplies(request: Request):
@@ -3487,7 +3689,7 @@ async def reload_mail_sessions():
 
 def forget_account(name: str):
     for per in (lists, folder_info, bodies, inflight, marked_read, unread, unread_tried, folder_index, known_index,
-                index_resynced):
+                index_resynced, flagged, flag_tried, flag_marks, box_gen):
         per.forget(name)
     notify_seen.pop(name, None)
     with contextlib.suppress(OSError):
@@ -3774,7 +3976,309 @@ async def api_pet_demo(request: Request):
 async def api_folders(request: Request):
     names = folder_info.get("names") or await fetch_folders(mail)
     return JSONResponse({"folders": names, "roles": {role: folder_role(role) for role in WORKMAIL},
-                         "deal": list(deal_boxes())})
+                         "deal": list(deal_boxes()), "delimiter": folder_info.get("delimiter") or "",
+                         "locked": sorted(locked_boxes() & set(names)), "editable": HTML_MAIL,
+                         "flaggable": list(flag_boxes())})
+
+
+# ---------------------------------------------------------------- the folder menu (folders.py) and moving mails
+# Renaming and deleting go through the two tools mailserver.py adds; without the patched server (a hand-made setup)
+# folders can only be created. A folder is deleted only once it is empty: its mails go to Deleted Items first.
+
+FOLDER_MOVE_BATCH = 100     # UIDs per move_emails call (the server's limit)
+FOLDER_EMPTY_ROUNDS = 100   # batches a delete moves at most (10 000 mails)
+
+
+async def folder_names_now() -> list[str]:
+    """The folder list the checks below go by: the cached one (the bg prefetch renews it every few minutes). What it
+    may have missed since, the server tools catch themselves (exists, missing, has_children, not_empty)."""
+    await folders_known()
+    return folder_info.get("names") or []
+
+
+async def folder_list_after_change():
+    """One fresh folder list right after a change, so the page's reload of the tree finds it ready."""
+    folder_info.pop("names", None)
+    with contextlib.suppress(MailError):
+        await fetch_folders(mail)
+
+
+def folders_changed(old: str | None = None, new: str | None = None):
+    """After a folder was created, renamed, moved or deleted: drop what is cached under the old names (and their
+    copies on disk), and make a folder list or a refresh that started before the change keep its answer to itself."""
+    delim = folder_info.get("delimiter") or ""
+    folder_info["generation"] = folder_info.get("generation", 0) + 1
+    if old:
+        gone = {b for b in [*(folder_info.get("names") or []), old] if folders.inside(b, old, delim)}
+        for store in (unread, unread_tried, flagged, flag_tried, folder_index, known_index, index_resynced):
+            gone |= {b for b in list(store) if folders.inside(b, old, delim)}
+        for box in gone:
+            bump(box)
+            for store in (unread, unread_tried, flagged, flag_tried, folder_index, known_index, index_resynced):
+                store.pop(box, None)
+            with contextlib.suppress(OSError):
+                index_path(box).unlink(missing_ok=True)  # a folder made later under this name starts empty
+        for store in (lists, bodies, marked_read, flag_marks):
+            for key in [k for k in list(store) if folders.inside(k[0], old, delim)]:
+                store.pop(key, None)
+    state["unread_rev"] += 1
+    spawn(prefetch_after_folder_change(new), "folder change refresh")
+
+
+async def prefetch_after_folder_change(box: str | None):
+    """Only a folder the conversations are made of: a move to Junk or Deleted Items must not start a search of a
+    folder with thousands of mails on the bg session (its lists are simply fetched again when shown)."""
+    if box and box in index_boxes():
+        for refresh in (refresh_index, refresh_unread, refresh_flagged):
+            with contextlib.suppress(MailError):
+                await refresh(bg, box)
+
+
+def folder_lock_problem(name: str) -> str | None:
+    if folders.locked(name, locked_boxes()):
+        if name in DEAL_BOXES:
+            return "成交文件夹（纯固薪、CPS+固薪、纯CPS）的名字是固定的，每天的分拣任务按名字往里放邮件，不能改"
+        return "收件箱、已发送、草稿、垃圾邮件、已删除这些系统文件夹不能改"
+    return None
+
+
+async def api_folder_create(request: Request):
+    body = await request.json()
+    name, under = str(body.get("name") or "").strip(), str(body.get("parent") or "")
+    names = await folder_names_now()
+    delim = folder_info.get("delimiter") or ""
+    problem = folders.leaf_problem(name, delim) or (
+        "这个邮箱不支持文件夹分层" if under and not delim else
+        "上级文件夹不存在了，刷新一下再试" if under and under not in names else None)
+    if problem:
+        return bad(problem)
+    target = folders.join(under, name, delim)
+    if target in names:
+        return bad("已经有同名的文件夹了")
+    result = await mail.call("create_mailbox", mailbox=target)
+    status = str(result.get("status") or "")
+    log("folder created", target, status)
+    await folder_list_after_change()
+    folders_changed(new=target)
+    if status not in ("created", "already_exists"):
+        return bad("服务器没有确认文件夹建好了，刷新一下看看", 502)
+    return JSONResponse({"ok": True, "folder": target})
+
+
+async def rename_folder(old: str, new: str) -> JSONResponse:
+    try:
+        result = await mail.call("kolmail_rename_mailbox", mailbox=old, new_name=new)
+    except MailError:  # a timeout may come after the server renamed it: the caches go either way
+        folders_changed(old=old)
+        await folder_list_after_change()
+        raise
+    status = str(result.get("status") or "")
+    log("folder renamed", old, "->", new, status)
+    folders_changed(old=old)
+    await folder_list_after_change()
+    spawn(prefetch_after_folder_change(new), "folder change refresh")  # now that the list knows the new name
+    if status == "exists":
+        return bad("已经有同名的文件夹了")
+    if status == "missing":
+        return bad("这个文件夹已经不在了，刷新一下再试")
+    if status != "renamed":
+        return bad("服务器没有确认改好了，刷新一下看看", 502)
+    return JSONResponse({"ok": True, "folder": new})
+
+
+async def api_folder_rename(request: Request):
+    body = await request.json()
+    old, name = str(body.get("mailbox") or ""), str(body.get("name") or "").strip()
+    if not HTML_MAIL:
+        return bad("这台电脑的邮件组件不支持改文件夹名，重新运行安装命令后再试")
+    names = await folder_names_now()
+    delim = folder_info.get("delimiter") or ""
+    problem = (folder_lock_problem(old) or folders.leaf_problem(name, delim)
+               or ("这个文件夹已经不在了，刷新一下再试" if old not in names else None))
+    if problem:
+        return bad(problem)
+    new = folders.rename_target(old, name, delim)
+    if new == old:
+        return JSONResponse({"ok": True, "folder": old})
+    return await rename_folder(old, new)
+
+
+async def api_folder_move(request: Request):
+    body = await request.json()
+    old, under = str(body.get("mailbox") or ""), str(body.get("parent") or "")
+    if not HTML_MAIL:
+        return bad("这台电脑的邮件组件不支持移动文件夹，重新运行安装命令后再试")
+    names = await folder_names_now()
+    delim = folder_info.get("delimiter") or ""
+    problem = (folder_lock_problem(old) or ("这个文件夹已经不在了，刷新一下再试" if old not in names else None)
+               or folders.move_problem(old, under, delim, names))
+    if problem:
+        return bad(problem)
+    new = folders.move_target(old, under, delim)
+    if new in names:
+        return bad("目标位置已经有同名的文件夹了")
+    return await rename_folder(old, new)
+
+
+async def api_folder_delete(request: Request):
+    """Moves the folder's mails to Deleted Items, then deletes the empty folder. A folder with subfolders is refused:
+    they are deleted (or moved out) one by one first, so one click never takes more than the owner saw."""
+    body = await request.json()
+    name = str(body.get("mailbox") or "")
+    if not HTML_MAIL:
+        return bad("这台电脑的邮件组件不支持删除文件夹，重新运行安装命令后再试")
+    await folder_list_after_change()  # fresh, not the cached list: a subfolder made elsewhere just now must count
+    names = folder_info.get("names") or []
+    delim = folder_info.get("delimiter") or ""
+    problem = folder_lock_problem(name) or ("这个文件夹已经不在了，刷新一下再试" if name not in names else None)
+    if problem:
+        return bad(problem)
+    if any(folders.inside(n, name, delim) and n != name for n in names):
+        return bad("里面还有子文件夹，先把子文件夹删掉或移出去")
+    trash = folder_role("trash")
+    moved = 0
+    for _ in range(FOLDER_EMPTY_ROUNDS):
+        # Filtered, so the server searches IMAP itself: an unfiltered list may come from its metadata projection,
+        # which fails ("projection is unavailable") or lags for a folder that just changed (list_messages).
+        meta = await mail.call("list_emails_metadata", mailbox=name, page_size=FOLDER_MOVE_BATCH,
+                               since="1970-01-01T00:00:00Z")
+        ids = [str(e["email_id"]) for e in meta.get("emails", [])]
+        if not ids:
+            break
+        if not trash:
+            return bad("这个邮箱没有“已删除”文件夹，里面的邮件没地方放，请先把邮件移走")
+        data = await mail.call("move_emails", email_ids=ids, source_mailbox=name, destination_mailbox=trash)
+        result = str(data.get("result", data))
+        forget_moved(name, ids)
+        if not result.startswith("Successfully"):
+            log("folder delete: move failed", name, result[:200])
+            return bad(f"有邮件没能移到“已删除”，文件夹先留着：{result[:200]}", 502)
+        moved += len(ids)
+    if moved:
+        log("folder delete: moved to trash", name, moved)
+        folders_changed(new=trash)
+    try:
+        result = await mail.call("kolmail_delete_mailbox", mailbox=name)
+    except MailError:  # a timeout may come after the server deleted it: the caches go either way
+        folders_changed(old=name)
+        await folder_list_after_change()
+        raise
+    status = str(result.get("status") or "")
+    log("folder deleted", name, status)
+    folders_changed(old=name)
+    await folder_list_after_change()
+    already = f"（已经有 {moved} 封邮件移到了“已删除”）" if moved else ""
+    if status == "not_empty":
+        return bad(f"刚移走 {moved} 封，文件夹里又来了新邮件，再删一次" if moved else "文件夹里还有邮件，再删一次")
+    if status == "has_children":
+        return bad("里面还有子文件夹，先把子文件夹删掉或移出去" + already)
+    if status not in ("deleted", "missing"):
+        return bad("服务器没有确认删好了，刷新一下看看", 502)
+    return JSONResponse({"ok": True, "moved": moved, "trash": trash})
+
+
+MOVE_MAX = 500  # mails one move takes, conversations included
+
+
+def conversation_ids(box: str, ids: list[str]) -> list[str]:
+    """ids plus every other mail of their conversations in that folder, as far as the folder index and the cached
+    list pages know them: a row dragged from page 1 moves its older mails too, not only the ones the page loaded."""
+    known = {}
+    for metas in [(folder_index.get(box) or (0, []))[1], saved_index(box) if is_primary() else []] + \
+            [data.get("emails", []) for (b, _), (_, data) in list(lists.items()) if b == box]:
+        for meta in metas:
+            known.setdefault(str(meta.get("email_id")), meta)
+    keys = {thread_key(known[i]) for i in ids if i in known}
+    return list(dict.fromkeys(ids + [i for i, meta in known.items() if thread_key(meta) in keys]))
+
+
+async def api_move(request: Request):
+    """Mails of one folder into another. whole_thread: the rest of their conversations in that folder go too."""
+    body = await request.json()
+    source, target = str(body.get("mailbox") or ""), str(body.get("to") or "")
+    ids = list(dict.fromkeys(str(i) for i in body.get("email_ids") or [] if str(i).isdigit()))
+    if not (source and target and ids):
+        return bad("参数不完整")
+    if source == target:
+        return bad("已经在这个文件夹里了")
+    names = folder_info.get("names") or await fetch_folders(mail)
+    if source not in names or target not in names or target in hidden_boxes():
+        return bad("文件夹不存在了，刷新一下再试")
+    if body.get("whole_thread"):
+        ids = conversation_ids(source, ids)
+    if len(ids) > MOVE_MAX:
+        return bad(f"一次最多移动 {MOVE_MAX} 封")
+    moved, problem = 0, ""
+    for start in range(0, len(ids), FOLDER_MOVE_BATCH):
+        batch = ids[start:start + FOLDER_MOVE_BATCH]
+        data = await mail.call("move_emails", email_ids=batch, source_mailbox=source, destination_mailbox=target)
+        result = str(data.get("result", data))
+        forget_moved(source, batch)
+        if not result.startswith("Successfully"):
+            problem = result[:200]
+            break
+        moved += len(batch)
+    for key in [k for k in lists if k[0] == target]:
+        lists.pop(key, None)
+    spawn(prefetch_after_folder_change(target), "move refresh")
+    log("moved", moved, "of", len(ids), source, "->", target, problem)
+    if problem:
+        return bad(f"有的邮件没移动成功，刷新一下看看：{problem}", 502)
+    return JSONResponse({"ok": True, "moved": moved, "ids": ids})
+
+
+async def api_flag(request: Request):
+    """Sets or clears the flag of mails of one folder; it shows at once, before the server answers."""
+    body = await request.json()
+    mailbox, on = str(body.get("mailbox") or ""), bool(body.get("on"))
+    ids = list(dict.fromkeys(str(i) for i in body.get("email_ids") or [] if str(i).isdigit()))
+    if not mailbox or not ids or len(ids) > FOLDER_MOVE_BATCH:
+        return bad("参数不完整")
+    if mailbox not in flag_boxes():  # a mark there would never be checked against the server again (refresh_flagged)
+        return bad("这个文件夹里的邮件不能标记")
+    keys = [(mailbox, i) for i in ids]
+    for key in keys:
+        flag_marks[key] = (on, None)
+    state["unread_rev"] += 1
+    try:
+        data = await mail.call("set_email_flags", mailbox=mailbox, email_ids=ids, flags=[FLAG_FLAG],
+                               operation="add" if on else "remove")
+        result = str(data.get("result", data))
+        if not result.startswith("Successfully"):  # partial failures come back as text, not isError
+            raise MailError(result[:300])
+    except Exception:
+        for key in keys:
+            flag_marks.pop(key, None)
+        state["unread_rev"] += 1
+        raise
+    done = time.time()
+    for key in keys:
+        if flag_marks.get(key) == (on, None):
+            flag_marks[key] = (on, done)
+    return JSONResponse({"ok": True, "flagged_count": flagged_count()})
+
+
+async def api_flagged(request: Request):
+    """The 已标记 view: every flagged mail of the flag folders, newest first. mode=live (刷新) searches every folder
+    now; otherwise only the folders never searched wait for their search, and the ones older than FLAG_FRESH are
+    searched again in the background (the page repaints when that changes anything): each search is a login."""
+    live = request.query_params.get("mode") == "live"
+    await folders_known()
+    todo = [b for b in flag_boxes() if live or b not in flagged]
+    for box in flag_boxes():
+        if box not in todo:
+            refresh_flagged_if_stale(box)
+    errors = []
+    for box, result in zip(todo, await asyncio.gather(*(refresh_flagged(finder, b) for b in todo),
+                                                      return_exceptions=True)):
+        if isinstance(result, BaseException):
+            log("flag search failed", box, err_text(result))
+            errors.append(box)
+    found = flagged_mails()
+    rows = cache.get_many([m["message_id"] for _, m in found if m.get("message_id")])
+    out = [list_row(box, m, rows) for box, m in found]
+    out.sort(key=lambda r: parse_date(r["date"]) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    return JSONResponse({"emails": out, "total": flagged_count(), "failed": errors})
 
 
 async def api_messages(request: Request):
@@ -3808,6 +4312,7 @@ async def api_messages(request: Request):
     rows = cache.get_many([e["message_id"] for e in emails if e.get("message_id")])
     out = [list_row(mailbox, e, rows) for e in emails]
     refresh_unread_if_stale(mailbox)  # in the background; the page repaints when unread_rev changes
+    refresh_flagged_if_stale(mailbox)
     return JSONResponse({"emails": out, "total": data.get("total", 0), "page": page,
                          "age": round(time.time() - fetched)})
 
@@ -3819,7 +4324,7 @@ def list_row(mailbox: str, e: dict, rows: dict[str, dict]) -> dict:
         "subject": e.get("subject"), "sender": e.get("sender"), "recipients": e.get("recipients"),
         "date": shown_date(e), "skippable": is_skippable(e), "status": t.get("status"),
         "language": t.get("language"), "subject_zh": t.get("subject_zh"), "thread_key": thread_key(e),
-        "unread": is_unread(mailbox, e["email_id"]),
+        "unread": is_unread(mailbox, e["email_id"]), "flagged": is_flagged(mailbox, e["email_id"]),
     }
 
 
@@ -3996,8 +4501,12 @@ async def refresh_index(bridge: MailBridge, box: str, limit: asyncio.Semaphore |
     another one keeps its newest page, as prefetch_account reads them sparingly (a big 163 inbox read in full would
     cost dozens of logins)."""
     async def run():
-        async with limit or contextlib.nullcontext():
-            meta = await bridge.call("list_emails_metadata", mailbox=box, page_size=INDEX_SIZE)
+        for _ in range(2):  # mails moved out of the folder while it was read (forget_moved): read it once more
+            generation = box_gen.get(box, 0)
+            async with limit or contextlib.nullcontext():
+                meta = await bridge.call("list_emails_metadata", mailbox=box, page_size=INDEX_SIZE)
+            if box_gen.get(box, 0) == generation:
+                break
         newest, total = meta.get("emails", []), meta.get("total")
         if not is_primary():
             folder_index[box] = (time.time(), newest)
@@ -4018,6 +4527,7 @@ async def resync_index(box: str):
 
     async def run():
         index_resynced[box] = time.time()
+        generation = box_gen.get(box, 0)
         before = max((uid_of(e) for e in saved_index(box)), default=0)
         emails, seen, total = [], set(), 0
         for page in range(1, INDEX_MAX_PAGES + 1):
@@ -4029,6 +4539,9 @@ async def resync_index(box: str):
                     emails.append(e)
             if len(got) < INDEX_SIZE or len(emails) >= total:
                 break
+        if box_gen.get(box, 0) != generation:  # mails left the folder while it was read: the next refresh tries again
+            index_resynced.pop(box, None)
+            return
         # Mails that arrived while the pages were read (a refresh already has them) stay in: newer than anything
         # known when the read began. The newest mail moved out of the folder meanwhile is not newer, so it goes.
         arrived = [e for e in saved_index(box) if uid_of(e) > before and str(e.get("email_id")) not in seen]
@@ -4254,7 +4767,7 @@ async def api_thread(request: Request):
                     "subject": full.get("subject"), "body": full.get("body", ""),
                     "attachments": [a for a in full.get("attachments") or []
                                     if not (own and mailserver.is_signature_picture(a))],  # our signature's pictures
-                    "translation": row, "opened": is_opened})
+                    "translation": row, "opened": is_opened, "flagged": is_flagged(box, full["email_id"])})
     if not msg.get("sender") or sender_address(msg.get("sender")) != self_address():
         spawn(mark_read_later(mailbox, email_id), "mark read")
     others = collections.defaultdict(list)  # the whole conversation is on screen: its unread KOL mails too
@@ -5407,6 +5920,69 @@ async def reply_context(body: dict) -> tuple[str, dict]:
     return token, ctx
 
 
+# ---------------------------------------------------------------- a new email (写邮件)
+# Written like a reply: the owner's notes, the playbook and the hard rules, the history with the first recipient when
+# there is one, a verified side-by-side before it can go out. Its context is kept under the same tokens as a reply's.
+
+ADDRESS = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
+NAMED_ADDRESS = re.compile(r'(?:"[^"<>]*"|[^"<>@]*?)\s*<([^<>\s]+)>')  # Name <a@b.c>
+COMPOSE_MAX_RECIPIENTS = 20
+COMPOSE_KEY = "(new mail)"  # the reply_drafts row of the new email being written: one at a time per mailbox
+
+
+def addresses(value) -> tuple[list[str], list[str]]:
+    """(the addresses of a To or Cc field, lower case and once each; the entries that are not addresses). Entries are
+    separated by commas, semicolons or new lines; each is an address, "Name <a@b.c>", or addresses separated by
+    spaces. Anything else is refused whole: an address is never picked out of a longer string (ñandu@x.com is not
+    andu@x.com, a hidden character makes the entry wrong), so the mail goes exactly where the field says."""
+    text = ",".join(map(str, value)) if isinstance(value, list) else str(value or "")
+    good, wrong = [], []
+    for chunk in re.split(r"[,;\n]+", text):
+        entry = chunk.strip()
+        if not entry:
+            continue
+        named = NAMED_ADDRESS.fullmatch(entry)
+        parts = [named.group(1)] if named else entry.split()
+        if all(ADDRESS.fullmatch(p) and len(p) <= 254 for p in parts):
+            good += [p.lower() for p in parts]
+        else:
+            wrong.append(entry[:60])
+    return list(dict.fromkeys(good)), wrong
+
+
+async def gather_compose_context(who: str) -> dict:
+    ours, earlier = await indexed_history(who, None)
+    return {"earlier": earlier, "ours": ours, "materials": await email_materials(earlier) if earlier else []}
+
+
+async def compose_context(body: dict) -> tuple[str, dict]:
+    to, wrong = addresses(body.get("to"))
+    cc, wrong_cc = addresses(body.get("cc"))
+    if wrong or wrong_cc:
+        raise ReplyRefused("这些不像邮箱地址：" + "、".join(wrong + wrong_cc))
+    if not to:
+        raise ReplyRefused("先填收件人")
+    if len(to) + len(cc) > COMPOSE_MAX_RECIPIENTS:
+        raise ReplyRefused(f"收件人加抄送最多 {COMPOSE_MAX_RECIPIENTS} 个；群发请用群发工具")
+    cc = [a for a in cc if a not in to]
+    language = re.sub(r"[\r\n<>]+", " ", str(body.get("language") or "")).strip()[:40] or "auto"
+    subject = strip_hidden(re.sub(r"[\r\n]+", " ", str(body.get("subject") or ""))).strip()[:200]
+    now = time.time()
+    for key in [k for k, (at, _) in reply_contexts.items() if now - at > REPLY_CTX_TTL]:
+        reply_contexts.pop(key, None)
+    token = str(body.get("ctx") or "")
+    hit = reply_contexts.get(token)
+    if hit and hit[1].get("compose") and hit[1]["kol"] == to[0] and hit[1].get("account") == current_account.get():
+        base = hit[1]
+    else:
+        base = {**await coalesced(("compose_ctx", to[0]), lambda: gather_compose_context(to[0])),
+                "compose": True, "kol": to[0], "msg": {}, "zh": "", "mailbox": None, "email_id": None,
+                "account": current_account.get()}
+        token = secrets.token_hex(12)
+        reply_contexts[token] = (now, base)
+    return token, {**base, "to": to, "cc": cc, "language": language, "subject": subject}
+
+
 def prompt_args(boundary: str) -> dict:
     return {"owner": OWNER, "owner_role": OWNER_ROLE, "company": COMPANY, "boundary": boundary,
             "playbook": read_file(PLAYBOOK, "谈判手册"), "hard_rules": hard_rules()}
@@ -5444,12 +6020,15 @@ def clean_reply(text: str, channel: str) -> tuple[str, list[str]]:
 
 async def write_draft(ctx: dict, *, mode: str = "draft", strategy: dict | None = None, notes: str = "",
                       previous: str = "", feedback: str = "", broken: str = "") -> dict:
-    """broken: the rules PREVIOUS_DRAFT broke (compliance.revision_brief); the draft is then rewritten in MODE comply."""
+    """broken: the rules PREVIOUS_DRAFT broke (compliance.revision_brief); the draft is then rewritten in MODE comply.
+    A ctx from compose_context makes it a new email (replyflow.compose_system), which also gets a subject."""
     boundary = secrets.token_hex(8)
     channel = ctx.get("channel", "email")
-    system = replyflow.draft_system(**prompt_args(boundary), signature=SIGNATURE, channel=channel)
+    compose = bool(ctx.get("compose"))
+    system = (replyflow.compose_system if compose else replyflow.draft_system)(
+        **prompt_args(boundary), signature=SIGNATURE, channel=channel)
     parts = [f"MODE: {('comply translate' if mode == 'translate' else 'comply') if broken else mode}",
-             *replyflow.context_sections(boundary, ctx)]
+             *(replyflow.compose_sections if compose else replyflow.context_sections)(boundary, ctx)]
     if strategy:
         parts.append(section(boundary, "CHOSEN_STRATEGY", replyflow.strategy_text(strategy)))
     if notes:
@@ -5460,12 +6039,16 @@ async def write_draft(ctx: dict, *, mode: str = "draft", strategy: dict | None =
         parts.append(section(boundary, "OWNER_FEEDBACK", feedback))
     if previous and broken:
         parts.append(section(boundary, "COMPLIANCE_FEEDBACK", broken))
-    result = await run_claude(system, "\n\n".join(parts), replyflow.DRAFT_SCHEMA, DRAFT_MODEL, timeout=300)
+    result = await run_claude(system, "\n\n".join(parts), replyflow.COMPOSE_SCHEMA if compose else replyflow.DRAFT_SCHEMA,
+                              DRAFT_MODEL, timeout=300)
     reply, warnings = clean_reply(result["reply_body"], channel)
-    return {"reply_language": result.get("reply_language", ""), "reply_body": reply,
-            "notes_zh": result.get("notes_zh", ""),
-            "needs_approval_zh": replyflow.approval_with_materials(result.get("needs_approval_zh", ""), ctx),
-            "warnings": warnings}
+    out = {"reply_language": result.get("reply_language", ""), "reply_body": reply,
+           "notes_zh": result.get("notes_zh", ""),
+           "needs_approval_zh": replyflow.approval_with_materials(result.get("needs_approval_zh", ""), ctx),
+           "warnings": warnings}
+    if compose:
+        out["subject"] = strip_hidden(re.sub(r"[\r\n]+", " ", str(result.get("subject") or ""))).strip()[:200]
+    return out
 
 
 async def chat_about_draft(ctx: dict, previous: str, feedback: str) -> dict:
@@ -5643,12 +6226,121 @@ async def api_reply_pairs(request: Request):
         return reply_error(e)
 
 
-DRAFT_FIELDS = ("notes", "to", "subject", "body", "lang", "summary", "approval", "feedback")
+ZH_EDIT_MAX = 30  # paragraphs changed in one go
+
+
+async def rewrite_paragraphs(text: str, edits: list[dict], language: str) -> list[str]:
+    """The paragraphs of edits rewritten in the email's language to say their zh_after (replyflow.ZH_EDIT_SYSTEM)."""
+    boundary = secrets.token_hex(8)
+    system = replyflow.ZH_EDIT_SYSTEM.replace("{owner}", OWNER).replace("{boundary}", boundary)
+    items = [{k: e[k] for k in ("original", "zh_before", "zh_after")} for e in edits]
+    user = "\n\n".join([section(boundary, "EMAIL", text), section(boundary, "LANGUAGE", language),
+                        section(boundary, "EDITS", json.dumps(items, ensure_ascii=False))])
+    result = await run_claude(system, user, replyflow.ZH_EDIT_SCHEMA, DRAFT_MODEL, timeout=240)
+    new = [strip_hidden(str(p)).strip() for p in llm.scrub(result.get("paragraphs") or [])]
+    if len(new) != len(edits) or not all(new):
+        raise ClaudeError("AI 没有按段返回改好的原文，再试一次")
+    for e, p in zip(edits, new):
+        if llm.looks_chinese(p) and not llm.looks_chinese(e["original"]):
+            raise ClaudeError("AI 把原文改成了中文，再试一次")
+    return new
+
+
+async def api_reply_zhedit(request: Request):
+    """The owner corrected the Chinese of some paragraphs: those paragraphs are rewritten in the email's language,
+    the rest stays exactly as it is, and the whole text is back-translated again. A paragraph whose Chinese was
+    emptied is dropped. Works for replies and new emails alike (it sees only the text)."""
+    body = await request.json()
+    text = strip_hidden((body.get("text") or "").replace("\r\n", "\n")).strip()
+    raw = body.get("edits") if isinstance(body.get("edits"), list) else []
+    if not text or not raw:
+        return bad("没有改过的段落")
+    if len(raw) > ZH_EDIT_MAX:
+        return bad(f"一次最多改 {ZH_EDIT_MAX} 段")
+    paragraphs = replyflow.split_paragraphs(text)
+    edits, drops = [], {}
+    for item in raw:
+        try:
+            i = int(item.get("index"))
+        except (TypeError, ValueError, AttributeError):
+            return bad("参数不完整")
+        if not (0 <= i < len(paragraphs)) or paragraphs[i] != str(item.get("orig") or "").replace("\r\n", "\n").strip("\n"):
+            return bad("正文和中文对照对不上了（正文改过），先点“更新对照”再改中文")
+        zh_after = strip_hidden(str(item.get("zh_after") or "")).strip()
+        if not zh_after:
+            drops[i] = None
+            continue
+        edits.append({"index": i, "original": paragraphs[i], "zh_before": str(item.get("zh_before") or "")[:4000],
+                      "zh_after": zh_after[:4000]})
+    try:
+        with feed.working("thinking"):
+            new = await rewrite_paragraphs(text, edits, str(body.get("language") or "")[:40]) if edits else []
+            changes = {**drops, **{e["index"]: p for e, p in zip(edits, new)}}
+            new_text = replyflow.replace_paragraphs(text, changes)
+            if not new_text.strip():
+                return bad("每一段都删掉的话就没有正文了")
+            pairs = await side_by_side(new_text)
+    except ClaudeError as e:
+        return reply_error(e)
+    log("paragraphs rewritten from Chinese", len(edits), "dropped", len(drops))
+    warnings = []
+    for e, p in zip(edits, new):  # a figure or a link the owner never wrote: say so (it may be fine, e.g. 两 -> 2)
+        extra = new_figures(p, e["original"], e["zh_after"])
+        if extra:
+            warnings.append(f"第 {e['index'] + 1} 段改写后出现了原文和你的中文里都没有的数字或链接：{'、'.join(extra)}，请核对")
+    return JSONResponse({"body": new_text, "pairs": pairs, "warnings": warnings})
+
+
+FIGURE = re.compile(r"https?://\S+|\d+(?:[.,]\d+)*")
+
+
+def new_figures(text: str, *sources: str) -> list[str]:
+    seen = " ".join(sources)
+    return [f for f in dict.fromkeys(FIGURE.findall(text)) if f.rstrip(".,") not in seen]
+
+
+async def subject_side_by_side(subject: str) -> tuple[str, bool]:
+    """(the Chinese of a new email's subject, whether it was verified). A verified subject is in checked_texts, as a
+    body is: send_new refuses a subject the owner could not read."""
+    subject = strip_hidden(re.sub(r"[\r\n]+", " ", subject or "")).strip()
+    if not subject:
+        return "", False
+    p = await side_by_side(subject)
+    return ("".join(r["zh"] for r in p["rows"]) if p["ok"] else ""), p["ok"]
+
+
+async def api_compose_draft(request: Request):
+    body = await request.json()
+    mode = "translate" if body.get("mode") == "translate" else "draft"
+    notes, feedback = (body.get("notes") or "").strip(), (body.get("feedback") or "").strip()
+    previous = (body.get("previous_body") or "").strip()
+    if mode == "translate" and not notes:
+        return bad("先在要点框里写好中文邮件")
+    if mode == "draft" and not (notes or (previous and feedback)):
+        return bad("先在要点框里写几句：这封信要跟对方说什么")
+    try:
+        token, ctx = await compose_context(body)
+        with feed.working("thinking"):
+            draft, pairs = await checked_draft(ctx, mode=mode, notes=notes, previous=previous, feedback=feedback)
+            # the subject that will show in the field: the owner's own, or the one the model wrote
+            subject = ctx["subject"] or draft.get("subject") or ""
+            subject_zh, subject_ok = await subject_side_by_side(subject)
+    except (ReplyRefused, OSError, ClaudeError) as e:
+        return reply_error(e)
+    return JSONResponse({"ctx": token, "to": ctx["to"], "cc": ctx["cc"], "known": bool(ctx["earlier"] or ctx["ours"]),
+                         **draft, "subject": subject, "subject_zh": subject_zh, "subject_ok": subject_ok,
+                         "pairs": pairs})
+
+
+DRAFT_FIELDS = ("notes", "to", "subject", "body", "lang", "summary", "approval", "feedback", "cc", "language")
 DRAFT_LIMIT = 50_000  # characters of one field; a reply is a few thousand
 
 
 def draft_address(value) -> str:
+    """The key a saved draft is kept under: the KOL's address for a reply, COMPOSE_KEY for a new email."""
     address = str(value or "").strip().lower()
+    if address == COMPOSE_KEY:
+        return COMPOSE_KEY
     return address if re.fullmatch(r"[^@\s]+@[^@\s]+", address) and len(address) <= 320 else ""
 
 
@@ -5792,6 +6484,88 @@ async def send_reply(body: dict, mailbox: str, email_id: str, to: str, subject: 
     return JSONResponse({"ok": True, "to": kol, "warning": warning})
 
 
+async def api_compose_send(request: Request):
+    body = await request.json()
+    to, wrong = addresses(body.get("to"))
+    cc, wrong_cc = addresses(body.get("cc"))
+    cc = [a for a in cc if a not in to]
+    subject = strip_hidden(re.sub(r"[\r\n]+", " ", body.get("subject") or "")).strip()
+    text = strip_hidden((body.get("body") or "").replace("\r\n", "\n")).strip()
+    if wrong or wrong_cc:
+        return bad("这些不像邮箱地址：" + "、".join(wrong + wrong_cc))
+    if not (to and subject and text):
+        return bad("收件人、主题和正文都不能为空")
+    if len(to) + len(cc) > COMPOSE_MAX_RECIPIENTS:
+        return bad(f"收件人加抄送最多 {COMPOSE_MAX_RECIPIENTS} 个")
+    try:
+        attachments = outbox.resolve(body.get("attachments") or [])
+    except (outgoing.AttachmentError, OSError) as e:
+        return bad(str(e))
+    ids = {str(i) for i in body.get("attachments") or []}
+    if ids & sending_ids:
+        return bad("这些附件正在随另一封信发送")
+    sending_ids.update(ids)
+    try:
+        with feed.working("sending"):
+            return await send_new(body, to, cc, subject, text, attachments)
+    finally:
+        sending_ids.difference_update(ids)
+
+
+async def send_new(body: dict, to: list[str], cc: list[str], subject: str, text: str, attachments: list):
+    if DEV:
+        return bad("开发模式不发送邮件")
+    if text_hash(text) not in checked_texts:
+        return bad("正文和中文对照对不上（改过正文，或者对照没生成成功），先点“更新对照”核对后再发")
+    if text_hash(subject) not in checked_texts:  # the model may have written it, in a language the owner can't read
+        return bad("主题还没核对过中文（改过主题，或者核对没成功），先点“更新对照”再发")
+    if self_address() in to + cc:
+        return bad("收件人里有你自己的邮箱，去掉再发")
+    for address in to:
+        close_cases_for("email", address)  # a phone case still open for them is answered by this mail
+    account = current_account.get()
+    try:
+        extra = {"timeout": 420} if attachments else {}
+        result = await mail.send(recipients=to, subject=subject, **mail_args(text, [str(p) for p in attachments]),
+                                 **({"cc": cc} if cc else {}), **extra)
+    except MailError as e:
+        log("send outcome unknown (new mail)", ",".join(to), err_text(e))
+        cache.draft_uncertain(account, COMPOSE_KEY)
+        return JSONResponse({"error": f"发送结果不确定：{err_text(e)}", "uncertain": True}, status_code=502)
+    delivered, warning, message_id = send_outcome(result, to + cc)
+    if not delivered:
+        log("send not confirmed (new mail)", ",".join(to), result[:200])
+        cache.draft_uncertain(account, COMPOSE_KEY)
+        return JSONResponse({"error": f"发送结果不确定：{result[:300]}", "uncertain": True}, status_code=502)
+    log("sent new mail to", ",".join(to), f"cc {','.join(cc)}" if cc else "",
+        f"with {len(attachments)} attachment(s)" if attachments else "",
+        f"(no Sent copy: {result[:200]})" if warning else "")
+    try:  # the mail is out: bookkeeping problems below must never look like a failed send (and invite a resend)
+        cache.drop_draft(account, COMPOSE_KEY)
+        for item in body.get("attachments") or []:
+            outbox.remove(str(item))
+        sent_changed()
+        zh = body.get("body_zh")
+        zh = strip_hidden(zh).strip() if isinstance(zh, str) else ""
+        note = f"（附件 {len(attachments)} 个）" if attachments else ""
+        # KOL总表 follows the primary mailbox only, and only the person the mail was written for (the first To, whose
+        # history the draft read): an agent, a colleague or a vendor next to them on To or Cc gets no row of their own.
+        company = (CFG["mail"].get("company_domain") or "").lower()
+        address = to[0]
+        if is_primary() and not (company and address.endswith(company)):
+            if SHEET_MODE == "legacy" and len(to) == 1 and sheet_enabled():
+                # The owner's 总表 adds a row only through upsert (a colleague's sheet on any event). Queued as it is:
+                # sheet_post stamps a time, which kol.py refuses in an upsert.
+                sheet_ops.append({"op": "upsert", "email": address, "first": datetime.now().astimezone().isoformat(),
+                                  "create": True, "only_if_stage": ["未联系"], "source": "KOL Mail 新邮件"})
+                sheet_wake.set()
+            sheet_guard("记录新邮件", sheet_after_send, address, subject, "我方新邮件" + note + "：" + gist(zh or text),
+                        "新邮件", message_id if len(to) + len(cc) == 1 else None)
+    except Exception as e:  # noqa: BLE001
+        log("after-send bookkeeping failed (new mail)", ",".join(to), err_text(e))
+    return JSONResponse({"ok": True, "to": to, "cc": cc, "warning": warning})
+
+
 # ---------------------------------------------------------------- guard & app
 
 # Open on the login screen too (everything else needs a mailbox): these exactly, and what starts with LOGIN_PREFIXES.
@@ -5799,7 +6573,7 @@ LOGIN_PATHS = {"/api/status", "/api/accounts", "/api/accounts/add"}
 LOGIN_PREFIXES = ("/api/skin", "/api/pet", "/api/update", "/api/feedback")
 MAILBOX_PATHS = ("/api/status", "/api/folders", "/api/messages", "/api/message", "/api/translation",
                  "/api/retranslate", "/api/thread", "/api/search", "/api/attachment", "/api/reply/", "/api/send",
-                 "/api/channels")
+                 "/api/channels", "/api/move", "/api/flag", "/api/compose/")
 
 
 async def guard(scope, receive, send, app):
@@ -5901,6 +6675,13 @@ routes = [
     Route("/skin/wallpaper", page_wallpaper),
     Route("/signature/{kind}.png", page_signature_picture),
     Route("/api/folders", api_folders),
+    Route("/api/folders/create", api_folder_create, methods=["POST"]),
+    Route("/api/folders/rename", api_folder_rename, methods=["POST"]),
+    Route("/api/folders/move", api_folder_move, methods=["POST"]),
+    Route("/api/folders/delete", api_folder_delete, methods=["POST"]),
+    Route("/api/move", api_move, methods=["POST"]),
+    Route("/api/flag", api_flag, methods=["POST"]),
+    Route("/api/flagged", api_flagged),
     Route("/api/messages", api_messages),
     Route("/api/message", api_message),
     Route("/api/thread", api_thread),
@@ -5913,12 +6694,16 @@ routes = [
     Route("/api/reply/strategies", api_reply_strategies, methods=["POST"]),
     Route("/api/reply/draft", api_reply_draft, methods=["POST"]),
     Route("/api/reply/pairs", api_reply_pairs, methods=["POST"]),
+    Route("/api/reply/zhedit", api_reply_zhedit, methods=["POST"]),
+    Route("/api/compose/draft", api_compose_draft, methods=["POST"]),
+    Route("/api/compose/send", api_compose_send, methods=["POST"]),
     Route("/api/reply/saved", api_reply_saved),
     Route("/api/reply/save", api_reply_save, methods=["POST"]),
     Route("/api/reply/discard", api_reply_discard, methods=["POST"]),
     Route("/api/reply/upload", api_reply_upload, methods=["POST"]),
     Route("/api/reply/unupload", api_reply_unupload, methods=["POST"]),
     Route("/api/feedback", api_feedback, methods=["POST"]),
+    Route("/api/selfcheck", api_selfcheck, methods=["POST"]),
     Route("/api/setup", api_setup, methods=["GET", "POST"]),
     Route("/api/sheet", api_sheet),
     Route("/api/sheet/pick", api_sheet_pick, methods=["POST"]),

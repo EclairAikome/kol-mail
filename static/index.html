@@ -166,7 +166,47 @@
   .pairsbar { display: flex; gap: 8px; align-items: center; margin: 8px 0 4px; }
   .pairsbar label { margin: 0 !important; }
   .stale { color: var(--warn); font-size: 13px; }
-  #fbBtn { position: fixed; right: 18px; bottom: 18px; z-index: 5; border-radius: 18px; padding: 7px 16px; box-shadow: 0 2px 8px rgba(0,0,0,.18); }
+  /* above whatever a browser extension lays over the page; placeFeedback() lifts it out from under the taskbar */
+  #fbBtn { position: fixed; right: 18px; bottom: 18px; z-index: 2147483000; border-radius: 18px; padding: 7px 16px; box-shadow: 0 2px 8px rgba(0,0,0,.18); }
+  /* flags */
+  .row .flag { cursor: pointer; color: var(--line); margin-left: 6px; font-size: 13px; line-height: 1; }
+  .row:hover .flag { color: var(--muted); }
+  .row.flagged .flag, .row .flag:hover { color: var(--bad); }
+  .readbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 10px; }
+  .readbar button.flagged { color: var(--bad); border-color: var(--bad); }
+  .readbar select, #folderParent, .compose select { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+  /* the folder tree, its menu and the mails dragged onto it */
+  nav .fold { position: relative; }
+  nav .fold button.box { padding-right: 30px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  nav .fold button.more { position: absolute; right: 2px; top: 3px; width: auto; display: inline-block; padding: 2px 7px; border-radius: 4px; color: var(--muted); opacity: 0; }
+  nav .fold:hover button.more, nav .fold button.more:focus-visible { opacity: 1; }  /* still reachable with Tab */
+  nav .fold button.more:hover { background: var(--accent-soft); color: var(--accent); }
+  nav button.drop { outline: 2px dashed var(--accent); outline-offset: -2px; }
+  nav .flagbox .n { background: var(--bad); }
+  nav #newFolderBtn { display: block; width: auto; margin: 10px 14px; padding: 3px 10px; font-size: 12px; color: var(--muted); border: 1px dashed var(--line); border-radius: 6px; }
+  nav #newFolderBtn[hidden] { display: none; }
+  #folderMenu { position: fixed; z-index: 40; min-width: 160px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 10px 28px rgba(0,0,0,.18); padding: 4px 0; }
+  #folderMenu[hidden] { display: none; }
+  #folderMenu button { display: block; width: 100%; text-align: left; border: 0; background: none; color: var(--text); padding: 6px 14px; cursor: pointer; font: inherit; }
+  #folderMenu button:hover { background: var(--accent-soft); }
+  #folderMenu button.danger { color: var(--bad); }
+  #folderMenu .note { padding: 4px 14px; font-size: 12px; max-width: 240px; }
+  #folderDlg input[hidden], #folderDlg select[hidden] { display: none; }
+  #folderDlg button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+  #toast { position: fixed; top: 54px; left: 50%; transform: translateX(-50%); z-index: 50; background: var(--text); color: var(--bg); padding: 7px 16px; border-radius: 18px; font-size: 13px; box-shadow: 0 4px 14px rgba(0,0,0,.2); }
+  #toast[hidden] { display: none; }
+  /* the Chinese of a translated paragraph can be corrected in place (applyZhEdits) */
+  table.pairs textarea.zhedit { display: block; width: 100%; min-height: 0; border: 1px dashed transparent; background: transparent; padding: 0 2px; resize: none; overflow: hidden; font: inherit; color: inherit; border-radius: 4px; }
+  table.pairs textarea.zhedit:hover { border-color: var(--line); }
+  table.pairs textarea.zhedit:focus { border-color: var(--accent); outline: none; background: var(--bg); }
+  table.pairs textarea.zhedit[readonly] { cursor: default; border-color: transparent; }
+  table.pairs tr.changed td.zh { background: var(--accent-soft); }
+  table.pairs tr.changed td:first-child { color: var(--muted); }
+  /* a new email */
+  .compose .grid2 { display: grid; grid-template-columns: 56px 1fr; gap: 6px 8px; align-items: center; margin-bottom: 8px; }
+  .compose .grid2 label { font-size: 12px; color: var(--muted); margin: 0; }
+  .compose .grid2 select { justify-self: start; }
+  .compose > label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
   dialog.small:not([open]) { display: none; }
   dialog.small { width: min(560px, 92vw); border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); }
   dialog.small h3 { margin: 0 0 8px; font-size: 15px; }
@@ -293,6 +333,7 @@ try {
     <div id="acctMenu" role="menu" hidden></div>
     <button class="act" id="logoutBtn" type="button" hidden>退出</button>
   </div>
+  <button class="act primary" id="composeBtn" type="button" title="新建一封邮件，AI 帮你起草">写邮件</button>
   <form id="searchForm" role="search">
     <input type="search" id="q" placeholder="搜索发件人、邮箱、主题、正文或中文译文" maxlength="200">
     <button class="act" type="submit">搜索</button>
@@ -466,6 +507,19 @@ try {
   <div class="row2"><button class="act primary" id="fbSend" type="button">发送</button>
     <button class="act" id="fbClose" type="button">关闭</button><span class="note" id="fbNote"></span></div>
 </dialog>
+<dialog id="folderDlg" class="small">
+  <form id="folderForm">
+    <h3 id="folderTitle"></h3>
+    <p class="note" id="folderLead"></p>
+    <input type="text" id="folderName" maxlength="100" autocomplete="off" placeholder="文件夹名字">
+    <select id="folderParent"></select>
+    <p class="note" id="folderNote"></p>
+    <div class="btns"><button class="act primary" id="folderOk" type="submit">确定</button>
+      <button class="act" id="folderCancel" type="button">取消</button></div>
+  </form>
+</dialog>
+<div id="folderMenu" role="menu" hidden></div>
+<div id="toast" role="status" hidden></div>
 <button class="act" id="fbBtn" type="button">反馈</button>
 <div id="loginView" hidden>
   <form id="loginForm" novalidate>
@@ -495,6 +549,7 @@ try {
 <main>
   <nav>
     <div id="folders"></div>
+    <button id="newFolderBtn" type="button" hidden title="在最上层新建一个文件夹；要建在某个文件夹里面，点那个文件夹右边的 ⋯">+ 新建文件夹</button>
   </nav>
   <section id="list">
     <div class="listbar">
@@ -526,6 +581,10 @@ try {
 
 <template id="readerTpl">
   <h2 data-f="subject"></h2>
+  <div class="readbar">
+    <button class="act" data-f="flagBtn" type="button" title="标记这封邮件，回头再处理；Outlook 和网页邮箱里也看得到">⚑ 标记</button>
+    <select data-f="moveSel" title="把这个会话在当前文件夹里的邮件移到别的文件夹"><option value="">移动到…</option></select>
+  </div>
   <div class="meta" data-f="threadmeta"></div>
   <div class="channels" data-f="channels"></div>
   <div data-f="msgs"></div>
@@ -546,8 +605,10 @@ try {
       <label>收件人</label><input type="text" data-f="to2" disabled>
       <label>主题</label><input type="text" data-f="rsubject">
       <label>回复正文（<span data-f="rlang"></span>，可直接修改）</label><textarea data-f="rbody" style="min-height:200px"></textarea>
-      <div class="pairsbar"><label>中文对照（逐段回译实际要发出的正文）</label>
-        <button class="act" data-f="pairsBtn">更新对照</button><span data-f="pairsNote" class="note"></span></div>
+      <div class="pairsbar"><label>中文对照（逐段回译实际要发出的正文；右边的中文可以直接改）</label>
+        <button class="act" data-f="pairsBtn">更新对照</button>
+        <button class="act primary" data-f="zhApplyBtn" hidden title="AI 只改你动过中文的那几段原文，其他段一个字不动，改完重新回译核对">按改过的中文改原文</button>
+        <span data-f="pairsNote" class="note"></span></div>
       <table class="pairs" data-f="pairs"></table>
       <label>这一版做了什么</label><div class="hint" data-f="rstrategy"></div>
       <label>发送前需要你确认</label><div class="hint warn" data-f="rapproval"></div>
@@ -563,10 +624,49 @@ try {
   </div>
 </template>
 
+<template id="composeTpl">
+  <h2>写邮件 <span class="note" data-f="savedNote" style="font-weight:normal;font-size:12px"></span></h2>
+  <div class="reply compose" data-f="replybox">
+    <div class="grid2">
+      <label>收件人</label><input type="text" data-f="cto" placeholder="对方的邮箱，多个用逗号隔开" autocomplete="off">
+      <label>抄送</label><input type="text" data-f="ccc" placeholder="可以不填" autocomplete="off">
+      <label>主题</label><input type="text" data-f="rsubject" placeholder="可以不填，AI 起草时会拟一个">
+      <label>语言</label><select data-f="clang"></select>
+      <span></span><span class="note" data-f="subjzh"></span>
+    </div>
+    <label>要点（用中文写这封信要说什么）</label>
+    <textarea data-f="notes" placeholder="比如“第一次联系，邀请他做一期原神的版本解析视频，问他的报价和档期”。跟这个人以前有往来的话，AI 会参考之前的邮件。写好了完整的中文邮件，点“翻译我写的中文”。"></textarea>
+    <div class="btns">
+      <button class="act primary" data-f="draftBtn">AI 起草</button>
+      <button class="act" data-f="transBtn">翻译我写的中文</button>
+      <span class="note" data-f="draftNote"></span>
+    </div>
+    <div class="draft" data-f="draft">
+      <label>正文（<span data-f="rlang"></span>，可直接修改）</label><textarea data-f="rbody" style="min-height:200px"></textarea>
+      <div class="pairsbar"><label>中文对照（逐段回译实际要发出的正文；右边的中文可以直接改）</label>
+        <button class="act" data-f="pairsBtn">更新对照</button>
+        <button class="act primary" data-f="zhApplyBtn" hidden title="AI 只改你动过中文的那几段原文，其他段一个字不动，改完重新回译核对">按改过的中文改原文</button>
+        <span data-f="pairsNote" class="note"></span></div>
+      <table class="pairs" data-f="pairs"></table>
+      <label>这一版做了什么</label><div class="hint" data-f="rstrategy"></div>
+      <label>发送前需要你确认</label><div class="hint warn" data-f="rapproval"></div>
+      <label>修改意见（写给 AI，比如“语气再热情点”“去掉第二段”“价格改成 150 美元两条”）</label>
+      <textarea data-f="feedback" style="min-height:60px"></textarea>
+      <div class="btns"><button class="act" data-f="reviseBtn">按意见修改</button><span class="note" data-f="reviseNote"></span></div>
+      <label>附件（可以点按钮选，也可以把文件拖进这里，截图直接在正文框里 Ctrl+V 粘贴）</label>
+      <div class="btns"><button class="act" data-f="attachBtn">添加附件</button><input type="file" multiple hidden data-f="attachInput">
+        <span class="note" data-f="attachNote">加起来最多 15 MB，最多 10 个</span></div>
+      <div class="outatts" data-f="outatts"></div>
+      <div class="btns"><button class="act primary" data-f="sendBtn">确认无误，发送</button><span class="note" data-f="sendNote"></span></div>
+    </div>
+  </div>
+</template>
+
 <script>
 const $ = (s, r = document) => r.querySelector(s);
 const st = { mailbox: "INBOX", page: 1, total: 0, current: null, listSeq: 0, loadingMore: false, threads: new Map(), search: null,
-  account: "", boxes: { sent: "Sent Items", drafts: "Drafts", junk: "Junk E-mail", trash: "Deleted Items" }, deal: [] };
+  account: "", boxes: { sent: "Sent Items", drafts: "Drafts", junk: "Junk E-mail", trash: "Deleted Items" }, deal: [],
+  folders: { names: [], delim: "", locked: new Set(), editable: false, flaggable: new Set() }, dragging: null };
 const ACCOUNT_KEY = "kolmail.account";  // the mailbox shown last on this computer
 try { st.account = localStorage.getItem(ACCOUNT_KEY) || ""; } catch { /* the primary one */ }
 // Every request names the mailbox it is about; the server falls back to the primary one for an unknown name.
@@ -581,7 +681,7 @@ async function api(path, opts = {}) {
     try { localStorage.removeItem(ACCOUNT_KEY); } catch { /* the reload asks the server anyway */ }
     location.reload();
   }
-  if (!r.ok) { const err = new Error(data.error || r.statusText); err.data = data; throw err; }
+  if (!r.ok) { const err = new Error(data.error || r.statusText); err.data = data; err.status = r.status; throw err; }
   return data;
 }
 const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body) });
@@ -605,8 +705,9 @@ async function loadStatus() {
     if (s.login_needed) { showLogin(s.login || {}); return; }
     if (asked !== st.account) return;
     showUnreadCounts(s.unread_counts || {});
+    showFlagCount(s.flagged_count);
     if (st.unreadRev !== undefined && s.unread_rev !== st.unreadRev && !st.loadingMore) {
-      // Unread state changed (new mail, read elsewhere, or marked read here): repaint from the server cache.
+      // Unread or flag state changed (new mail, read or flagged elsewhere or here): repaint from the server cache.
       if (!st.search && st.page === 1) loadList(false, "cached", true).catch(() => {});  // search rows keep their flags
     }
     if (!st.loadingMore) st.unreadRev = s.unread_rev;  // otherwise repaint on the next poll, not never
@@ -635,6 +736,7 @@ async function loadStatus() {
     const fb = $("#fbBtn");
     fb.disabled = !s.feedback_ready;
     fb.title = s.feedback_ready ? "" : "反馈地址还没配置（安装命令里缺 -Feedback），请直接联系维护者";
+    placeFeedback();
     if (s.mail_error) parts.push(s.mail_error);
     else if (s.scan_error) parts.push("收信出错：" + s.scan_error);
     if (s.autoreply_error) parts.push(s.autoreply_error);
@@ -659,34 +761,216 @@ let FOLDER_NAMES = { INBOX: "收件箱", "Sent Items": "已发送", Drafts: "草
 // Empty leftovers that some mail client created next to WorkMail's own "Deleted Items" and "Drafts".
 let HIDDEN_FOLDERS = new Set(["Outbox", "Trash"]);
 
+function badge(b, c, title) {
+  let n = b.querySelector(".n");
+  if (!c) { if (n) n.remove(); return; }
+  if (!n) { n = document.createElement("span"); n.className = "n"; b.append(n); }
+  n.textContent = c > 99 ? "99+" : String(c);
+  n.title = title(c);
+}
+
 function showUnreadCounts(counts) {
-  document.querySelectorAll("#folders button").forEach(b => {
-    let n = b.querySelector(".n");
-    const c = counts[b.dataset.box] || 0;
-    if (!c) { if (n) n.remove(); return; }
-    if (!n) { n = document.createElement("span"); n.className = "n"; b.append(n); }
-    n.textContent = c > 99 ? "99+" : String(c);
-    n.title = `${c} 封未读`;
+  st.unreadCounts = counts;  // the folder tree is rebuilt now and then: it puts them back at once
+  document.querySelectorAll("#folders button.box").forEach(b => {
+    if (b.dataset.box !== FLAGGED) badge(b, counts[b.dataset.box] || 0, c => `${c} 封未读`);
   });
 }
 
+function showFlagCount(c) {
+  if (typeof c !== "number") return;
+  st.flagCount = c;
+  const b = document.querySelector(`#folders button.box[data-box="${FLAGGED}"]`);
+  if (b) badge(b, c, c => `${c} 封标记过的邮件`);
+}
+
+// The 已标记 view: flagged mails of every folder, in the folder list right below 收件箱 (never a real folder name).
+const FLAGGED = "__kolmail_flagged__";
+const DRAG_ROWS = "application/x-kolmail-rows";  // what a list row carries while it is dragged onto a folder
+
+// A folder's name on the server is its whole path ("Partners/Asia"); the tree shows the last level, indented.
+function folderLabel(f) {
+  if (f === FLAGGED) return "已标记";
+  const d = st.folders.delim;
+  return FOLDER_NAMES[f] || (d && f.includes(d) ? f.slice(f.lastIndexOf(d) + d.length) : f);
+}
+function parentFolder(f) { const d = st.folders.delim, i = d ? f.lastIndexOf(d) : -1; return i > 0 ? f.slice(0, i) : ""; }
+function insideFolder(name, folder) { return name === folder || (!!st.folders.delim && name.startsWith(folder + st.folders.delim)); }
+// Where mails can be moved to by hand: INBOX, the deal folders and the folders the owner made.
+function fileable(f) { return f === "INBOX" || st.deal.includes(f) || (!st.folders.locked.has(f) && !HIDDEN_FOLDERS.has(f)); }
+
+// [folder, depth] in the order the tree shows them: INBOX, the deal folders, the owner's folders, then Sent, Drafts,
+// Junk and Deleted Items; every folder's subfolders right below it.
+function folderOrder(names) {
+  const top = ["INBOX", ...st.deal], tail = [st.boxes.sent, st.boxes.drafts, st.boxes.junk, st.boxes.trash];
+  const rank = f => top.includes(f) ? top.indexOf(f) : tail.includes(f) ? 1000 + tail.indexOf(f) : 500;
+  const known = new Set(names), kids = new Map();
+  for (const f of names) {
+    let p = parentFolder(f);
+    while (p && !known.has(p)) p = parentFolder(p);  // a level the server lists as \Noselect: skip it
+    if (!kids.has(p)) kids.set(p, []);
+    kids.get(p).push(f);
+  }
+  const out = [], walk = (p, depth) => {
+    const list = (kids.get(p) || []).sort((a, b) => (p ? 0 : rank(a) - rank(b)) || a.localeCompare(b, "zh"));
+    for (const f of list) { out.push([f, depth]); walk(f, depth + 1); }
+  };
+  walk("", 0);
+  return out;
+}
+
 async function loadFolders() {
-  const { folders, roles, deal } = await api("/api/folders");
+  const d = await api("/api/folders");
+  const { folders, roles, deal } = d;
   if (roles) {
     st.boxes = roles; st.deal = deal || [];
     FOLDER_NAMES = { INBOX: "收件箱", [roles.sent]: "已发送", [roles.drafts]: "草稿", [roles.junk]: "垃圾邮件", [roles.trash]: "已删除" };
     HIDDEN_FOLDERS = new Set(["Outbox", ...(roles.trash === "Trash" ? [] : ["Trash"])]);
   }
-  const order = ["INBOX", ...st.deal, st.boxes.sent, st.boxes.drafts];
+  st.folders = { names: folders, delim: d.delimiter || "", locked: new Set(d.locked || []), editable: !!d.editable,
+                 flaggable: new Set(d.flaggable || []) };
   const shown = folders.filter(f => !HIDDEN_FOLDERS.has(f));
-  shown.sort((a, b) => ((order.indexOf(a) + 1) || 99) - ((order.indexOf(b) + 1) || 99));
   const nav = $("#folders"); nav.textContent = "";
-  for (const f of shown) {
-    const b = document.createElement("button");
-    b.textContent = FOLDER_NAMES[f] || f; b.dataset.box = f; b.className = f === st.mailbox && !st.search ? "on" : "";
-    b.onclick = safe(() => showFolder(f));
-    nav.append(b);
+  const tree = folderOrder(shown);
+  // 已标记 right below 收件箱 and its subfolders, so it never looks like one of them
+  const at = tree.findIndex(([f]) => !insideFolder(f, "INBOX"));
+  tree.splice(at < 0 ? tree.length : at, 0, [FLAGGED, 0]);
+  for (const [f, depth] of tree) nav.append(folderItem(f, depth));
+  $("#newFolderBtn").hidden = false;
+  showUnreadCounts(st.unreadCounts || {});
+  showFlagCount(st.flagCount);
+}
+
+function folderItem(f, depth) {
+  const wrap = document.createElement("div"); wrap.className = "fold" + (f === FLAGGED ? " flagbox" : "");
+  const b = document.createElement("button"); b.type = "button";
+  b.className = "box" + (f === st.mailbox && !st.search ? " on" : "");
+  b.dataset.box = f; b.textContent = (f === FLAGGED ? "⚑ " : "") + folderLabel(f);
+  b.title = f === FLAGGED ? "所有文件夹里标记过的邮件" : f;
+  b.style.paddingLeft = 14 + depth * 16 + "px";
+  b.onclick = safe(() => showFolder(f));
+  wrap.append(b);
+  if (f === FLAGGED) return wrap;
+  b.oncontextmenu = e => { e.preventDefault(); openFolderMenu(f, e.clientX, e.clientY); };
+  // conversations dragged from the list onto a folder are moved there
+  const ours = e => st.dragging && [...e.dataTransfer.types].includes(DRAG_ROWS) && st.dragging.mailbox !== f && fileable(f);
+  b.addEventListener("dragover", e => { if (ours(e)) { e.preventDefault(); b.classList.add("drop"); } });
+  b.addEventListener("dragleave", () => b.classList.remove("drop"));
+  b.addEventListener("drop", e => {
+    b.classList.remove("drop");
+    if (!ours(e)) return;
+    const m = st.dragging; st.dragging = null;
+    e.preventDefault(); safe(moveMails)(m.mailbox, m.ids, f);
+  });
+  const more = document.createElement("button"); more.type = "button"; more.className = "more"; more.textContent = "⋯";
+  more.title = "新建子文件夹、重命名、移动、删除";
+  more.onclick = e => { e.stopPropagation(); const r = more.getBoundingClientRect(); openFolderMenu(f, r.left, r.bottom + 2); };
+  wrap.append(more);
+  return wrap;
+}
+
+// ---------------------------------------------------------------- the folder menu: new, rename, move, delete
+function closeFolderMenu() { $("#folderMenu").hidden = true; }
+document.addEventListener("click", e => { if (!$("#folderMenu").contains(e.target)) closeFolderMenu(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeFolderMenu(); });
+$("nav").addEventListener("scroll", closeFolderMenu);  // nav scrolls, not the tree inside it
+
+function openFolderMenu(f, x, y) {
+  const menu = $("#folderMenu"); menu.textContent = "";
+  const locked = f === "INBOX" || st.folders.locked.has(f);
+  const item = (label, fn, cls = "") => {
+    const b = document.createElement("button"); b.type = "button"; b.textContent = label; b.className = cls;
+    b.onclick = e => { e.stopPropagation(); closeFolderMenu(); fn(); };
+    menu.append(b);
+  };
+  if (st.folders.delim) item("新建子文件夹", () => folderDialog("create", f));
+  if (!locked && st.folders.editable) {
+    item("重命名", () => folderDialog("rename", f));
+    if (st.folders.delim) item("移动到…", () => folderDialog("move", f));
+    item("删除", () => folderDialog("delete", f), "danger");
   }
+  const note = document.createElement("div"); note.className = "note";
+  note.textContent = locked ? (st.deal.includes(f) ? "成交文件夹的名字固定，每天的分拣任务按名字往里放邮件，不能改名或删除"
+                                                   : "系统文件夹不能改名或删除")
+    : !st.folders.editable ? "这台电脑的邮件组件只支持新建文件夹，重新运行安装命令后才能改名、移动和删除" : "";
+  if (note.textContent) menu.append(note);
+  if (!menu.children.length) return;
+  menu.hidden = false;
+  menu.style.left = Math.max(4, Math.min(x, innerWidth - menu.offsetWidth - 8)) + "px";
+  menu.style.top = Math.max(4, Math.min(y, innerHeight - menu.offsetHeight - 8)) + "px";
+}
+
+function folderDialog(kind, f) {
+  const dlg = $("#folderDlg"), name = $("#folderName"), parent = $("#folderParent"), note = $("#folderNote"), ok = $("#folderOk");
+  const label = f ? `“${folderLabel(f)}”` : "";
+  $("#folderTitle").textContent = { create: f ? `在${label}里新建文件夹` : "新建文件夹", rename: `重命名${label}`,
+                                    move: `把${label}移到…`, delete: `删除${label}？` }[kind];
+  $("#folderLead").textContent = kind === "delete" ? "里面的邮件会先移到“已删除”，需要的话还能从那里找回来。里面有子文件夹的话，要先把子文件夹删掉或移出去。"
+    : kind === "move" ? "选一个新的上级文件夹，它的子文件夹和邮件会一起过去。" : kind === "rename" ? "子文件夹和邮件都不受影响。" : "";
+  name.hidden = !(kind === "create" || kind === "rename"); parent.hidden = kind !== "move";
+  name.value = kind === "rename" ? folderLabel(f) : "";
+  if (kind === "move") {
+    parent.textContent = "";
+    parent.add(new Option("（放到最上层）", ""));
+    for (const [g, depth] of folderOrder(st.folders.names.filter(n => !HIDDEN_FOLDERS.has(n))))
+      if (!insideFolder(g, f) && g !== parentFolder(f)) parent.add(new Option("　".repeat(depth) + folderLabel(g), g));
+    if (!parentFolder(f)) parent.remove(0);  // already at the top
+  }
+  ok.textContent = kind === "delete" ? "删除" : "确定"; ok.className = "act " + (kind === "delete" ? "danger" : "primary");
+  note.className = "note"; note.textContent = ""; ok.disabled = false; $("#folderCancel").disabled = false;
+  dlg.showModal();
+  (kind === "move" ? parent : kind === "delete" ? $("#folderCancel") : name).focus();
+  $("#folderForm").onsubmit = e => { e.preventDefault(); safe(submit)(); };  // cancelled right away, not after an await
+  async function submit() {
+    if (ok.disabled) return;
+    // Until the server answers the dialog stays (Esc and 取消 included): a delete can take a while, and its
+    // outcome must be seen.
+    ok.disabled = true; $("#folderCancel").disabled = true; st.folderBusy = true; note.className = "note";
+    note.textContent = kind === "delete" ? "正在把邮件移到“已删除”，再删除文件夹，邮件多的话要等一会…" : "正在处理…";
+    let r;
+    try {
+      r = kind === "create" ? await post("/api/folders/create", { parent: f || "", name: name.value.trim() })
+        : kind === "rename" ? await post("/api/folders/rename", { mailbox: f, name: name.value.trim() })
+        : kind === "move" ? await post("/api/folders/move", { mailbox: f, parent: parent.value })
+        : await post("/api/folders/delete", { mailbox: f });
+    } catch (err) {
+      note.className = "note err"; note.textContent = err.message;
+      if (kind === "delete") safe(loadFolders)();  // some mails may have gone to 已删除 before it stopped
+      return;
+    } finally { ok.disabled = false; $("#folderCancel").disabled = false; st.folderBusy = false; }
+    dlg.close();
+    toast(kind === "create" ? `建好了“${folderLabel(r.folder)}”，把邮件拖到它上面就能移进去`
+      : kind === "delete" ? `删除了${label}` + (r.moved ? `，${r.moved} 封邮件移到了“已删除”` : "")
+      : kind === "rename" ? `改名为“${folderLabel(r.folder)}”` : `移好了`);
+    // The folder shown now was renamed, moved or deleted (or sits inside one that was): follow it, or go to INBOX.
+    const shownGone = kind !== "create" && st.mailbox !== FLAGGED && insideFolder(st.mailbox, f);
+    if (shownGone) st.mailbox = kind === "delete" ? "INBOX" : r.folder + st.mailbox.slice(f.length);
+    safe(async () => { await loadFolders(); if (shownGone && !st.search) await showFolder(st.mailbox); })();
+  }
+}
+$("#folderCancel").onclick = () => { if (!st.folderBusy) $("#folderDlg").close(); };
+$("#folderDlg").addEventListener("cancel", e => { if (st.folderBusy) e.preventDefault(); });  // Esc while it works
+$("#newFolderBtn").onclick = () => folderDialog("create", "");
+
+function toast(text) {
+  const t = $("#toast"); t.textContent = text; t.hidden = false;
+  clearTimeout(st.toastTimer); st.toastTimer = setTimeout(() => { t.hidden = true; }, 4000);
+}
+
+// Mails of one folder into another; the list and an open conversation that left with them follow.
+async function moveMails(mailbox, ids, target) {
+  if (!ids.length) return;
+  // whole_thread: the server adds the conversation's mails in this folder that the list never loaded
+  const r = await post("/api/move", { mailbox, email_ids: ids, to: target, whole_thread: true });
+  toast(`${r.moved > 1 ? r.moved + " 封邮件" : "邮件"}已移到“${folderLabel(target)}”`);
+  const c = st.current;
+  if (c && !c.compose && c.opened.mailbox === mailbox && (r.ids || ids).includes(c.opened.id)) {
+    clearInterval(c.poll); st.current = null;
+    $("#reader").textContent = "";
+    const empty = document.createElement("div"); empty.className = "empty"; empty.textContent = `这个会话已移到“${folderLabel(target)}”`;
+    $("#reader").append(empty);
+  }
+  if (st.search) await runSearch(st.search.q);
+  else await loadList(false, "live");
 }
 
 // ---------------------------------------------------------------- mailboxes: the name at the top left, its menu, logging out
@@ -763,6 +1047,7 @@ async function switchAccount(name, mailbox = "INBOX") {
   if (st.current) { clearInterval(st.current.poll); st.current.urls.forEach(u => URL.revokeObjectURL(u)); st.current = null; }
   $("#reader").innerHTML = '<div class="empty">选择一封邮件</div>';
   st.search = null; $("#q").value = ""; st.mailbox = mailbox;
+  st.unreadCounts = {}; st.flagCount = 0;  // the other mailbox's numbers must not show on this one's folders
   renderAccounts(st.accounts || []);
   await loadFolders(); await showFolder(mailbox); await loadStatus();
 }
@@ -876,7 +1161,7 @@ async function showFolder(f) {
   if (st.search) { st.search = null; $("#q").value = ""; }
   st.mailbox = f; st.page = 1;
   $("#moreNote").textContent = ""; $("#more").disabled = false; $("#more").textContent = "加载更多";
-  document.querySelectorAll("#folders button").forEach(b => b.classList.toggle("on", b.dataset.box === f));
+  document.querySelectorAll("#folders button.box").forEach(b => b.classList.toggle("on", b.dataset.box === f));
   if (await loadList(false, "cached")) return st.mailbox === f && loadList(false, "revalidate");
   if (st.mailbox !== f || st.search) return;  // another folder or a search took over meanwhile
   const box = $("#rows"); box.textContent = "";
@@ -889,6 +1174,7 @@ async function showFolder(f) {
 // Returns false only when "cached" had nothing to show.
 // quiet: a background repaint that must not cancel a list load already in flight (it yields to it instead).
 async function loadList(append = false, mode = "live", quiet = false) {
+  if (st.mailbox === FLAGGED) return append || mode === "revalidate" || loadFlagged(mode === "live", quiet);
   if (append && st.loadingMore) return true;
   const mailbox = st.mailbox, page = append ? st.page + 1 : 1, seq = quiet ? st.listSeq : ++st.listSeq;
   if (append) st.loadingMore = true;
@@ -937,32 +1223,150 @@ function renderRows(emails, append, search) {
     const hide = hideOn && (search ? mailbox !== st.boxes.sent : mailbox === "INBOX");
     if (hide && e.skippable) continue;
     const group = st.threads.get(e.thread_key);
+    const item = { mailbox, id: String(e.email_id), flagged: !!e.flagged };  // every mail of the row, for flags and moves
     if (group) {
       group.count += 1;
       group.badge.textContent = group.count; group.badge.hidden = false;
       if (e.unread && !e.skippable) group.row.classList.add("unread");  // an older unread mail in the conversation
+      group.items.push(item); paintRowFlag(group);
       continue;
     }
     const row = document.createElement("div"); row.className = "row"; row.dataset.id = e.email_id;
     if (e.unread && !e.skippable) row.classList.add("unread");
     const countBadge = document.createElement("span"); countBadge.className = "badge count"; countBadge.hidden = true;
-    st.threads.set(e.thread_key, { count: 1, badge: countBadge, row });
+    const g = { count: 1, badge: countBadge, row, items: [item] };
+    st.threads.set(e.thread_key, g);
+    paintRowFlag(g);
     if (st.current && st.current.opened.mailbox === mailbox && st.current.opened.id === String(e.email_id)) row.classList.add("on");
     const top = document.createElement("div"); top.className = "top";
     const from = document.createElement("span"); from.className = "from";
     from.textContent = mailbox === st.boxes.sent ? "致 " + (e.recipients || []).join(", ") : senderName(e.sender);
     from.append(countBadge);
     const right = document.createElement("span"); right.textContent = fmtDate(e.date);
-    if (search) { const b = document.createElement("span"); b.className = "badge box"; b.textContent = FOLDER_NAMES[mailbox] || mailbox; right.append(b); }
+    if (search) { const b = document.createElement("span"); b.className = "badge box"; b.textContent = folderLabel(mailbox); right.append(b); }
     if (e.language && e.status === "done") { const b = document.createElement("span"); b.className = "badge"; b.textContent = e.language; right.append(b); }
     if (STATUS[e.status]) { const b = document.createElement("span"); b.className = "badge " + e.status; b.textContent = STATUS[e.status]; right.append(b); }
+    if (st.folders.flaggable.has(mailbox)) {  // where the flag is checked against the server (not Junk, Drafts...)
+      const flag = document.createElement("span"); flag.className = "flag"; flag.textContent = "⚑"; flag.setAttribute("role", "button");
+      flag.title = "标记，回头再处理（再点一下取消）";
+      flag.onclick = ev => { ev.stopPropagation(); safe(toggleRowFlag)(g); };
+      right.append(flag);
+    }
     top.append(from, right);
+    // Dragged onto a folder on the left, the conversation's mails in this folder go there (the server adds the ones
+    // the list has not loaded). Its own drag type: a file or a text dragged in from elsewhere is never a move.
+    row.draggable = true;
+    row.addEventListener("dragstart", ev => {
+      st.dragging = { mailbox, ids: g.items.filter(i => i.mailbox === mailbox).map(i => i.id) };
+      ev.dataTransfer.effectAllowed = "move"; ev.dataTransfer.setData(DRAG_ROWS, mailbox);
+    });
+    row.addEventListener("dragend", () => { st.dragging = null; document.querySelectorAll("nav button.drop").forEach(b => b.classList.remove("drop")); });
     const subj = document.createElement("div"); subj.className = "subj"; subj.textContent = e.subject || "(无主题)";
     row.append(top, subj);
     if (e.subject_zh) { const zh = document.createElement("div"); zh.className = "zh"; zh.textContent = e.subject_zh; row.append(zh); }
     row.onclick = () => openMessage(e.email_id, row, mailbox);
     box.append(row);
   }
+}
+
+// ---------------------------------------------------------------- flags
+// The server's own flag (\Flagged), so a mail flagged in Outlook or the web mail shows flagged here too and back.
+// A conversation row is flagged when any of its mails is; clicking its flag flags the newest one, or clears them all.
+function paintRowFlag(g) { g.row.classList.toggle("flagged", g.items.some(i => i.flagged)); }
+
+// One request per folder. If one fails, the items of the folders already done keep their new state (they are set
+// on the server); the rest go back to how they were, and the error is shown.
+async function setFlags(items, on) {
+  const byBox = new Map();
+  for (const i of items) byBox.set(i.mailbox, [...(byBox.get(i.mailbox) || []), i]);
+  for (const [mailbox, list] of byBox) {
+    try {
+      const r = await post("/api/flag", { mailbox, email_ids: list.map(i => i.id), on });
+      showFlagCount(r.flagged_count);
+    } catch (e) {
+      e.undo = [...byBox.keys()].slice([...byBox.keys()].indexOf(mailbox)).flatMap(b => byBox.get(b));
+      throw e;
+    }
+  }
+}
+
+async function toggleRowFlag(g) {
+  const on = !g.items.some(i => i.flagged);
+  const targets = (on ? [g.items[0]] : g.items.filter(i => i.flagged)).filter(i => st.folders.flaggable.has(i.mailbox));
+  if (!targets.length) return;
+  targets.forEach(i => { i.flagged = on; }); paintRowFlag(g);
+  try { await setFlags(targets, on); }
+  catch (e) { (e.undo || targets).forEach(i => { i.flagged = !on; }); paintRowFlag(g); throw e; }
+  const c = st.current;
+  if (c && c.flagMsg && targets.some(i => i.mailbox === c.flagMsg.mailbox && i.id === c.flagMsg.id)) {
+    c.flagMsg.flagged = on; paintReaderFlag(c);
+  }
+  if (!on && st.mailbox === FLAGGED && !st.search && !g.items.some(i => i.flagged)) {
+    g.row.remove();
+    $("#count").textContent = `已标记 ${st.flagCount ?? 0} 封`;
+    if (!document.querySelector("#rows .row")) await loadFlagged(false, true);  // its "nothing flagged" note
+  }
+}
+
+// The 已标记 view: every flagged mail of the conversation folders and Sent Items, newest first.
+async function loadFlagged(live = false, quiet = false) {
+  const seq = quiet ? st.listSeq : ++st.listSeq;
+  if (!quiet && !document.querySelector("#rows .row")) {
+    $("#rows").textContent = ""; const wait = document.createElement("div"); wait.className = "empty";
+    wait.textContent = "正在查各个文件夹里标记过的邮件…"; $("#rows").append(wait);
+  }
+  const data = await api("/api/flagged" + (live ? "?mode=live" : ""));
+  if (seq !== st.listSeq || st.mailbox !== FLAGGED || st.search) return true;
+  st.page = 1; st.total = data.total;
+  renderRows(data.emails, false, true);
+  if (!data.emails.length) {
+    const empty = document.createElement("div"); empty.className = "empty";
+    empty.textContent = "没有标记过的邮件。一时回不了的信，点列表里那一行右上角的 ⚑，它就会出现在这里，回完再点一下取消。";
+    $("#rows").append(empty);
+  }
+  $("#count").textContent = `已标记 ${data.total} 封`; $("#count").style.color = "";
+  if (data.failed && data.failed.length) {
+    $("#count").textContent += `（${data.failed.map(folderLabel).join("、")}没查到，点刷新再试）`; $("#count").style.color = "var(--bad)";
+  }
+  showFlagCount(data.total);
+  $("#more").hidden = true; $("#moreNote").textContent = "";
+  return true;
+}
+
+function paintReaderFlag(ctx) {
+  const b = field(ctx.view, "flagBtn"), m = ctx.flagMsg;
+  if (!b) return;
+  b.hidden = !m || !st.folders.flaggable.has(m.mailbox);  // Junk, Drafts, Deleted Items: no flags kept there
+  if (b.hidden) return;
+  b.classList.toggle("flagged", m.flagged);
+  b.textContent = m.flagged ? "⚑ 已标记" : "⚑ 标记";
+  b.title = m.flagged ? "已标记，点一下取消标记" : "标记这封邮件，回头再处理；Outlook 和网页邮箱里也看得到";
+}
+
+async function toggleReaderFlag(ctx) {
+  const m = ctx.flagMsg; if (!m) return;
+  const on = !m.flagged;
+  m.flagged = on; paintReaderFlag(ctx);
+  try { await setFlags([{ mailbox: m.mailbox, id: m.id }], on); }
+  catch (e) { m.flagged = !on; paintReaderFlag(ctx); throw e; }
+  for (const g of st.threads.values()) {
+    const i = g.items.find(x => x.mailbox === m.mailbox && x.id === m.id);
+    if (i) { i.flagged = on; paintRowFlag(g); }
+  }
+  if (st.mailbox === FLAGGED && !st.search) await loadFlagged(false, true);
+}
+
+// "移动到…" in the reader: the conversation's mails in the folder it was opened from.
+function fillMoveSelect(ctx) {
+  const sel = field(ctx.view, "moveSel"), box = ctx.opened.mailbox;
+  while (sel.options.length > 1) sel.remove(1);
+  for (const [f, depth] of folderOrder(st.folders.names.filter(n => fileable(n) && !HIDDEN_FOLDERS.has(n))))
+    if (f !== box) sel.add(new Option("　".repeat(depth) + folderLabel(f), f));
+  sel.hidden = !ctx.moveIds.length || !fileable(box);
+  sel.onchange = safe(async () => {
+    const to = sel.value; sel.value = "";
+    if (to) await moveMails(box, ctx.moveIds, to);
+  });
 }
 
 // Two passes: the local caches answer at once, then the server searches every message in the KOL folders,
@@ -1244,8 +1648,10 @@ async function openMessage(id, rowEl, mailbox) {
   field(view, "transBtn").onclick = () => draft(ctx, { mode: "translate" });
   field(view, "reviseBtn").onclick = () => revise(ctx);
   field(view, "pairsBtn").onclick = () => refreshPairs(ctx);
+  field(view, "zhApplyBtn").onclick = () => applyZhEdits(ctx);
   field(view, "rbody").oninput = () => markStale(ctx);
   field(view, "sendBtn").onclick = () => send(ctx);
+  field(view, "flagBtn").onclick = () => safe(toggleReaderFlag)(ctx);
   for (const f of ["notes", "rsubject", "rbody", "feedback"]) field(view, f).addEventListener("input", () => saveSoon(ctx));
   setupAttachments(ctx);
   restoreDraft(ctx, data.kol_address).catch(() => {}).finally(() => phoneDraft(ctx).catch(() => {}));
@@ -1269,6 +1675,12 @@ function renderThread(ctx, data) {
   }
   clearInterval(ctx.poll); ctx.cards = new Map();
   const msgs = data.messages;
+  const opened = msgs.find(m => m.opened);
+  if (!ctx.flagMsg || (opened && ctx.flagMsg.id !== opened.email_id))  // a flag clicked meanwhile is not undone
+    ctx.flagMsg = opened ? { mailbox: opened.mailbox, id: opened.email_id, flagged: !!opened.flagged } : null;
+  paintReaderFlag(ctx);
+  ctx.moveIds = msgs.filter(m => m.mailbox === ctx.opened.mailbox).map(m => m.email_id);
+  fillMoveSelect(ctx);
   const kols = msgs.filter(m => !m.own).length, ours = msgs.length - kols;
   field(view, "threadmeta").textContent = data.partial ? "正在载入本会话的其他邮件…"
     : msgs.length > 1 ? `本会话共 ${msgs.length} 封：对方 ${kols} 封，我方 ${ours} 封` : "";
@@ -1328,10 +1740,10 @@ function startPoll(ctx) {
 }
 
 function busy(ctx, on) {
-  ["draftBtn", "transBtn", "reviseBtn", "pairsBtn"].forEach(f => field(ctx.view, f).disabled = on);
+  ["draftBtn", "transBtn", "reviseBtn", "pairsBtn", "zhApplyBtn"].forEach(f => field(ctx.view, f).disabled = on);
   ctx.view.querySelectorAll(".opt button").forEach(b => b.disabled = on);
   ctx.busy = on;
-  updateSend(ctx);
+  zhChanged(ctx);  // also updateSend
 }
 
 // Step 1: two or three ways to answer, best first. Nothing is written yet.
@@ -1375,20 +1787,32 @@ async function draft(ctx, opts) {
   ctx.drafted = true;
   const v = ctx.view, translate = opts.mode === "translate";
   const note = opts.feedback ? field(v, "reviseNote") : field(v, "draftNote");
+  if (ctx.compose && !field(v, "cto").value.trim()) { note.className = "note err"; note.textContent = "先填收件人"; return; }
   busy(ctx, true); note.className = "note";
   note.textContent = translate ? "正在把你的中文译成对方的语言，再逐段回译核对…" :
-    opts.feedback ? "AI 正在按你的意见修改，改完再逐段回译核对…" : "AI 正在按选定方案起草，写完再逐段回译核对，约一分钟…";
+    opts.feedback ? "AI 正在按你的意见修改，改完再逐段回译核对…" :
+    ctx.compose ? "AI 正在按你的要点起草，跟对方以前有往来的话会先读一遍，写完再逐段回译核对，约一分钟…"
+                : "AI 正在按选定方案起草，写完再逐段回译核对，约一分钟…";
   try {
-    const r = await post("/api/reply/draft", { mailbox: ctx.mailbox, email_id: ctx.email_id, ctx: ctx.token,
-      mode: translate ? "translate" : "draft", notes: field(v, "notes").value,
-      strategy: translate ? null : (opts.strategy || ctx.strategy || null),
-      previous_body: opts.previous || "", feedback: opts.feedback || "" });
+    const common = { ctx: ctx.token, mode: translate ? "translate" : "draft", notes: field(v, "notes").value,
+                     previous_body: opts.previous || "", feedback: opts.feedback || "" };
+    const asked = ctx.compose ? composeFields(ctx) : null;
+    const r = ctx.compose ? await post("/api/compose/draft", { ...common, ...asked })
+      : await post("/api/reply/draft", { ...common, mailbox: ctx.mailbox, email_id: ctx.email_id,
+                                         strategy: translate ? null : (opts.strategy || ctx.strategy || null) });
     if (st.current !== ctx) return;  // the user moved on; drop this draft rather than attach it to another email
     ctx.token = r.ctx; if (opts.strategy) ctx.strategy = opts.strategy;
     ctx.sent = false;
     field(v, "draft").style.display = "block";
-    field(v, "to2").value = r.to || "";
-    if (!field(v, "rsubject").value) field(v, "rsubject").value = r.reply_subject || "";
+    if (ctx.compose) {
+      if (!field(v, "rsubject").value.trim()) field(v, "rsubject").value = r.subject || "";
+      ctx.subjectOk = r.subject_ok ? oneLine(r.subject) : null; ctx.subjectZh = r.subject_zh || "";
+      ctx.draftTo = oneLine(asked.to).toLowerCase();  // send warns when 收件人 is changed after this
+      showSubjectZh(ctx);
+    } else {
+      field(v, "to2").value = r.to || "";
+      if (!field(v, "rsubject").value) field(v, "rsubject").value = r.reply_subject || "";
+    }
     field(v, "rlang").textContent = r.reply_language || "";
     field(v, "rbody").value = r.reply_body || "";
     field(v, "rstrategy").textContent = r.notes_zh || "";
@@ -1414,16 +1838,80 @@ function showPairs(ctx, p) {
   const v = ctx.view, table = field(v, "pairs"), note = field(v, "pairsNote");
   table.textContent = "";
   ctx.pairs = p && p.ok ? { text: field(v, "rbody").value, zh: p.rows.map(r => r.zh).join("\n\n") } : null;
-  for (const row of (p && p.rows) || []) {
+  // The Chinese of every translated paragraph can be corrected right here (applyZhEdits), as long as the text above
+  // is still the one these rows were made from.
+  ctx.pairsText = p && p.rows ? field(v, "rbody").value : null;
+  ctx.pairRows = [];
+  ((p && p.rows) || []).forEach((row, index) => {
     const tr = document.createElement("tr"); if (row.same) tr.className = "same";
     const a = document.createElement("td"); a.textContent = row.orig;
     const b = document.createElement("td"); b.className = "zh" + (row.failed ? " failed" : "");
-    b.textContent = row.failed ? "（这一段没能生成可信的中文对照）" : row.same ? "（不用翻译）" : row.zh;
+    if (row.failed || row.same) b.textContent = row.failed ? "（这一段没能生成可信的中文对照）" : "（不用翻译）";
+    else {
+      const ta = document.createElement("textarea"); ta.className = "zhedit"; ta.rows = 1; ta.value = row.zh;
+      ta.title = "这段中文可以直接改。改完点上面的“按改过的中文改原文”，AI 只改这一段原文";
+      const fit = () => { ta.style.height = "auto"; ta.style.height = ta.scrollHeight + "px"; };
+      ta.addEventListener("input", () => { fit(); tr.classList.toggle("changed", ta.value.trim() !== row.zh.trim()); zhChanged(ctx); });
+      b.append(ta); requestAnimationFrame(fit);
+      ctx.pairRows.push({ index, orig: row.orig, zh: row.zh, ta, tr, fit });
+    }
     tr.append(a, b); table.append(tr);
+  });
+  // A narrower window, a zoom or a scrollbar that came later wraps the Chinese onto more lines: fit them again,
+  // or the last lines of a back-translation would be cut off unseen.
+  if (ctx.pairsObserver) ctx.pairsObserver.disconnect();
+  if (window.ResizeObserver && ctx.pairRows.length) {
+    let width = 0;
+    ctx.pairsObserver = new ResizeObserver(([entry]) => {
+      if (Math.round(entry.contentRect.width) === width) return;  // only a change of width rewraps
+      width = Math.round(entry.contentRect.width);
+      ctx.pairRows.forEach(r => r.fit());
+    });
+    ctx.pairsObserver.observe(table);
   }
   note.className = p && p.ok ? "note" : "note err";
   note.textContent = p && p.ok ? "" : (p && p.error) || "";
+  zhChanged(ctx);
   updateSend(ctx);
+}
+
+function zhEdits(ctx) {
+  return (ctx.pairRows || []).filter(r => r.ta.value.trim() !== r.zh.trim())
+    .map(r => ({ index: r.index, orig: r.orig, zh_before: r.zh, zh_after: r.ta.value.trim() }));
+}
+
+function zhChanged(ctx) {
+  const btn = field(ctx.view, "zhApplyBtn"), n = zhEdits(ctx).length;
+  const current = ctx.pairsText !== null && ctx.pairsText !== undefined && field(ctx.view, "rbody").value === ctx.pairsText;
+  // read-only while the body differs from these rows, and while AI is at work (its answer rebuilds the table)
+  (ctx.pairRows || []).forEach(r => { r.ta.readOnly = !current || !!ctx.busy; });
+  btn.hidden = !n || !current;
+  btn.textContent = `按改过的中文改原文（${n} 段）`;
+  updateSend(ctx);
+}
+
+// The owner corrected the Chinese of some paragraphs: AI rewrites just those paragraphs in the email's language, the
+// rest stays word for word, and the whole text is back-translated again before it can be sent.
+async function applyZhEdits(ctx) {
+  const v = ctx.view, note = field(v, "pairsNote"), text = field(v, "rbody").value, edits = zhEdits(ctx);
+  if (!edits.length) return;
+  if (text !== ctx.pairsText) { note.className = "stale"; note.textContent = "正文改过了，先点“更新对照”，再改中文"; return; }
+  busy(ctx, true); note.className = "note";
+  note.textContent = `AI 正在按你改的中文改原文（${edits.length} 段，其他段不动），改完重新逐段回译…`;
+  try {
+    const r = await post("/api/reply/zhedit", { text, edits, language: field(v, "rlang").textContent });
+    if (st.current !== ctx) return;
+    if (field(v, "rbody").value !== text) { markStale(ctx); return; }  // edited by hand meanwhile: that wins
+    field(v, "rbody").value = r.body;
+    showPairs(ctx, r.pairs);
+    saveSoon(ctx);
+    if (r.pairs && r.pairs.ok) {
+      note.className = r.warnings && r.warnings.length ? "note err" : "note";
+      note.textContent = `改好了 ${edits.length} 段。上面的正文和这里的对照都换成了新的，核对一下`
+        + (r.warnings && r.warnings.length ? "。" + r.warnings.join("；") : "");
+    }
+  } catch (e) { note.className = "note err"; note.textContent = "按中文改原文失败：" + e.message; }
+  finally { busy(ctx, false); zhChanged(ctx); }
 }
 
 function markStale(ctx) {
@@ -1431,12 +1919,35 @@ function markStale(ctx) {
   if (ctx.pairs && field(ctx.view, "rbody").value !== ctx.pairs.text) {
     note.className = "stale"; note.textContent = "正文改过了，对照已过期。点“更新对照”重新核对后才能发送";
   } else if (ctx.pairs) { note.className = "note"; note.textContent = ""; }
+  zhChanged(ctx);
   updateSend(ctx);
 }
 
 function updateSend(ctx) {
   const btn = field(ctx.view, "sendBtn"), body = field(ctx.view, "rbody").value;
-  btn.disabled = !!(ctx.busy || ctx.sent || !ctx.pairs || ctx.pairs.text !== body || !body.trim());
+  // Chinese corrected but not applied yet: what would go out is still the old wording.
+  btn.disabled = !!(ctx.busy || ctx.sent || !ctx.pairs || ctx.pairs.text !== body || !body.trim() || zhEdits(ctx).length
+                    || (ctx.compose && !subjectChecked(ctx)));
+}
+
+// A new email's subject is checked like its body (the model may write it in a language the owner can't read).
+const oneLine = s => (s || "").replace(/[\r\n]+/g, " ").trim();
+function subjectChecked(ctx) { return !!ctx.subjectOk && ctx.subjectOk === oneLine(field(ctx.view, "rsubject").value); }
+function showSubjectZh(ctx) {
+  const n = field(ctx.view, "subjzh"), s = oneLine(field(ctx.view, "rsubject").value);
+  if (!n) return;
+  if (!s) { n.className = "note"; n.textContent = ""; }
+  else if (subjectChecked(ctx)) { n.className = "note"; n.textContent = "主题的中文：" + (ctx.subjectZh || s); }
+  else { n.className = "stale"; n.textContent = "主题还没核对中文，点“更新对照”核对后才能发送"; }
+  updateSend(ctx);
+}
+async function checkSubject(ctx) {
+  const s = oneLine(field(ctx.view, "rsubject").value);
+  if (!s) return;
+  const p = await post("/api/reply/pairs", { text: s });
+  if (st.current !== ctx || oneLine(field(ctx.view, "rsubject").value) !== s) return;
+  ctx.subjectOk = p.ok ? s : null; ctx.subjectZh = p.ok ? p.rows.map(r => r.zh).join("") : "";
+  showSubjectZh(ctx);
 }
 
 async function refreshPairs(ctx) {
@@ -1448,6 +1959,7 @@ async function refreshPairs(ctx) {
     if (st.current !== ctx) return;
     if (field(v, "rbody").value !== text) { markStale(ctx); return; }  // edited again while it ran
     showPairs(ctx, p);
+    if (ctx.compose && !subjectChecked(ctx)) await checkSubject(ctx);
   } catch (e) { note.className = "note err"; note.textContent = "回译失败：" + e.message; }
   finally { busy(ctx, false); }
 }
@@ -1458,10 +1970,12 @@ const SAVE_DELAY = 1200;
 
 function draftFields(ctx) {
   const v = ctx.view, shown = field(v, "draft").style.display === "block";
-  return { notes: field(v, "notes").value, feedback: field(v, "feedback").value,
-    to: shown ? field(v, "to2").value : "", subject: shown ? field(v, "rsubject").value : "",
+  const common = { notes: field(v, "notes").value, feedback: field(v, "feedback").value,
     body: shown ? field(v, "rbody").value : "", lang: field(v, "rlang").textContent,
     summary: field(v, "rstrategy").textContent, approval: field(v, "rapproval").textContent };
+  if (ctx.compose) return { ...common, to: field(v, "cto").value, cc: field(v, "ccc").value,
+                            subject: field(v, "rsubject").value, language: field(v, "clang").value };
+  return { ...common, to: shown ? field(v, "to2").value : "", subject: shown ? field(v, "rsubject").value : "" };
 }
 
 function saveSoon(ctx) {
@@ -1496,10 +2010,17 @@ async function restoreDraft(ctx, address) {
   if (st.current !== ctx || !d.saved_at || ctx.drafted || field(v, "notes").value || field(v, "feedback").value) return;
   field(v, "notes").value = d.notes || "";
   field(v, "feedback").value = d.feedback || "";
+  if (ctx.compose) {
+    if (!field(v, "cto").value) field(v, "cto").value = d.to || "";
+    if (!field(v, "ccc").value) field(v, "ccc").value = d.cc || "";
+    if (!field(v, "rsubject").value) field(v, "rsubject").value = d.subject || "";
+    if (d.language && [...field(v, "clang").options].some(o => o.value === d.language)) field(v, "clang").value = d.language;
+  }
   if (d.body) {
     field(v, "draft").style.display = "block";
-    field(v, "to2").value = d.to || ctx.kolAddress;
-    field(v, "rsubject").value = d.subject || "";
+    if (!ctx.compose) field(v, "to2").value = d.to || ctx.kolAddress;
+    if (!ctx.compose || !field(v, "rsubject").value) field(v, "rsubject").value = d.subject || "";
+    if (ctx.compose) { ctx.subjectOk = null; ctx.draftTo = oneLine(d.to).toLowerCase(); showSubjectZh(ctx); }
     field(v, "rlang").textContent = d.lang || "";
     field(v, "rbody").value = d.body;
     field(v, "rstrategy").textContent = d.summary || "";
@@ -1511,28 +2032,40 @@ async function restoreDraft(ctx, address) {
   const when = new Date(d.saved_at * 1000), note = field(v, "savedNote");
   note.textContent = `已恢复 ${when.toLocaleDateString()} ${when.toTimeString().slice(0, 5)} 自动保存的草稿`;
   if (d.uncertain) {
+    ctx.uncertain = true;  // the send dialog says it again
     note.className = "note err";
     note.textContent += "。上次发送结果不确定，可能已经发出，先到“已发送”里确认，确实没有再发";
   }
 }
 
 async function send(ctx) {
-  const v = ctx.view, to = field(v, "to2").value, subject = field(v, "rsubject").value, body = field(v, "rbody").value;
+  const v = ctx.view, subject = field(v, "rsubject").value, body = field(v, "rbody").value;
+  const to = ctx.compose ? field(v, "cto").value.trim() : field(v, "to2").value, cc = ctx.compose ? field(v, "ccc").value.trim() : "";
   if (!body.trim() || st.current !== ctx || !ctx.pairs || ctx.pairs.text !== body) return;
+  const refuse = text => { field(v, "sendNote").className = "note err"; field(v, "sendNote").textContent = text; };
+  if (zhEdits(ctx).length) return refuse("你改了中文对照，但还没点“按改过的中文改原文”，原文还是旧的。先点它，或者把中文改回去");
+  if (ctx.compose && !(to && subject.trim())) return refuse("收件人和主题都要填");
+  if (ctx.compose && !subjectChecked(ctx)) return refuse("主题改过了，先点“更新对照”核对主题的中文");
   const preview = body.length > 300 ? body.slice(0, 300) + "…" : body;
-  if ((ctx.outAtts || []).some(a => !a.id)) { field(v, "sendNote").textContent = "附件还在上传，等一下再发"; return; }
+  if ((ctx.outAtts || []).some(a => !a.id)) return refuse("附件还在上传，等一下再发");
   const atts = (ctx.outAtts || []).map(a => a.name);
   const attLine = atts.length ? `\n附件：${atts.join("、")}` : "";
-  if (!confirm(`确认发送？发出后无法撤回。\n\n收件人：${to}\n主题：${subject}${attLine}\n\n${preview}`)) return;
+  const ccLine = cc ? `\n抄送：${cc}` : "";
+  const warnings = [ctx.uncertain ? "⚠️ 这封信上次发送结果不确定，可能已经发出过一次，先到“已发送”里确认" : "",
+    ctx.compose && ctx.draftTo && ctx.draftTo !== to.toLowerCase() ? `⚠️ 正文是按收件人 ${ctx.draftTo} 起草的，收件人后来改过，称呼和内容可能不对` : ""]
+    .filter(Boolean).map(w => w + "\n").join("");
+  if (!confirm(`${warnings}确认发送？发出后无法撤回。\n\n收件人：${to}${ccLine}\n主题：${subject}${attLine}\n\n${preview}`)) return;
   const note = field(v, "sendNote");
   ctx.sent = true; updateSend(ctx);  // locked from here on: a second click must never send twice
   clearTimeout(ctx.saveTimer);
   ctx.sendingNow = true; renderOutAtts(ctx); field(v, "attachBtn").disabled = true;
   note.className = "note"; note.textContent = "发送中…";
   try {
-    const r = await post("/api/send", { mailbox: ctx.mailbox, email_id: ctx.email_id, to, subject, body, body_zh: ctx.pairs.zh,
-                                        attachments: (ctx.outAtts || []).map(a => a.id) });
-    note.textContent = `已发送给 ${r.to}` + (atts.length ? `，带 ${atts.length} 个附件` : "") +
+    const attachments = (ctx.outAtts || []).map(a => a.id);
+    const r = ctx.compose ? await post("/api/compose/send", { to, cc, subject, body, body_zh: ctx.pairs.zh, attachments })
+      : await post("/api/send", { mailbox: ctx.mailbox, email_id: ctx.email_id, to, subject, body, body_zh: ctx.pairs.zh, attachments });
+    note.textContent = `已发送给 ${[].concat(r.to).join("、")}` + (r.cc && r.cc.length ? `，抄送 ${r.cc.join("、")}` : "") +
+                       (atts.length ? `，带 ${atts.length} 个附件` : "") +
                        (r.warning ? `。${r.warning}。` : "，副本在“已发送”里。");
     if (r.warning) note.className = "note err";
     discardDraft(ctx);  // the server dropped it already; this catches a save that was still on its way
@@ -1540,8 +2073,11 @@ async function send(ctx) {
     ctx.outAtts = [];
   } catch (e) {
     note.className = "note err";
-    if (e.data && e.data.uncertain) {
-      // Possibly delivered: keep the button locked so the KOL never gets the same email twice by accident.
+    // Possibly delivered: the server said so, or its answer never came back (a lost connection, a restart: no
+    // status) or was an unexpected error (500). Keep the button locked so the KOL never gets the same email twice.
+    // A 4xx, or a 502 without "uncertain" (a mail error before the send, like a moved mail), went nowhere.
+    if ((e.data && e.data.uncertain) || !e.status || (e.status >= 500 && e.status !== 502)) {
+      ctx.uncertain = true;
       note.textContent = e.message + "。邮件可能已经发出，请先到“已发送”里确认，确实没有再重新起草发送。";
     } else {
       note.textContent = "发送失败：" + e.message; ctx.sent = false; updateSend(ctx);
@@ -1549,6 +2085,100 @@ async function send(ctx) {
   } finally {
     ctx.sendingNow = false; field(v, "attachBtn").disabled = false; renderOutAtts(ctx);
   }
+}
+
+// ---------------------------------------------------------------- a new email (写邮件)
+// Written like a reply: Chinese notes, an AI draft in the chosen language with the playbook and the history with the
+// first recipient, the verified side-by-side, revisions, attachments. One at a time, saved as it is typed.
+const COMPOSE_KEY = "(new mail)";
+const LANGS = [["auto", "自动（按对方以往来信，没有就用英语）"], ["English", "英语"], ["Spanish", "西班牙语"],
+  ["Portuguese", "葡萄牙语"], ["Russian", "俄语"], ["French", "法语"], ["German", "德语"], ["Italian", "意大利语"],
+  ["Turkish", "土耳其语"], ["Polish", "波兰语"], ["Arabic", "阿拉伯语"], ["Indonesian", "印尼语"], ["Vietnamese", "越南语"],
+  ["Thai", "泰语"], ["Japanese", "日语"], ["Korean", "韩语"]];
+
+function composeFields(ctx) {
+  const v = ctx.view;
+  return { to: field(v, "cto").value, cc: field(v, "ccc").value, subject: field(v, "rsubject").value, language: field(v, "clang").value };
+}
+
+function openCompose() {
+  const c = st.current;
+  // the one being written, or the one being sent right now (a new view would bring its saved draft back)
+  if (c && c.compose && (!c.sent || c.sendingNow) && $("#reader").contains(c.view)) { field(c.view, "cto").focus(); return; }
+  document.querySelectorAll(".row.on").forEach(r => r.classList.remove("on"));
+  if (c) { clearInterval(c.poll); (c.urls || []).forEach(u => URL.revokeObjectURL(u)); (c.outAtts || []).forEach(a => a.url && URL.revokeObjectURL(a.url)); }
+  const view = document.createElement("div");
+  view.append($("#composeTpl").content.cloneNode(true));
+  const ctx = { view, compose: true, cards: new Map(), urls: [], opened: { mailbox: "", id: "" }, account: st.account };
+  st.current = ctx;
+  $("#reader").textContent = ""; $("#reader").append(view);
+  const lang = field(view, "clang");
+  for (const [value, text] of LANGS) lang.add(new Option(text, value));
+  field(view, "draftBtn").onclick = () => draft(ctx, {});
+  field(view, "transBtn").onclick = () => draft(ctx, { mode: "translate" });
+  field(view, "reviseBtn").onclick = () => revise(ctx);
+  field(view, "pairsBtn").onclick = () => refreshPairs(ctx);
+  field(view, "zhApplyBtn").onclick = () => applyZhEdits(ctx);
+  field(view, "rbody").oninput = () => markStale(ctx);
+  field(view, "sendBtn").onclick = () => send(ctx);
+  for (const f of ["notes", "rsubject", "rbody", "feedback", "cto", "ccc"]) field(view, f).addEventListener("input", () => saveSoon(ctx));
+  lang.onchange = () => saveSoon(ctx);
+  field(view, "cto").addEventListener("change", () => { ctx.token = null; });  // another person: their history is read again
+  field(view, "rsubject").addEventListener("input", () => showSubjectZh(ctx));
+  setupAttachments(ctx);
+  restoreDraft(ctx, COMPOSE_KEY).catch(() => {});
+  field(view, "cto").focus();
+}
+$("#composeBtn").onclick = () => safe(openCompose)();
+
+// ---------------------------------------------------------------- the 反馈 button stays where it can be seen
+// It sits in the bottom right corner of the window. A browser window that reaches below the screen's free area (its
+// lower edge under the taskbar or the Dock, or off the screen) hides that corner: the button is lifted into sight.
+// If it is still not visible (hidden by a style the page did not set, covered by something an extension lays over
+// the page), the page tells the maintainer what it saw, once per load (POST /api/selfcheck, an automatic report).
+function placeFeedback() {
+  const b = $("#fbBtn");
+  if (!b) return;
+  let up = 0, left = 0;
+  try {
+    const s = window.screen, zoom = window.innerWidth ? window.outerWidth / window.innerWidth : 1;
+    // full screen (F11): taskbar and Dock are out of the way, the free area just doesn't say so
+    if (document.fullscreenElement || matchMedia("(display-mode: fullscreen)").matches
+        || (window.innerHeight >= s.height && window.innerWidth >= s.width)) throw new Error("full screen");
+    const z = zoom > 0.25 && zoom < 5 && Math.abs(zoom - 1) > 0.06 ? zoom : 1;  // page zoom: DIPs per CSS pixel
+    const freeBottom = (s.availTop || 0) + s.availHeight, freeRight = (s.availLeft || 0) + s.availWidth;
+    const slack = 10;  // a maximized window on Windows reaches 8 pixels past every edge, unseen
+    up = Math.max(0, window.screenY + window.outerHeight - freeBottom - slack) / z;
+    left = Math.max(0, window.screenX + window.outerWidth - freeRight - slack) / z;
+    up = Math.min(up, Math.max(0, window.innerHeight - 80)); left = Math.min(left, Math.max(0, window.innerWidth - 100));
+  } catch { /* no screen information: the corner it is */ }
+  b.style.bottom = Math.round(18 + up) + "px"; b.style.right = Math.round(18 + left) + "px";
+  if (!st.feedbackChecked && Date.now() - PAGE_STARTED > 15000 && !document.querySelector("dialog[open]")
+      && !document.body.classList.contains("login") && document.visibilityState === "visible") {
+    st.feedbackChecked = true;
+    checkFeedbackVisible(b, up, left);
+  }
+}
+const PAGE_STARTED = Date.now();
+window.addEventListener("resize", placeFeedback);
+
+function checkFeedbackVisible(b, up, left) {
+  const r = b.getBoundingClientRect(), cs = getComputedStyle(b);
+  const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+  const top = document.elementFromPoint(cx, cy);
+  const describe = el => el ? (el.tagName.toLowerCase() + (el.id ? "#" + el.id : "")
+    + (typeof el.className === "string" && el.className ? "." + el.className.trim().split(/\s+/).slice(0, 3).join(".") : "")).slice(0, 80) : "";
+  let kind = "";
+  if (cs.display === "none" || cs.visibility !== "visible" || Number(cs.opacity) < 0.3 || !r.width || !r.height) kind = "样式被改";
+  else if (cx < 0 || cy < 0 || cx > window.innerWidth || cy > window.innerHeight) kind = "在窗口外";
+  else if (top && top !== b && !b.contains(top)) kind = "被页面上的东西挡住";
+  if (!kind) return;
+  const s = window.screen;
+  post("/api/selfcheck", { kind, covered_by: describe(top), parent: top ? describe(top.parentElement) : "",
+    style: `${cs.display}/${cs.visibility}/${cs.opacity}/${cs.zIndex}`, rect: [r.left, r.top, r.width, r.height].map(Math.round),
+    viewport: [window.innerWidth, window.innerHeight], window: [window.screenX, window.screenY, window.outerWidth, window.outerHeight],
+    screen: [s.availLeft, s.availTop, s.availWidth, s.availHeight, s.width, s.height], lifted: [Math.round(up), Math.round(left)],
+    dpr: window.devicePixelRatio, ua: navigator.userAgent.slice(0, 160) }).catch(() => {});
 }
 
 $("#refresh").onclick = safe(() => st.search ? runSearch(st.search.q) : loadList());

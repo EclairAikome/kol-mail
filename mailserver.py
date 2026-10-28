@@ -11,11 +11,17 @@ The mail is then multipart/mixed( multipart/related( multipart/alternative(text,
 the layout mail programs expect for a signature with pictures. Everything else (plain mails, forwards, the copy in
 Sent, which is built by the same function) stays exactly as mcp-email-server makes it.
 
+It also adds two tools mcp-email-server lacks, for the folder menu (app.py): kolmail_rename_mailbox (also moves a
+folder under another one) and kolmail_delete_mailbox, which deletes an EMPTY folder without subfolders only (KOL Mail
+moves the mails to Deleted Items first, so nothing is lost on the way). Both need the "organize" permission, like
+create_mailbox, and go through the server's own account and permission checks.
+
 Only for the pinned mcp-email-server version (requirements.txt): with another one the patch is left out, KOL Mail
 sees that in its startup check (supported()) and sends plain text as before."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import re
@@ -126,7 +132,150 @@ def patch() -> bool:
     create.kolmail = True
     classic.EmailClient._create_message_with_attachments = create
     classic.MIMEText = text_part  # compose_message builds a mail without attachments from it directly
+    try:
+        add_folder_tools()
+    except Exception as e:  # noqa: BLE001  sending and reading must work without them (the folder menu then fails)
+        print(f"kol-mail: folder tools not added: {e!r}", file=sys.stderr)
     return True
+
+
+# ---------------------------------------------------------------- renaming and deleting folders
+
+FOLDER_TIMEOUT = 120  # seconds for one rename or delete, login included
+# The count in the attribute list that ends a STATUS line: * STATUS "name" (MESSAGES 3). Never inside the name,
+# which a folder called "x (MESSAGES 0)" would otherwise answer for.
+STATUS_ITEMS = re.compile(rb"\(([^()]*)\)\s*$")
+MESSAGES = re.compile(rb"\bMESSAGES\s+(\d+)", re.IGNORECASE)
+
+
+async def _folders(classic, imap) -> list:
+    response = await imap.list('""', '"*"')
+    classic._raise_for_imap_error(response, "LIST mailboxes")
+    return classic._parse_list_responses(response[1])
+
+
+def _selectable(info) -> bool:
+    return not any(f.casefold() in ("\\noselect", "\\nonexistent") for f in info.flags)
+
+
+def _same(a: str, b: str) -> bool:
+    return a == b or a.casefold() == "inbox" == b.casefold()
+
+
+async def rename_mailbox(classic, client, old: str, new: str) -> str:
+    """renamed, missing (no such folder), exists (the new name is taken) or unknown (the answer was lost)."""
+    imap = await client._connect_imap()
+    try:
+        await classic._imap_login(imap, client.email_server.user_name, client.email_server.password.get_secret_value())
+        await classic._send_imap_id(imap)
+        folders = await _folders(classic, imap)
+        if not any(_same(f.name, old) and _selectable(f) for f in folders):
+            return "missing"
+        if any(_same(f.name, new) for f in folders):
+            return "exists"
+        client._check_mutation_authority()
+        try:
+            response = await imap.rename(classic._quote_mailbox(old), classic._quote_mailbox(new))
+        except Exception:  # noqa: BLE001  the RENAME may have reached the server: never replayed
+            return "unknown"
+        status = classic._imap_effect_status(response)
+        if status == "failed":
+            raise RuntimeError(f"RENAME mailbox failed ({classic._imap_status(response)})")
+        return "renamed" if status == "succeeded" else "unknown"
+    finally:
+        await classic._best_effort_imap_logout(imap)
+
+
+async def delete_mailbox(classic, client, name: str) -> str:
+    """deleted, missing, has_children (a subfolder is in it), not_empty (mails are in it) or unknown."""
+    imap = await client._connect_imap()
+    try:
+        await classic._imap_login(imap, client.email_server.user_name, client.email_server.password.get_secret_value())
+        await classic._send_imap_id(imap)
+        folders = await _folders(classic, imap)
+        mine = next((f for f in folders if _same(f.name, name) and _selectable(f)), None)
+        if mine is None:
+            return "missing"
+        if mine.delimiter and any(f.name.startswith(name + mine.delimiter) for f in folders):
+            return "has_children"
+        response = await imap.status(classic._quote_mailbox(name), "(MESSAGES)")
+        classic._raise_for_imap_error(response, "STATUS mailbox")
+        counts = [int(m.group(1)) for line in response[1] if isinstance(line, (bytes, bytearray))
+                  for items in [STATUS_ITEMS.search(bytes(line))] if items
+                  for m in [MESSAGES.search(items.group(1))] if m]
+        if not counts:
+            raise RuntimeError("STATUS mailbox gave no message count")
+        if counts[0]:
+            return "not_empty"
+        client._check_mutation_authority()
+        try:
+            response = await imap.delete(classic._quote_mailbox(name))
+        except Exception:  # noqa: BLE001
+            return "unknown"
+        status = classic._imap_effect_status(response)
+        if status == "failed":
+            raise RuntimeError(f"DELETE mailbox failed ({classic._imap_status(response)})")
+        return "deleted" if status == "succeeded" else "unknown"
+    finally:
+        await classic._best_effort_imap_logout(imap)
+
+
+FOLDER_TOOLS: list = []  # registered once per process, however often patch() runs
+
+
+def add_folder_tools():
+    """Registers kolmail_rename_mailbox and kolmail_delete_mailbox on the server about to start."""
+    if FOLDER_TOOLS:
+        return
+    from mcp_email_server import app as server
+    from mcp_email_server.application.mutation_policy import require_mutation
+    from mcp_email_server.application.mutations import CreateMailboxCommand
+    from mcp_email_server.emails import classic
+    from mcp_email_server.runtime import get_application_runtime
+
+    def opened(account_name: str):
+        """The account's IMAP client with the organize permission checked, as create_mailbox does it."""
+        service = get_application_runtime().mutations.create_mailbox
+        account = service._resolve(account_name)
+        require_mutation(account.allowed_mutations, "organize")
+        access = service._open(account)
+        provider = access.provider
+        handler = getattr(provider, "_handler", None)
+        if handler is None or not hasattr(provider, "_guard"):
+            raise RuntimeError("this account type cannot rename or delete folders")
+        provider._guard(access.account, "organize")
+        return service, access.account, handler.incoming_client
+
+    @server.mcp.tool(
+        description="KOL Mail: rename one mailbox/folder, or move it under another one by giving the full new name "
+                    "with the server's hierarchy delimiter. Its subfolders and mails go along. Status: renamed, "
+                    "missing, exists or unknown (never retried automatically).",
+        annotations=server._IDEMPOTENT_REMOTE_MUTATION,
+    )
+    async def kolmail_rename_mailbox(account_name: str, mailbox: str, new_name: str) -> dict:
+        CreateMailboxCommand(account_name, new_name).validate()
+        if "inbox" in (mailbox.casefold(), new_name.casefold()):
+            raise ValueError("INBOX cannot be renamed here")
+        service, account, client = opened(account_name)
+        status = await asyncio.wait_for(rename_mailbox(classic, client, mailbox, new_name), FOLDER_TIMEOUT)
+        await service._invalidate(account, (mailbox, new_name))
+        return {"mailbox": mailbox, "new_name": new_name, "status": status}
+
+    @server.mcp.tool(
+        description="KOL Mail: delete one EMPTY mailbox/folder that has no subfolders. Status: deleted, missing, "
+                    "has_children, not_empty or unknown (never retried automatically).",
+        annotations=server._DESTRUCTIVE_REMOTE_MUTATION,
+    )
+    async def kolmail_delete_mailbox(account_name: str, mailbox: str) -> dict:
+        CreateMailboxCommand(account_name, mailbox).validate()
+        if mailbox.casefold() == "inbox":
+            raise ValueError("INBOX cannot be deleted")
+        service, account, client = opened(account_name)
+        status = await asyncio.wait_for(delete_mailbox(classic, client, mailbox), FOLDER_TIMEOUT)
+        await service._invalidate(account, (mailbox,))
+        return {"mailbox": mailbox, "status": status}
+
+    FOLDER_TOOLS.extend([kolmail_rename_mailbox, kolmail_delete_mailbox])
 
 
 def text_part(body, subtype="plain", charset=None, *, policy=None):

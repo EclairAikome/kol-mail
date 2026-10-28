@@ -169,7 +169,9 @@ def environment() -> str:
     return " · ".join(facts)
 
 
-def message(where: str, error: str, detail: str = "", hint: str | None = None) -> str:
+def message(where: str, error: str, detail: str = "", hint: str | None = None, *, with_log: bool = True) -> str:
+    """with_log=False leaves the last log lines out (KOL addresses and subjects): for a report that is about the
+    page, not an error the log could explain."""
     error, detail = mask(error), mask(detail)  # before anything is cut short: half a token is not recognised
     last = "\n".join(detail.strip().splitlines()[-3:])
     hint = diagnose(f"{error}\n{last}", where) if hint is None else hint
@@ -177,7 +179,7 @@ def message(where: str, error: str, detail: str = "", hint: str | None = None) -
              f"可能原因：{hint or '没认出来，看下面的详情和日志'}", f"环境：{environment()}"]
     if detail.strip():
         parts.append("详情：\n" + detail.strip()[-1500:])
-    if _recent_log:
+    if _recent_log and with_log:
         parts.append("最近日志：\n" + "\n".join(_recent_log))
     tail = f"\n\n(版本 {_cfg['version']})"
     text = "\n".join(parts)
@@ -264,7 +266,8 @@ def _run_worker():
             _queue.task_done()
 
 
-def report(where: str, error: str, detail: str = "", exc: BaseException | None = None, *, wait: bool = False) -> bool:
+def report(where: str, error: str, detail: str = "", exc: BaseException | None = None, *, wait: bool = False,
+           with_log: bool = True) -> bool:
     """Send one report in the background (wait=True: send now, for a process about to exit). False when it was not
     sent: reporting off, already sent recently, the hourly limit reached, or (wait=True) the robot did not take it.
     Never raises."""
@@ -277,7 +280,7 @@ def report(where: str, error: str, detail: str = "", exc: BaseException | None =
         sig, now = signature(where, error), time.time()
         if not _claim(sig, now):
             return False
-        text = message(where, error, detail)
+        text = message(where, error, detail, with_log=with_log)
         if wait:
             delivered = post(text)
             _settle(sig, now, delivered)
