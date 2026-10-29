@@ -68,7 +68,8 @@ On peut signer cette semaine ?</span></div></div><div id="message-accessories-15
 <section class="panels_c48ade" aria-label="用户状态和设置"><div class="container__37e49"><div class="accountPopoutButtonWrapper__37e49"><div class="wrapper__44b0c avatar__37e49"><svg class="mask__44b0c"><foreignObject><div class="avatarStack__44b0c"><img class="avatar__44b0c" src="https://cdn.discordapp.com/avatars/100000000000000001/dddd.webp?size=28" alt=""></div></foreignObject></svg></div><div class="nameTag__37e49"><div class="panelTitleContainer__37e49">Mira </div><div>mira0001</div><div>在线</div></div></div></div></section>
 
 <script>
-  // A stand-in for Discord's Slate paste handling: read text/plain, rebuild the lines.
+  // A stand-in for Discord's Slate editor. Like the real one (measured 2026-10-29), a paste before Slate has a
+  // selection of its own loses its first line; typing (execCommand insertText) gives it one.
   (function () {
     const ed = document.getElementById("editor");
     const leaf = (t) => {
@@ -85,15 +86,28 @@ On peut signer cette semaine ?</span></div></div><div id="message-accessories-15
       return line;
     };
     const current = () => window.KolMailDiscord.Core.editorTextOf(ed);
-    window.setEditorEmpty = () => { ed.textContent = ""; ed.appendChild(leaf("")); };
+    let slateSelection = false;
+    window.setEditorEmpty = () => { ed.textContent = ""; ed.appendChild(leaf("")); slateSelection = false; };
+    // execCommand("insertText") edits the DOM itself and then fires input (no beforeinput in Chrome)
+    ed.addEventListener("input", (e) => {
+      if (e.inputType !== "insertText") return;
+      const text = current();
+      ed.textContent = "";
+      for (const l of text.split("\n")) ed.appendChild(leaf(l));
+      const r = document.createRange(); r.selectNodeContents(ed); r.collapse(false);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      slateSelection = true;
+    });
     ed.addEventListener("paste", (e) => {
       e.preventDefault();
-      const text = e.clipboardData.getData("text/plain");
+      let text = e.clipboardData.getData("text/plain");
+      if (!slateSelection) text = text.split("\n").slice(1).join("\n");  // what the real editor does
       const sel = window.getSelection();
       const replaceAll = sel && !sel.isCollapsed && ed.contains(sel.anchorNode);
       const base = replaceAll ? "" : current();
       ed.textContent = "";
       for (const l of (base + text).split("\n")) ed.appendChild(leaf(l));
+      slateSelection = true;
     });
   })();
 </script>
@@ -145,27 +159,25 @@ On peut signer cette semaine ?</span></div></div><div id="message-accessories-15
     const exec = document.execCommand.bind(document);
     document.execCommand = (cmd, ...a) => { if (cmd === "insertText") inserts++; return exec(cmd, ...a); };
 
-    // fill through the synthetic paste, multi-line
-    eq("paste fill", await insertIntoEditor(editor, "Line one\nLine two", false), true);
-    eq("paste fill text", Dom.readEditorText(editor), "Line one\nLine two");
+    // the first line typed in, the others pasted after it: all of them land (a bare paste would lose line one)
+    eq("one-line fill", await insertIntoEditor(editor, "Bonjour 🙂 80$", false), true);
+    eq("one-line fill text", Dom.readEditorText(editor), "Bonjour 🙂 80$");
+    setEditorEmpty();
+    eq("multi-line fill", await insertIntoEditor(editor, "Line one\nLine two\nLine three", false), true);
+    eq("multi-line fill text", Dom.readEditorText(editor), "Line one\nLine two\nLine three");
     // manual 填入 over existing text replaces it
     eq("replace fill", await insertIntoEditor(editor, "Replaced text", true), true);
     eq("replace fill text", Dom.readEditorText(editor), "Replaced text");
-    eq("no insertText while the paste works", inserts, 0);
-    // no paste handler: execCommand("insertText") fallback for one line
+    eq("insertText once per fill, never with a line break", inserts, 3);
+    // an editor that takes the typed line but not the paste: whatever went in is taken out, the 复制 button follows
     const plain = document.getElementById("plain");
-    eq("execCommand fallback", await insertIntoEditor(plain, "Fallback ok", false), true);
-    eq("insertText used once", inserts, 1);
-    // ...but never for several lines (insertText can act like Enter): the 复制 button instead
-    plain.textContent = "";
-    eq("multi-line falls to copy", await insertIntoEditor(plain, "Line A\nLine B", false), false);
-    eq("multi-line: no insertText", inserts, 1);
-    eq("multi-line: input untouched", plain.textContent, "");
-    // a paste that changed the input into something else is not piled on
+    eq("half a fill is not kept", await insertIntoEditor(plain, "Line A\nLine B", false), false);
+    eq("half a fill: input empty again", plain.textContent.trim(), "");
+    // a paste that turns the text into something else is not left in the input either
     const mangler = document.getElementById("mangler");
     mangler.addEventListener("paste", (e) => { e.preventDefault(); mangler.textContent = e.clipboardData.getData("text/plain").toUpperCase(); });
-    eq("changed by the paste: no fallback", await insertIntoEditor(mangler, "abc", false), false);
-    eq("changed by the paste: no insertText", [inserts, mangler.textContent], [1, "ABC"]);
+    eq("mangled fill refused", await insertIntoEditor(mangler, "abc\ndef", false), false);
+    eq("mangled fill: input empty again", mangler.textContent.trim(), "");
     // the page moved to another conversation: nothing is pasted
     setEditorEmpty();
     let moved = null;

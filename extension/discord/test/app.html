@@ -49,6 +49,13 @@
   };
   const setEditor = (text) => { ed.textContent = ""; for (const t of text.split("\n")) ed.appendChild(line(t)); };
   const editorText = () => Array.from(ed.children).map((l) => l.textContent.split(ZWNBSP).join("")).join("\n").trim();
+  // execCommand("insertText") edits the DOM itself and then fires input: tidy it back into Slate's lines
+  ed.addEventListener("input", (e) => {
+    if (e.inputType !== "insertText") return;
+    setEditor(editorText());
+    const r = document.createRange(); r.selectNodeContents(ed); r.collapse(false);
+    const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+  });
   ed.addEventListener("paste", (e) => {
     e.preventDefault();
     const text = e.clipboardData.getData("text/plain");

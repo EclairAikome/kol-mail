@@ -536,32 +536,38 @@
 
   /**
    * Put text into the editor and check it is there. Replaces existing content only when asked.
-   * Synthetic paste first; execCommand("insertText") only for one-line text the paste did not touch at all
-   * (for several lines insertText can act like Enter). Never keystroke by keystroke, never Enter.
-   * guard() is asked before every step that changes the input; false throws MOVED.
+   * Measured on the real Discord editor (2026-10-29): a synthetic paste into an editor whose Slate selection is
+   * still unset loses its first line (a one-line paste loses everything), while execCommand("insertText") of one
+   * line lands whole and sets the selection. So the first line goes in with insertText (never with a line break
+   * in it: that could act like Enter), and the other lines follow as a paste starting with a line break.
+   * Whatever does not come out exactly as the text is taken out again, so a half-filled draft can never be sent.
+   * Never keystroke by keystroke, never Enter. guard() is asked before every step that changes the input; false
+   * throws MOVED.
    */
   async function insertIntoEditor(editor, text, replace, guard) {
     const check = () => { if (!editor.isConnected || (guard && !guard())) throw MOVED; };
     const want = normForMatch(text);
+    const lines = String(text).replace(/\r\n?/g, "\n").split("\n");
     check();
-    // Slate copies the DOM selection into its own state on selectionchange, throttled: without a
-    // selection it drops the paste. So set one, give it a moment, then paste.
     if (replace) selectAllIn(editor); else caretToEnd(editor);
     await sleep(120);
     check();
     const before = editorTextOf(editor);
-    pasteText(editor, text);
+    try { document.execCommand("insertText", false, lines[0]); } catch (e) { /* checked below */ }
     await sleep(150);
-    const after = editorTextOf(editor);
-    if (normForMatch(after) === want) return true;
-    if (/\n/.test(text) || after !== before) return false; // leave it to the 复制 button
-    check();
-    selectAllIn(editor);
-    await sleep(120);
-    check();
-    try { document.execCommand("insertText", false, text); } catch (e) { /* checked below */ }
-    await sleep(150);
-    return normForMatch(editorTextOf(editor)) === want;
+    if (lines.length > 1) {
+      check();
+      pasteText(editor, "\n" + lines.slice(1).join("\n"));
+      await sleep(300);
+    }
+    if (normForMatch(editorTextOf(editor)) === want) return true;
+    if (editorTextOf(editor) !== before) {  // something half went in: take it out again
+      selectAllIn(editor);
+      await sleep(60);
+      try { document.execCommand("delete"); } catch (e) { /* the 复制 button still says what happened */ }
+      await sleep(150);
+    }
+    return false;
   }
 
   // ---- environments without the extension: node tests and the fixture page
