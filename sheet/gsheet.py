@@ -448,8 +448,10 @@ def create(api: Api, title: str) -> str:
 
 
 def check(api: Api, sid: str) -> list[str]:
-    """Problems with an existing sheet: missing tabs or columns."""
+    """Problems with an existing sheet: missing tabs or columns. Columns added later (聊天账号) are optional: a sheet
+    made before them still works."""
     kol, tabs, _, _ = layout()
+    optional = set(kol.OPTIONAL_HEADERS)
     meta = api.meta(sid)
     titles = {(s.get("properties") or {}).get("title") for s in meta.get("sheets") or []}
     problems = [f"缺少“{t}”页" for t, _ in tabs if t not in titles]
@@ -458,7 +460,7 @@ def check(api: Api, sid: str) -> list[str]:
     for tab, headers in tabs:
         if tab in titles:
             have = [str(h) for h in (grid.get(tab) or [[]])[0]] if grid.get(tab) else []
-            missing = [h for h in headers if h not in have]
+            missing = [h for h in headers if h not in have and h not in optional]
             if missing:
                 problems.append(f"“{tab}”页缺少列：{', '.join(missing)}")
     return problems

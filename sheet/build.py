@@ -42,7 +42,7 @@ MAX_ROW = 5000  # conditional formats reach this far so new rows are covered
 MAIN_WIDTHS = {"ID": 8, "KOL": 22, "项目": 9, "语言": 6, "阶段": 9, "意向": 10, "待办方": 8, "下一步": 40,
                "对方报价": 30, "方案/条件": 34, "频道数据": 30, "进展摘要": 44,
                "备注": 24, "平台": 9, "频道": 8, "邮箱": 30, "首次发信": 11, "更新时间": 16, "更新来源": 16,
-               "频道链接": 40}
+               "频道链接": 40, "聊天账号": 32}
 CENTER_COLS = {"ID", "项目", "语言", "阶段", "意向", "待办方", "平台", "频道", "首次发信"}
 LOG_WIDTHS = {"时间": 16, "ID": 8, "KOL": 22, "方向": 6, "类型": 9, "摘要": 76, "渠道": 7, "邮箱": 28, "来源": 18,
               "键": 30}
@@ -101,8 +101,8 @@ def build_main(ws, kols):
                   "对方报价": k["quote"], "方案/条件": k["terms"], "频道数据": k["stats"],
                   "进展摘要": k["summary"], "备注": k["note"], "平台": k["platform"], "频道": None,
                   "邮箱": k["email"], "首次发信": k["first"], "更新时间": k["updated"], "更新来源": k["source"],
-                  "频道链接": k["channel"]}
-        rows.append([values[h] or None for h in headers])
+                  "频道链接": k["channel"], "聊天账号": k.get("chat", "")}
+        rows.append([values.get(h) or None for h in headers])
     colors = {"备注": NOTE_BG, "更新时间": SYSTEM_BG, "更新来源": SYSTEM_BG, "频道链接": SYSTEM_BG}
     last = setup_table_sheet(ws, headers, MAIN_WIDTHS, rows, kol.MAIN_TABLE, colors, CENTER_COLS)
     col = {h: get_column_letter(i) for i, h in enumerate(headers, 1)}
@@ -114,6 +114,7 @@ def build_main(ws, kols):
             ws[f"{col[h]}{r}"].font = font(9, False, FAINT)
         ws[f"{col['频道']}{r}"].font = font(10, False, "2563EB", underline="single")
         ws[f"{col['邮箱']}{r}"].font = font(10, False, MUTED)
+        ws[f"{col['聊天账号']}{r}"].font = font(10, False, MUTED)
     ws.freeze_panes = "C2"
 
     # stage pills

@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN" class="theme-dark">
+<head>
+  <meta charset="utf-8">
+  <title>KOL Mail Discord fixture</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; margin: 16px; }
+    #result.pass { color: #1f8a4c; } #result.fail { color: #c62f33; }
+    pre { background: #f2f3f5; padding: 8px; white-space: pre-wrap; }
+    [contenteditable] { border: 1px solid #999; min-height: 24px; padding: 4px; }
+  </style>
+</head>
+<body>
+<!--
+  Reproduces the Discord DOM the content script reads (probed on the owner's account, zh-CN UI, 2026-10-29).
+  Open it over http (e.g. python -m http.server in extension/discord, then /test/fixture.html).
+  content.js sees no extension context here, so it only exposes window.KolMailDiscord.
+  Markup inside message content has no indentation on purpose: Discord's DOM has no whitespace nodes.
+-->
+<h2 id="result">running…</h2>
+<pre id="out"></pre>
+
+<nav>
+  <a href="/channels/@me/300000000000000003" aria-label="PixelFox_ （私信）"><img src="https://cdn.discordapp.com/avatars/200000000000000002/aaaa.webp?size=32" alt=""><span>PixelFox_</span></a>
+  <a href="/channels/@me/3000000000000000030" aria-label="Other （私信）"><img src="https://cdn.discordapp.com/avatars/999999999999999999/bbbb.webp?size=32" alt=""></a>
+</nav>
+
+<section class="title_abc"><div class="titleWrapper__9293f"><h1 class="defaultColor__4bd52"><div>PixelFox_</div><div>pixelfox_</div></h1></div></section>
+
+<main class="chatContent_abc">
+<ol class="scrollerInner__36d07" data-list-id="chat-messages">
+
+<!-- 1. continuation whose leader (1565240000000000000) is scrolled out: must be dropped -->
+<li id="chat-messages-300000000000000003-1565240000000000001" class="messageListItem__5126c"><div role="article" class="message__5126c cozyMessage__5126c" aria-labelledby="message-username-1565240000000000000 uid_1 message-content-1565240000000000001 uid_2 message-timestamp-1565240000000000001"><div class="contents_c19a55"><span class="timestamp_c19a55"><time id="message-timestamp-1565240000000000001" datetime="2026-10-26T10:00:00.000Z">10:00</time></span><div id="message-content-1565240000000000001" class="markup__75297 messageContent_c19a55">orphan row</div></div><div id="message-accessories-1565240000000000001"></div></div></li>
+
+<!-- 2. PixelFox_ group leader, with server tag and hidden a11y text -->
+<li id="chat-messages-300000000000000003-1565240000000000100" class="messageListItem__5126c"><div role="article" class="message__5126c cozyMessage__5126c groupStart__5126c" aria-labelledby="message-username-1565240000000000100 uid_1 message-content-1565240000000000100 uid_2 message-timestamp-1565240000000000100"><div class="contents_c19a55"><img src="https://cdn.discordapp.com/avatar-decoration-presets/x.png" class="avatarDecoration_c19a55" alt=""><img src="https://cdn.discordapp.com/avatars/200000000000000002/cccc.webp?size=80" class="avatar_c19a55 clickable_c19a55" alt=""><h3 class="header_c19a55"><span id="message-username-1565240000000000100" class="headerText_c19a55"><span class="username_c19a55 clickable_c19a55">PixelFox_</span><span> [PXL], 服务器标签：PXLPXL</span></span><span class="timestamp_c19a55"><time id="message-timestamp-1565240000000000100" datetime="2026-10-28T03:20:00.000Z">11:20</time></span></h3><div id="message-content-1565240000000000100" class="markup__75297 messageContent_c19a55"><span>Salut Mira</span></div></div><div id="message-accessories-1565240000000000100"></div></div></li>
+
+<!-- 3. continuation of PixelFox_: emoji, immersive-translate injection, edited marker -->
+<li id="chat-messages-300000000000000003-1565240000000000101" class="messageListItem__5126c"><div role="article" class="message__5126c cozyMessage__5126c" aria-labelledby="message-username-1565240000000000100 uid_1 message-content-1565240000000000101 uid_2 message-timestamp-1565240000000000101"><div class="contents_c19a55"><span class="timestamp_c19a55"><time id="message-timestamp-1565240000000000101" datetime="2026-10-28T03:21:00.000Z">11:21</time></span><div id="message-content-1565240000000000101" class="markup__75297 messageContent_c19a55"><span>Mon tarif est 300 € </span><img class="emoji" alt="😉" src="https://discord.com/assets/x.svg"><font class="notranslate immersive-translate-target-wrapper"><br><font class="notranslate immersive-translate-target-translation-block-wrapper"><font class="notranslate immersive-translate-target-inner">我的报价是 300 欧元</font></font></font> <span class="timestamp_c19a55"><span><time datetime="2026-10-28T03:25:37.255Z"><span class="edited_c19a55">(已编辑)</span></time></span><span class="hiddenVisually_b18fe2">2026年10月28日星期二 11:25</span></span></div></div><div id="message-accessories-1565240000000000101"><div class="reactions__23977"><div class="reaction__23977"><img class="emoji" src="https://discord.com/assets/43b7ead1fb91b731.svg" alt="✅"></div></div></div></div></li>
+
+<!-- 4. Mira (the owner) group leader, two lines -->
+<li id="chat-messages-300000000000000003-1565240000000000200" class="messageListItem__5126c"><div role="article" class="message__5126c cozyMessage__5126c groupStart__5126c" aria-labelledby="message-username-1565240000000000200 uid_1 message-content-1565240000000000200 uid_2 message-timestamp-1565240000000000200"><div class="contents_c19a55"><img src="https://cdn.discordapp.com/avatars/100000000000000001/dddd.webp?size=80" class="avatar_c19a55 clickable_c19a55" alt=""><h3 class="header_c19a55"><span id="message-username-1565240000000000200" class="headerText_c19a55"><span class="username_c19a55 clickable_c19a55">Mira</span><span> [mi], 服务器标签：mimi</span></span><span class="timestamp_c19a55"><time id="message-timestamp-1565240000000000200" datetime="2026-10-28T03:30:00.000Z">11:30</time></span></h3><div id="message-content-1565240000000000200" class="markup__75297 messageContent_c19a55"><span>Bonjour Fox !
+On peut signer cette semaine ?</span></div></div><div id="message-accessories-1565240000000000200"></div></div></li>
+
+<!-- 5. continuation of Mira with an image attachment (and the base64 placeholder Discord shows) -->
+<li id="chat-messages-300000000000000003-1565240000000000201" class="messageListItem__5126c"><div role="article" class="message__5126c cozyMessage__5126c" aria-labelledby="message-username-1565240000000000200 uid_1 message-content-1565240000000000201 uid_2 message-timestamp-1565240000000000201"><div class="contents_c19a55"><span class="timestamp_c19a55"><time id="message-timestamp-1565240000000000201" datetime="2026-10-28T03:31:00.000Z">11:31</time></span><div id="message-content-1565240000000000201" class="markup__75297 messageContent_c19a55"></div></div><div id="message-accessories-1565240000000000201" class="container_b7e1cb"><div class="imageWrapper"><a class="originalLink_af017a" href="https://cdn.discordapp.com/attachments/300000000000000003/1565240000000000999/brief.png?ex=1&amp;is=2&amp;hm=3"></a><div class="clickableWrapper_af017a"><img class="imagePlaceholder_af017a" src="data:image/png;base64,iVBORw0KGgo=" alt=""></div></div></div></div></li>
+
+<!-- 6. PixelFox_ replies to Mira: labelledby names the reply context, the row has its own header -->
+<li id="chat-messages-300000000000000003-1565240000000000300" class="messageListItem__5126c"><div role="article" class="message__5126c cozyMessage__5126c groupStart__5126c" aria-labelledby="message-reply-context-1565240000000000300 uid_1 message-content-1565240000000000300 uid_2 message-timestamp-1565240000000000300"><div id="message-reply-context-1565240000000000300" class="repliedMessage_c19a55"><div class="repliedMessageClickableSpine_c19a55"></div><img src="https://cdn.discordapp.com/avatars/100000000000000001/dddd.webp?size=16" class="replyAvatar_c19a55 clickable_c19a55" alt=""><span class="username_c19a55 clickable_c19a55">@Mira</span><span></span><div class="repliedTextPreview_c19a55"><div id="message-content-1565240000000000200" class="repliedTextContent_c19a55 markup__75297 messageContent_c19a55"><span>Bonjour Fox ! On peut signer cette semaine ?</span></div></div></div><div class="contents_c19a55"><img src="https://cdn.discordapp.com/avatars/200000000000000002/cccc.webp?size=80" class="avatar_c19a55 clickable_c19a55" alt=""><h3 class="header_c19a55"><span id="message-username-1565240000000000300" class="headerText_c19a55"><span class="username_c19a55 clickable_c19a55">PixelFox_</span></span><span class="timestamp_c19a55"><time id="message-timestamp-1565240000000000300" datetime="2026-10-28T03:40:00.000Z">11:40</time></span></h3><div id="message-content-1565240000000000300" class="markup__75297 messageContent_c19a55"><span>Oui, jeudi ça marche</span></div></div><div id="message-accessories-1565240000000000300"></div></div></li>
+
+<!-- 7. a default-avatar author (no id in the URL), then a message still being sent -->
+<li id="chat-messages-300000000000000003-1565240000000000400" class="messageListItem__5126c"><div role="article" class="message__5126c cozyMessage__5126c groupStart__5126c" aria-labelledby="message-username-1565240000000000400 uid_1 message-content-1565240000000000400 uid_2 message-timestamp-1565240000000000400"><div class="contents_c19a55"><img src="https://cdn.discordapp.com/embed/avatars/2.png" class="avatar_c19a55 clickable_c19a55" alt=""><h3 class="header_c19a55"><span id="message-username-1565240000000000400" class="headerText_c19a55"><span class="username_c19a55 clickable_c19a55">Mira</span></span><span class="timestamp_c19a55"><time id="message-timestamp-1565240000000000400" datetime="2026-10-28T03:50:00.000Z">11:50</time></span></h3><div id="message-content-1565240000000000400" class="markup__75297 messageContent_c19a55"><span>Parfait, merci</span></div></div><div id="message-accessories-1565240000000000400"></div></div></li>
+<li id="chat-messages-300000000000000003-1565240000000000401" class="messageListItem__5126c"><div role="article" class="message__5126c cozyMessage__5126c" aria-labelledby="message-username-1565240000000000400 uid_1 message-content-1565240000000000401 uid_2 message-timestamp-1565240000000000401"><div class="contents_c19a55"><div id="message-content-1565240000000000401" class="markup__75297 messageContent_c19a55 isSending_c19a55"><span>still sending</span></div></div></div></li>
+
+<!-- a row of another channel left over from the previous DM: ignored -->
+<li id="chat-messages-3000000000000000030-1565240000000000500" class="messageListItem__5126c"><div role="article" aria-labelledby="message-username-1565240000000000500"><span id="message-username-1565240000000000500"><span class="username_c19a55">Other</span></span><div id="message-content-1565240000000000500">other channel</div></div></li>
+</ol>
+
+<form class="form_f75fb0 formWithLoadedChatInput_f75f"><div class="placeholder__1b31f slateTextArea_ec4baf">消息@PixelFox_</div><div id="editor" role="textbox" aria-label="消息@PixelFox_" data-slate-editor="true" data-slate-node="value" contenteditable="true"><div data-slate-node="element"><span data-slate-node="text"><span data-slate-leaf="true"><span data-slate-zero-width="n" data-slate-length="0">&#xFEFF;<br></span></span></span></div></div></form>
+</main>
+
+<p>execCommand fallback target (no paste handler):</p>
+<div id="plain" contenteditable="true"></div>
+<p>an editor whose paste does something unexpected (upper-cases):</p>
+<div id="mangler" contenteditable="true"></div>
+
+<section class="panels_c48ade" aria-label="用户状态和设置"><div class="container__37e49"><div class="accountPopoutButtonWrapper__37e49"><div class="wrapper__44b0c avatar__37e49"><svg class="mask__44b0c"><foreignObject><div class="avatarStack__44b0c"><img class="avatar__44b0c" src="https://cdn.discordapp.com/avatars/100000000000000001/dddd.webp?size=28" alt=""></div></foreignObject></svg></div><div class="nameTag__37e49"><div class="panelTitleContainer__37e49">Mira </div><div>mira0001</div><div>在线</div></div></div></div></section>
+
+<script>
+  // A stand-in for Discord's Slate paste handling: read text/plain, rebuild the lines.
+  (function () {
+    const ed = document.getElementById("editor");
+    const leaf = (t) => {
+      const line = document.createElement("div");
+      line.setAttribute("data-slate-node", "element");
+      const tn = document.createElement("span");
+      tn.setAttribute("data-slate-node", "text");
+      const lf = document.createElement("span");
+      lf.setAttribute("data-slate-leaf", "true");
+      const s = document.createElement("span");
+      if (t) { s.setAttribute("data-slate-string", "true"); s.textContent = t; }
+      else { s.setAttribute("data-slate-zero-width", "n"); s.append("\uFEFF", document.createElement("br")); }
+      lf.appendChild(s); tn.appendChild(lf); line.appendChild(tn);
+      return line;
+    };
+    const current = () => window.KolMailDiscord.Core.editorTextOf(ed);
+    window.setEditorEmpty = () => { ed.textContent = ""; ed.appendChild(leaf("")); };
+    ed.addEventListener("paste", (e) => {
+      e.preventDefault();
+      const text = e.clipboardData.getData("text/plain");
+      const sel = window.getSelection();
+      const replaceAll = sel && !sel.isCollapsed && ed.contains(sel.anchorNode);
+      const base = replaceAll ? "" : current();
+      ed.textContent = "";
+      for (const l of (base + text).split("\n")) ed.appendChild(leaf(l));
+    });
+  })();
+</script>
+<script src="../content.js"></script>
+<script>
+  (async function () {
+    const { Core, Dom, insertIntoEditor } = window.KolMailDiscord;
+    const ch = Core.parseDmPath("/channels/@me/300000000000000003");
+    const fails = [];
+    const eq = (name, got, want) => {
+      if (JSON.stringify(got) !== JSON.stringify(want)) fails.push(`${name}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+    };
+
+    const me = Dom.readMe(document);
+    eq("me", me, { id: "100000000000000001", name: "Mira" });
+    eq("peer header", Dom.readPeerHeader(document), { name: "PixelFox_", username: "pixelfox_" });
+    eq("peer link id (exact href, not the longer one)", Dom.readPeerLinkId(document, ch), "200000000000000002");
+
+    const rows = Dom.readRows(document, ch);
+    eq("rendered rows of this channel", rows.length, 8);
+    eq("not a group DM", [Dom.isGroupMarker(document, ch), Core.countOthers(rows, me)], [false, 1]);
+    eq("DM-list label names the header's peer", Dom.readPeerLinkLabel(document, ch).includes("PixelFox_"), true);
+    const msgs = Core.buildMessages(rows, me, 50, { id: Dom.readPeerLinkId(document, ch), name: "PixelFox_" });
+    const brief = msgs.map((m) => [m.id.slice(-3), m.author, m.author_id, m.out, m.text, m.reply_to, m.attachments.map((a) => a.name)]);
+    eq("messages", brief, [
+      ["100", "PixelFox_", "200000000000000002", false, "Salut Mira", null, []],
+      ["101", "PixelFox_", "200000000000000002", false, "Mon tarif est 300 € 😉", null, []],
+      ["200", "Mira", "100000000000000001", true, "Bonjour Fox !\nOn peut signer cette semaine ?", null, []],
+      ["201", "Mira", "100000000000000001", true, "", null, ["brief.png"]],
+      ["300", "PixelFox_", "200000000000000002", false, "Oui, jeudi ça marche", "Bonjour Fox ! On peut signer cette semaine ?", []],
+      ["400", "Mira", null, true, "Parfait, merci", null, []],
+    ]);
+    eq("timestamps", msgs.map((m) => m.at), ["2026-10-28T03:20:00.000Z", "2026-10-28T03:21:00.000Z", "2026-10-28T03:30:00.000Z",
+      "2026-10-28T03:31:00.000Z", "2026-10-28T03:40:00.000Z", "2026-10-28T03:50:00.000Z"]);
+    eq("pending row read but flagged", rows.find((r) => r.id.endsWith("401")).pending, true);
+    eq("newest row id", Dom.newestRowId(document, ch), "1565240000000000401");
+    eq("attachment url", msgs[3].attachments[0].url, "https://cdn.discordapp.com/attachments/300000000000000003/1565240000000000999/brief.png?ex=1&is=2&hm=3");
+
+    // the input only counts as this DM's while the list shows nothing but this DM's rows
+    eq("editor refused while another channel's row is listed", Dom.findEditor(document, ch), null);
+    document.getElementById("chat-messages-3000000000000000030-1565240000000000500").remove();
+    const editor = Dom.findEditor(document, ch);
+    eq("editor found", editor && editor.id, "editor");
+    eq("editor of another DM refused", Dom.findEditor(document, "300000000000000099"), null);
+    eq("empty editor reads empty", Dom.readEditorText(editor), "");
+
+    // count execCommand("insertText") calls from here on
+    let inserts = 0;
+    const exec = document.execCommand.bind(document);
+    document.execCommand = (cmd, ...a) => { if (cmd === "insertText") inserts++; return exec(cmd, ...a); };
+
+    // fill through the synthetic paste, multi-line
+    eq("paste fill", await insertIntoEditor(editor, "Line one\nLine two", false), true);
+    eq("paste fill text", Dom.readEditorText(editor), "Line one\nLine two");
+    // manual 填入 over existing text replaces it
+    eq("replace fill", await insertIntoEditor(editor, "Replaced text", true), true);
+    eq("replace fill text", Dom.readEditorText(editor), "Replaced text");
+    eq("no insertText while the paste works", inserts, 0);
+    // no paste handler: execCommand("insertText") fallback for one line
+    const plain = document.getElementById("plain");
+    eq("execCommand fallback", await insertIntoEditor(plain, "Fallback ok", false), true);
+    eq("insertText used once", inserts, 1);
+    // ...but never for several lines (insertText can act like Enter): the 复制 button instead
+    plain.textContent = "";
+    eq("multi-line falls to copy", await insertIntoEditor(plain, "Line A\nLine B", false), false);
+    eq("multi-line: no insertText", inserts, 1);
+    eq("multi-line: input untouched", plain.textContent, "");
+    // a paste that changed the input into something else is not piled on
+    const mangler = document.getElementById("mangler");
+    mangler.addEventListener("paste", (e) => { e.preventDefault(); mangler.textContent = e.clipboardData.getData("text/plain").toUpperCase(); });
+    eq("changed by the paste: no fallback", await insertIntoEditor(mangler, "abc", false), false);
+    eq("changed by the paste: no insertText", [inserts, mangler.textContent], [1, "ABC"]);
+    // the page moved to another conversation: nothing is pasted
+    setEditorEmpty();
+    let moved = null;
+    try { await insertIntoEditor(editor, "never", false, () => false); } catch (e) { moved = e; }
+    eq("guard aborts", moved === window.KolMailDiscord.MOVED, true);
+    eq("guard: input untouched", Dom.readEditorText(editor), "");
+    let calls = 0;
+    try { await insertIntoEditor(editor, "never", false, () => ++calls < 2); } catch (e) { moved = e; } // moves during the wait
+    eq("guard re-checked right before the paste", [moved === window.KolMailDiscord.MOVED, Dom.readEditorText(editor)], [true, ""]);
+    document.execCommand = exec;
+
+    // sent detection against what was on screen
+    const filled = { itemId: "q1", text: "Parfait, merci", baseline: "1565240000000000300" };
+    eq("sent detected", Core.decideSent(filled, msgs, true), "1565240000000000400");
+    eq("not sent before baseline", Core.decideSent(Object.assign({}, filled, { baseline: "1565240000000000401" }), msgs, true), null);
+
+    const res = document.getElementById("result");
+    res.textContent = fails.length ? `FAIL (${fails.length})` : "PASS";
+    res.className = fails.length ? "fail" : "pass";
+    document.getElementById("out").textContent = (fails.length ? fails.join("\n") + "\n\n" : "") + JSON.stringify({ me, msgs }, null, 1);
+    window.__fixtureResult = { pass: !fails.length, fails };
+  })().catch((e) => {
+    document.getElementById("result").textContent = "ERROR " + e;
+    window.__fixtureResult = { pass: false, fails: [String(e && e.stack || e)] };
+  });
+</script>
+</body>
+</html>

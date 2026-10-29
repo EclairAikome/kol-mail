@@ -51,9 +51,15 @@ LOCK_WAIT_SECONDS = 180    # how long to wait for another kol.py process to fini
 MAIN_SHEET, LOG_SHEET, BATCH_SHEET, DICT_SHEET = "KOL总表", "沟通记录", "发信批次", "说明"
 MAIN_TABLE, LOG_TABLE, BATCH_TABLE, PROJECT_TABLE = "KOL", "LOG", "BATCH", "PROJ"
 
+# Added on 2026-10-29: the Telegram / Discord accounts of a KOL, so a chat finds its row the way an address does.
+# Sheets made before have no such column and keep working: locating by chat finds nothing there, and writing a chat
+# account only warns (CHAT_MIGRATE_HINT).
+CHAT_HEADER = "聊天账号"
+OPTIONAL_HEADERS = [CHAT_HEADER]
+CHAT_MIGRATE_HINT = f"在“{MAIN_SHEET}”页表格最右边紧挨着加一列，表头写“{CHAT_HEADER}”"
 MAIN_HEADERS = ["ID", "KOL", "项目", "语言", "阶段", "意向", "待办方", "下一步",
                 "对方报价", "方案/条件", "频道数据", "进展摘要", "备注", "平台", "频道", "邮箱", "首次发信",
-                "更新时间", "更新来源", "频道链接"]
+                "更新时间", "更新来源", "频道链接", CHAT_HEADER]
 LOG_HEADERS = ["时间", "ID", "KOL", "方向", "类型", "摘要", "渠道", "邮箱", "来源", "键"]
 BATCH_HEADERS = ["批次", "项目", "语言", "日期", "人数", "主题", "Message-ID"]
 FORMULA_COLUMNS = {"频道"}  # calculated column, never written by this tool
@@ -69,7 +75,7 @@ FIELDS = {
     "id": "ID", "kol": "KOL", "project": "项目", "lang": "语言", "stage": "阶段", "intent": "意向",
     "owner": "待办方", "next": "下一步", "quote": "对方报价", "terms": "方案/条件",
     "stats": "频道数据", "summary": "进展摘要", "note": "备注", "platform": "平台", "email": "邮箱",
-    "first": "首次发信", "channel": "频道链接",
+    "first": "首次发信", "channel": "频道链接", "chat": CHAT_HEADER,
 }
 HEADER_TO_FIELD = {h: f for f, h in FIELDS.items()} | {"频道": "channel"}
 # "last" (双方最近一封邮件的时间) is not a column. It only tells kol.py how fresh the caller's view of the
@@ -162,6 +168,78 @@ def split_emails(value) -> list[str]:
     return [e.strip("<>()（）") for e in re.split(r"[;,，；、/\s]+", str(value or "").lower()) if "@" in e]
 
 
+# A chat account is "tg:<Telegram user id>" or "dc:<Discord user id>", optionally followed by "(<display name>)";
+# a 聊天账号 cell holds several separated by "; ". Only prefix and digits identify the person: display names change.
+CHAT_TOKEN = re.compile(r"\s*(tg|dc)\s*:\s*(\d{1,20})\s*(?:\((.*)\))?\s*", re.IGNORECASE | re.DOTALL)
+CHAT_ID_IN_TEXT = re.compile(r"(?<![a-z0-9])(tg|dc)\s*:\s*(\d{1,20})(?!\d)", re.IGNORECASE)
+CHAT_PLATFORMS = {"tg": "Telegram", "dc": "Discord"}
+CHAT_EXAMPLE = "tg:1274797389(@yummytim) 或 dc:515534399828131853(ShiruTV_)"
+
+
+def parse_chat(piece) -> tuple[str, str] | None:
+    """(identity, display name) of one token, e.g. ("dc:515534399828131853", "ShiruTV_"); None if it is not one."""
+    m = CHAT_TOKEN.fullmatch(str(piece or ""))
+    return (f"{m.group(1).lower()}:{m.group(2)}", (m.group(3) or "").strip()) if m else None
+
+
+def chat_pieces(cell) -> list[str]:
+    return [p.strip() for p in re.split(r"[;；]", str(cell or "")) if p.strip()]
+
+
+def chat_ids(cell) -> list[str]:
+    """Identities in a 聊天账号 cell. A piece that is not a clean token (typed by hand, "tg:1, dc:2") still counts for
+    the ids in it; display names never do, so a name like "dc:1" can't make a match."""
+    out = []
+    for piece in chat_pieces(cell):
+        token = parse_chat(piece)
+        found = [token[0]] if token else [f"{a.lower()}:{b}" for a, b in CHAT_ID_IN_TEXT.findall(piece)]
+        out += [x for x in found if x not in out]
+    return out
+
+
+def chat_token(ident: str, display: str = "") -> str:
+    return f"{ident}({display})" if display else ident
+
+
+def chat_platform(token: str) -> str:
+    return CHAT_PLATFORMS.get(str(token)[:2].lower(), "")
+
+
+def norm_chats(value) -> list[str]:
+    """An op's chat value (one token, several joined by ';', or a list) as clean tokens, one per identity."""
+    found: dict[str, str] = {}
+    for item in (value if isinstance(value, list) else [value]):
+        for piece in chat_pieces(item):
+            token = parse_chat(clean(piece, 300))
+            if token is None:
+                raise UsageError(f"聊天账号格式不对：{piece[:80]!r}，应该像 {CHAT_EXAMPLE}")
+            ident, display = token
+            found[ident] = clean(display, 60) or found.get(ident, "")
+    return [chat_token(i, d) for i, d in found.items()]
+
+
+def merge_chats(cell, tokens: list[str]) -> str:
+    """The cell with tokens merged in, like addresses: a new account is appended, a known one gets the newer display
+    name, nothing is ever dropped. Pieces typed by hand stay as typed; an unchanged cell comes back unchanged."""
+    old = "" if cell is None else str(cell)
+    pieces = chat_pieces(old)
+    changed = False
+    for token in tokens:
+        ident, display = parse_chat(token)
+        for k, piece in enumerate(pieces):
+            have = parse_chat(piece)
+            if have and have[0] == ident:
+                if display and have[1] != display:
+                    pieces[k], changed = chat_token(ident, display), True
+                break
+            if not have and ident in chat_ids(piece):
+                break
+        else:
+            pieces.append(chat_token(ident, display))
+            changed = True
+    return "; ".join(pieces) if changed else old
+
+
 def clean_url(value) -> str:
     u = clean(value, 500)
     if u and not re.fullmatch(r"https?://[^\s\"'<>]+", u):
@@ -250,6 +328,8 @@ def norm_fields(raw: dict) -> dict:
             if str(value).strip() and not emails:
                 raise UsageError(f"邮箱格式不对：{value!r}")
             out[field] = emails
+        elif field == "chat":
+            out[field] = norm_chats(value)
         elif field == "channel":
             out[field] = clean_url(value)
         elif field == "lang":
@@ -265,8 +345,8 @@ def norm_op(op: dict) -> dict:
     kind = op["op"]
     if kind == "upsert":
         fields = norm_fields(op)
-        if not ({"id", "email", "kol", "channel"} & fields.keys()):
-            raise UsageError("upsert 至少要给 id、email、kol、channel 其中一个来定位 KOL")
+        if not ({"id", "email", "kol", "channel", "chat"} & fields.keys()):
+            raise UsageError("upsert 至少要给 id、email、chat、channel、kol 其中一个来定位 KOL")
         only = op.get("only_if_stage")
         if only is not None:
             only = [norm_choice(x, STAGES, "only_if_stage 里的阶段", blank_ok=False)
@@ -278,21 +358,30 @@ def norm_op(op: dict) -> dict:
         direction = DIRECTIONS.get(str(op.get("dir", "")).strip().lower())
         if direction is None:
             raise UsageError(f"{kind} 的 dir 只能是 收/发（或 in/out），收到 {op.get('dir')!r}")
-        who = norm_fields({k: op[k] for k in ("id", "email", "kol") if op.get(k)})
+        who = norm_fields({k: op[k] for k in ("id", "email", "kol", "chat") if op.get(k)})
         if not who:
-            raise UsageError(f"{kind} 至少要给 id、email、kol 其中一个")
+            raise UsageError(f"{kind} 至少要给 id、email、chat、kol 其中一个")
+        # In log and event, channel is 渠道 (邮件 / Telegram / Discord), not 频道链接 as in upsert. A chat message
+        # without one gets its platform; everything else stays 邮件, as callers that send none expect.
+        channel = clean(opt(op, "channel"), 300)
+        if re.match(r"(?i)(https?://|www\.)", channel):
+            raise UsageError(f"{kind} 的 channel 是渠道（邮件、Telegram、Discord），频道链接请用 upsert 写：{channel[:80]}")
+        platform = chat_platform(who["chat"][0]) if who.get("chat") else ""
         subject = clean(opt(op, "subject"), 200)
         summary = clean(opt(op, "summary"), 400)
-        etype = clean(opt(op, "type"), 12) or "回信"
+        etype = clean(opt(op, "type"), 12) or platform or "回信"
         if not summary:
             if not subject:
                 raise UsageError(f"{kind} 需要 summary 或 subject")
-            summary = ("收到回信：" if direction == "收" else "我方回信：") + subject
+            if platform:
+                summary = ("对方消息：" if direction == "收" else "我方消息：") + subject
+            else:
+                summary = ("收到回信：" if direction == "收" else "我方回信：") + subject
         when = parse_when(op["time"]) if op.get("time") else now()
         if when > now() + STALE_TOLERANCE:
             when = now()  # a sender's clock in the future must not freeze the stale-update guard
         return {"op": kind, "who": who, "dir": direction, "type": etype, "summary": summary, "time": when,
-                "channel": clean(opt(op, "channel"), 12) or "邮件", "source": clean(opt(op, "source"), 60),
+                "channel": channel[:12] or platform or "邮件", "source": clean(opt(op, "source"), 60),
                 "key": clean(op.get("message_id") or op.get("key") or "", 300)}
     if kind == "add_batch":
         if not op.get("batch") or not op.get("subject"):
@@ -542,8 +631,18 @@ class Master:
     def __init__(self, book: Book):
         self.book = book
         self.t = book.table(MAIN_SHEET, MAIN_TABLE)
-        self.t.need([h for h in MAIN_HEADERS if h not in FORMULA_COLUMNS])
+        self.t.need([h for h in MAIN_HEADERS if h not in FORMULA_COLUMNS and h not in OPTIONAL_HEADERS])
         self.rows = self.t.values()
+
+    @property
+    def has_chat(self) -> bool:
+        return CHAT_HEADER in self.t.col
+
+    def chat_warning(self, fields: dict, what: str) -> str:
+        """Why the chat account in `fields` did nothing on a sheet without the column; "" when it has it."""
+        if not fields.get("chat") or self.has_chat:
+            return ""
+        return f"总表还没有“{CHAT_HEADER}”列，{what}。{CHAT_MIGRATE_HINT}"
 
     def refresh(self):
         self.rows = self.t.values()
@@ -558,14 +657,19 @@ class Master:
             for i, row in enumerate(self.rows, 1):
                 if address in split_emails(g(row, "邮箱")):
                     return i
+        if who.get("chat") and self.has_chat:
+            want = {parse_chat(t)[0] for t in who["chat"]}
+            for i, row in enumerate(self.rows, 1):
+                if want & set(chat_ids(g(row, CHAT_HEADER))):
+                    return i
         if who.get("channel"):
             want = who["channel"].rstrip("/").lower()
             for i, row in enumerate(self.rows, 1):
                 if str(g(row, "频道链接") or "").rstrip("/").lower() == want:
                     return i
-        if who.get("kol") and not who.get("email"):
-            # A name only counts when no address was given: anyone can write in under a known channel's name, and
-            # matching them by name would merge a stranger's address into the real KOL's row.
+        if who.get("kol") and not (who.get("email") or who.get("chat")):
+            # A name only counts when no address or chat account was given: anyone can write in under a known
+            # channel's name, and matching them by name would merge a stranger's address into the real KOL's row.
             hits = self.name_hits(who["kol"])
             if len(hits) > 1:
                 raise UsageError(f"名叫 {who['kol']} 的 KOL 有 {len(hits)} 个，请改用 id 或 email 定位")
@@ -628,20 +732,30 @@ class Master:
 
     def upsert(self, fields: dict, source: str, create: bool = True, rename: bool = False,
                only_if_stage: list[str] | None = None) -> dict:
-        i = self.find(fields)
+        warning = self.chat_warning(fields, "聊天账号没有写进去，其余字段照常写入")
+        out = self._upsert(fields, source, create, rename, only_if_stage)
+        if warning:
+            out["warning"] = warning
+        return out
+
+    def _upsert(self, fields: dict, source: str, create: bool, rename: bool, only_if_stage: list[str] | None) -> dict:
+        i = self.find(fields)  # with every locator, so a chat account still keeps the name from matching
+        who = {k: fields.get(k) for k in ("id", "email", "chat", "kol") if fields.get(k)}
+        if not self.has_chat:
+            fields = {k: v for k, v in fields.items() if k != "chat"}
         if i is not None:
             stage = self.t.get(self.rows[i - 1], "阶段") or ""
             if only_if_stage and stage not in only_if_stage:
                 rec = self.record(i)
                 return {"status": "skipped_stage", "id": rec["ID"], "kol": rec["KOL"], "stage": stage}
             return self.update(i, fields, source, rename=rename)
-        who = {k: fields.get(k) for k in ("id", "email", "kol") if fields.get(k)}
         if not create:
             return {"status": "not_found", "who": who}
-        if fields.get("email") and fields.get("kol") and self.name_hits(fields["kol"]):
+        known = who.get("email") or who.get("chat")
+        if known and fields.get("kol") and self.name_hits(fields["kol"]):
             rec = self.record(self.name_hits(fields["kol"])[0])
             return {"status": "needs_review", "who": who,
-                    "error": f"{', '.join(fields['email'])} 不在总表里，但已有同名 KOL {rec['KOL']}（{rec['ID']}）。"
+                    "error": f"{', '.join(known)} 不在总表里，但已有同名 KOL {rec['KOL']}（{rec['ID']}）。"
                              f"确认是同一个人就带上 \"id\": \"{rec['ID']}\" 再写；不是就换个名字"}
         if not (fields.get("kol") or fields.get("email")):
             raise UsageError("新建 KOL 至少要给 kol 名称或 email")
@@ -660,6 +774,8 @@ class Master:
                 continue
             if field == "email":
                 value = "; ".join(value)
+            elif field == "chat":
+                value = merge_chats("", value)
             elif field == "note" and value:
                 value = f"[{now():%m-%d}] {value}"
             values[FIELDS[field]] = to_serial(value) if isinstance(value, dt.datetime) else text_cell(value)
@@ -685,6 +801,8 @@ class Master:
         row = self.rows[i - 1]
         changed, kept = [], []
         fields = dict(fields)
+        if not self.has_chat:
+            fields.pop("chat", None)  # nowhere to put it; upsert() said so in its warning
         new_last = fields.pop("last", None)
         cur_last = self.latest_contact(i) if new_last and not created else None
         if new_last and cur_last:
@@ -707,6 +825,8 @@ class Master:
                 if not new:
                     continue
                 value = (str(old).rstrip("; ") + "; " if old else "") + "; ".join(new)
+            elif field == "chat":
+                value = merge_chats(old, value)  # unchanged cell -> equal to old, skipped below
             elif field == "note":
                 if not value:
                     continue
@@ -744,7 +864,9 @@ class Log:
     def key_for(op: dict) -> str:
         if op.get("key"):
             return op["key"]
-        who = ",".join(op["who"].get("email") or []) or op["who"].get("id") or op["who"].get("kol", "")
+        # chat identities, not tokens: a changed display name must not make the same message a new row
+        chats = ",".join(parse_chat(t)[0] for t in op["who"].get("chat") or [])
+        who = ",".join(op["who"].get("email") or []) or op["who"].get("id") or chats or op["who"].get("kol", "")
         raw = f"{op['time'].isoformat()}|{who}|{op['dir']}|{op['type']}|{op['summary']}"
         return "auto:" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
@@ -768,14 +890,18 @@ class Log:
             rec = master.record(i_kol)
             kid, name, mail = rec["ID"], rec["KOL"], (op["who"].get("email") or split_emails(rec["邮箱"]) or [""])[0]
         else:
-            kid, name = "", "（未匹配）" + (op["who"].get("kol") or "")
+            kid, name = "", "（未匹配）" + (op["who"].get("kol") or "; ".join(op["who"].get("chat") or []))
             mail = (op["who"].get("email") or [""])[0]
         i = self.t.append()
         self.t.write_row(i, {"时间": to_serial(op["time"]), "ID": text_cell(kid), "KOL": text_cell(name),
                              "方向": op["dir"], "类型": text_cell(op["type"]), "摘要": text_cell(op["summary"]),
                              "渠道": text_cell(op["channel"]), "邮箱": text_cell(mail),
                              "来源": text_cell(source or "未注明"), "键": text_cell(key)})
-        return {"status": "added", "key": key, "matched": bool(i_kol), "id": kid}
+        out = {"status": "added", "key": key, "matched": bool(i_kol), "id": kid}
+        warning = "" if i_kol else master.chat_warning(op["who"], "按聊天账号找不到人")
+        if warning:
+            out["warning"] = warning
+        return out
 
 
 def is_auto_reply(etype) -> bool:
@@ -793,10 +919,20 @@ def ensure_project(book: Book, project: str):
 
 
 def apply_event(op: dict, master: Master, log: Log, source: str) -> dict:
-    """Rule-based bookkeeping for a single mail: move 待办方 / 下一步 / 阶段, then log it.
+    """Rule-based bookkeeping for a single mail or chat message: move 待办方 / 下一步 / 阶段, then log it.
 
-    A mail already in the log only gets its summary refreshed (kol-mail sends the Chinese gist once the translation
-    is ready). The state change comes before the log row, so a retry after an interruption can't skip it."""
+    A message already in the log only gets its summary refreshed (kol-mail sends the Chinese gist once the
+    translation is ready). The state change comes before the log row, so a retry after an interruption can't skip it.
+
+    A chat message (the op carries chat) is only ever booked on an existing row: kol-mail reports only chats linked to
+    a row, so one that matches nothing points at a row deleted since, and must not leave an unmatched log line."""
+    chat = bool(op["who"].get("chat"))
+    if chat and not master.find(op["who"]):
+        out = {"status": "not_found", "who": op["who"], "note": "总表里找不到这个聊天对应的 KOL，没有记"}
+        warning = master.chat_warning(op["who"], "按聊天账号找不到人")
+        if warning:
+            out["warning"] = warning
+        return out
     if log.find(log.key_for(op)) or is_auto_reply(op["type"]):
         return log.add({**op, "update_summary": True}, master, source)
     i = master.find(op["who"])
@@ -809,12 +945,14 @@ def apply_event(op: dict, master: Master, log: Log, source: str) -> dict:
     if last_d is None or op["time"] >= last_d - STALE_TOLERANCE:  # an older mail must not undo a later decision
         if op["dir"] == "收":
             fields["owner"] = "我方"
-            fields["next"] = f"{op['time']:%m-%d %H:%M} 收到新回信，待处理"
+            fields["next"] = (f"{op['time']:%m-%d %H:%M} 收到 {op['channel']} 新消息，待处理" if chat
+                              else f"{op['time']:%m-%d %H:%M} 收到新回信，待处理")
             if stage in ("未联系", "已发信", "退信", ""):
                 fields["stage"] = "洽谈中"
         else:
             fields["owner"] = "对方"
-            fields["next"] = f"等对方回复（{op['time']:%m-%d} 已回信）"
+            fields["next"] = (f"等对方回复（{op['time']:%m-%d} 已在 {op['channel']} 回复）" if chat
+                              else f"等对方回复（{op['time']:%m-%d} 已回信）")
             if stage in ("未联系", ""):
                 fields["stage"] = "已发信"
     update = master.update(i, fields, source)
@@ -1070,6 +1208,8 @@ def match_record(rec: dict, who: dict) -> bool:
         return True
     if who.get("email") and set(who["email"]) & set(split_emails(rec.get("邮箱"))):
         return True
+    if who.get("chat") and {parse_chat(t)[0] for t in who["chat"]} & set(chat_ids(rec.get(CHAT_HEADER))):
+        return True
     if who.get("kol") and who["kol"].casefold() in str(rec.get("KOL", "")).casefold():
         return True
     return False
@@ -1093,17 +1233,18 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="kol.py", description="KOL 总表写入工具（总表开着也能写）")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("upsert", help="新建或更新一位 KOL（按 id / email / channel / kol 名定位）")
+    p = sub.add_parser("upsert", help="新建或更新一位 KOL（按 id / email / chat / channel / kol 名定位）")
     add_kol_fields(p)
     p.add_argument("--last", help="双方最近一封邮件的时间，只用来防止旧判断覆盖新情况，不写进表")
     p.add_argument("--no-create", action="store_true", help="找不到就不新建")
     p.add_argument("--source", default="手动会话", help="更新来源，写进“更新来源”列")
 
     for name, helptext in (("log", "往沟通记录里记一笔，不改 KOL 状态"),
-                           ("event", "记一封收/发的邮件，并按规则更新待办方、下一步、阶段")):
+                           ("event", "记一封收/发的邮件或一条聊天消息，并按规则更新待办方、下一步、阶段")):
         p = sub.add_parser(name, help=helptext)
-        for f in ("id", "email", "kol", "dir", "type", "summary", "subject", "time", "channel", "message-id"):
+        for f in ("id", "email", "kol", "chat", "dir", "type", "summary", "subject", "time", "message-id"):
             p.add_argument(f"--{f}")
+        p.add_argument("--channel", help="渠道：邮件（默认）、Telegram、Discord")
         p.add_argument("--source", default="手动会话")
 
     p = sub.add_parser("batch", help="一次执行多条操作：JSON 文件路径，或 - 表示从标准输入读")
@@ -1116,7 +1257,7 @@ def main(argv=None):
         p.add_argument(f"--{f}")
 
     p = sub.add_parser("get", help="查一位 KOL 的整行和最近的沟通记录")
-    for f in ("id", "email", "kol", "channel"):
+    for f in ("id", "email", "kol", "channel", "chat"):
         p.add_argument(f"--{f}")
     p.add_argument("--logs", type=int, default=10)
 
@@ -1138,7 +1279,7 @@ def main(argv=None):
             res = run(ops, a.source)
         elif a.cmd in ("log", "event"):
             raw = {k: getattr(a, k.replace("-", "_")) for k in
-                   ("id", "email", "kol", "dir", "type", "summary", "subject", "time", "channel")}
+                   ("id", "email", "kol", "chat", "dir", "type", "summary", "subject", "time", "channel")}
             raw["message_id"] = a.message_id
             ops = [norm_op({"op": a.cmd, **{k: v for k, v in raw.items() if v is not None}})]  # None = left out
             res = run(ops, a.source)
@@ -1177,9 +1318,9 @@ def main(argv=None):
                   "queued_ops": sum(len(e.get("ops", [])) for e in read_pending()[0]),
                   "failed_queue_file": str(FAILED) if FAILED.exists() else ""})
         elif a.cmd == "get":
-            who = norm_fields({k: getattr(a, k) for k in ("id", "email", "kol", "channel") if getattr(a, k)})
+            who = norm_fields({k: getattr(a, k) for k in ("id", "email", "kol", "channel", "chat") if getattr(a, k)})
             if not who:
-                raise UsageError("get 需要 --id / --email / --kol / --channel 其中一个")
+                raise UsageError("get 需要 --id / --email / --chat / --channel / --kol 其中一个")
             kols, logs = snapshot()
             hits = [r for r in kols if match_record(r, who)
                     or (who.get("channel") and str(r.get("频道链接", "")).rstrip("/").lower() == who["channel"].rstrip("/").lower())]

@@ -21,12 +21,17 @@
 #   skip_with_outgoing_attachments  off when the caller knows files go with the reply
 # Text in quotes ("...", “...”, «...», 「...」) is left out of pattern rules: it is mostly the title of a KOL's video.
 #
+# The owner's own words win over every rule here (主人 2026-10-29: "我的话就是金科玉律"). Whenever the owner wrote notes
+# or feedback for a draft, app.py's owner_check asks a model which flags the owner asked for: those stay in the draft
+# and are only mentioned, never rewritten away. It also checks that every instruction of the owner was carried out,
+# which replaces owner-wording-kept below; that rule only acts when the owner check cannot run.
+#
 # Regexes catch the usual wordings, not every possible one; the owner still reads every draft. Edit freely: the file
 # is read again whenever it changes, no restart needed. Regexes are single-quoted YAML strings, so a quote inside
 # one is written twice ('').
 
 version: 2
-updated: 2026-10-26
+updated: 2026-10-29
 max_revisions: 2
 
 # Shared vocabularies.
@@ -44,7 +49,8 @@ vocab:
   price_quote: '[$€£₽¥]\s?\d|\d[\d.,\s]{0,12}(usd|us\$|dollars?|bucks|eur|euros?|€|gbp|£|руб\w*|₽|rub|r\$|brl|reais|yen|円|원|krw|元|rmb|cad|aud|usdt)\b|\b(rate|price|fee|charge|quote)\w*[^.\n]{0,25}\d{2,}|\d{2,}[^.\n]{0,12}(per|a|each) (video|stream|post|short)'
   profit: 'net profit|\bprofit|\bmargin|\b\d{2}\s?/\s?\d{2}\b[^.\n]{0,15}split|прибыл|маржи|ganancia|beneficio|margen|lucro|margem|bénéfice|gewinn|利润|利益|이익|수익|纯利'
   giveaway: 'giveaway|free coupons?|розыгрыш|sorteo|sorteio|concours|gewinnspiel|抽奖|プレゼント企画|경품'
-  pushback: '\d{1,2}\s?%|other (platforms?|sites?|companies)|another (platform|site)|competitor|higher (rate|commission|share|percentage)|more commission|too low|not enough|другие (площадки|сайты)|конкурент|больше процент|мало|otras plataformas|muy bajo|别家|其他平台'
+  # A competitor named counts too: "mi contrato con Eneba de fijo más comisión" (Polimorfia, 2026-10-13).
+  pushback: '\d{1,2}\s?%|other (platforms?|sites?|companies)|another (platform|site)|competitor|higher (rate|commission|share|percentage)|more commission|too low|not enough|другие (площадки|сайты)|конкурент|больше процент|мало|otras plataformas|muy bajo|别家|其他平台|\beneba\b|\bg2a\b|\bkinguin\b|\bcodashop\b|\bseagm\b|\bgamivo\b|\bdriffle\b'
   acceptance: '\b(deal|agreed|it''s a deal|works for us|we accept|we can do|confirmed|let''s do|sounds good)\b|договорились|согласны|подтверждаем|\bde acuerdo\b|trato hecho|\bfechado\b|combinado|\bd''accord\b|einverstanden|承知しました|了解しました|좋습니다|확정'
 
 rules:
@@ -210,6 +216,7 @@ rules:
 
   - id: cps-opens-at-default
     title_zh: 纯 CPS 先报默认档（新用户 GMV 5%、老用户 1%），对方嫌低才升级成纯利分成
+    # Pure CPS only: a draft that also names a fixed fee is a fixed fee plus share and is not checked (手册第二节).
     source: 谈判手册第一节第 1 条、第二节；主人 2026-10-22
     action: revise
     check: cps_opens_at_default
@@ -240,10 +247,12 @@ rules:
     source: 主人 2026-10-22“我们手里要有底牌，牌不能一次性打光”
     action: revise
     check: sweetener_before_quote
+    # The fix only takes the extras out: a price or package the draft offers stays (asking for data instead of
+    # answering is the formula the owner rejected on 2026-10-29).
     fix: >-
-      The KOL has not quoted a price yet. Keep this round to asking for their rate, audience geography and format.
-      Remove any extra on top of the fee (affiliate commission, profit share, giveaway, coupons, codes); they are
-      kept for later in the negotiation.
+      The KOL has not quoted a price yet. Remove any extra on top of the fee (affiliate commission, profit share,
+      giveaway, coupons, codes); they are kept for later in the negotiation. Keep everything else as it is, including
+      any price or package the draft offers.
 
   - id: no-confirming-unapproved-amount
     title_zh: 金额没经主人点头前不对达人确认，只说要和团队确认

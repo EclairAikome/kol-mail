@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="zh-CN" class="theme-dark">
+<head>
+  <meta charset="utf-8">
+  <title>KOL Mail Discord app harness</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; margin: 16px; }
+    #result.pass { color: #1f8a4c; } #result.fail { color: #c62f33; }
+    pre { background: #f2f3f5; padding: 8px; white-space: pre-wrap; }
+    [contenteditable] { border: 1px solid #999; min-height: 24px; padding: 4px; }
+  </style>
+</head>
+<body>
+<!--
+  End-to-end run of content.js's App layer (timers, sync, queue, claim, auto-fill, sent detection, panel) without
+  the extension: a fake chrome.runtime stands in for background.js and KOL Mail. Open it over http from the
+  extension folder (python -m http.server, then /test/app.html); it rewrites the address to a DM path, so reopen
+  it from /test/app.html to run again. Takes about a minute. The shadow root is forced open here only so the
+  test can read and click the panel.
+-->
+<h2 id="result">running…</h2>
+<pre id="out"></pre>
+
+<nav><a href="/channels/@me/300000000000000003" aria-label="PixelFox_ （私信）"><img src="https://cdn.discordapp.com/avatars/200000000000000002/aaaa.webp?size=32" alt=""></a></nav>
+<section class="title_abc"><div class="titleWrapper__9293f"><h1><div>PixelFox_</div><div>pixelfox_</div></h1></div></section>
+<main>
+<ol id="list" data-list-id="chat-messages"></ol>
+<form><div id="editor" role="textbox" data-slate-editor="true" data-slate-node="value" contenteditable="true"><div data-slate-node="element"><span data-slate-node="text"><span data-slate-leaf="true"><span data-slate-zero-width="n" data-slate-length="0">&#xFEFF;<br></span></span></span></div></div></form>
+</main>
+<section class="panels_c48ade"><div class="nameTag__37e49"><img class="avatar__44b0c" src="https://cdn.discordapp.com/avatars/100000000000000001/dddd.webp?size=28" alt=""><div class="panelTitleContainer__37e49">Mira </div><div>mira0001</div></div></section>
+
+<script>
+  "use strict";
+  const ZWNBSP = String.fromCharCode(0xfeff);
+  const CH = "300000000000000003";
+  const ed = document.getElementById("editor");
+  const list = document.getElementById("list");
+
+  // ---- fake Slate: paste rebuilds the lines (replacing a selection that covers the editor)
+  const line = (t) => {
+    const l = document.createElement("div"); l.setAttribute("data-slate-node", "element");
+    const tn = document.createElement("span"); tn.setAttribute("data-slate-node", "text");
+    const lf = document.createElement("span"); lf.setAttribute("data-slate-leaf", "true");
+    const s = document.createElement("span");
+    if (t) { s.setAttribute("data-slate-string", "true"); s.textContent = t; }
+    else { s.setAttribute("data-slate-zero-width", "n"); s.append(ZWNBSP, document.createElement("br")); }
+    lf.appendChild(s); tn.appendChild(lf); l.appendChild(tn);
+    return l;
+  };
+  const setEditor = (text) => { ed.textContent = ""; for (const t of text.split("\n")) ed.appendChild(line(t)); };
+  const editorText = () => Array.from(ed.children).map((l) => l.textContent.split(ZWNBSP).join("")).join("\n").trim();
+  ed.addEventListener("paste", (e) => {
+    e.preventDefault();
+    const text = e.clipboardData.getData("text/plain");
+    const sel = window.getSelection();
+    const replaceAll = sel && !sel.isCollapsed && ed.contains(sel.anchorNode);
+    setEditor((replaceAll ? "" : editorText()) + text);
+  });
+
+  // rows the way Discord renders them; Discord after Enter: the input empties, the message shows up
+  let nextId = 1565240000000000900n;
+  function addRow(authorId, name, text) {
+    const id = String(nextId++);
+    const li = document.createElement("li");
+    li.id = `chat-messages-${CH}-${id}`;
+    li.innerHTML = `<div role="article" aria-labelledby="message-username-${id} uid_1 message-content-${id}"><div><img src="https://cdn.discordapp.com/avatars/${authorId}/dddd.webp?size=80" class="avatar_c19a55" alt=""><h3><span id="message-username-${id}"><span class="username_c19a55"></span></span><time id="message-timestamp-${id}" datetime="2026-10-29T08:00:00.000Z">16:00</time></h3><div id="message-content-${id}" class="messageContent_c19a55"></div></div></div>`;
+    li.querySelector(".username_c19a55").textContent = name;
+    const c = li.querySelector(`[id="message-content-${id}"]`);
+    text.split("\n").forEach((t, i) => { if (i) c.appendChild(document.createElement("br")); c.appendChild(document.createTextNode(t)); });
+    list.appendChild(li);
+  }
+  const ME_ID = "100000000000000001", PEER_ID = "200000000000000002";
+  function ownerSends(text) { setEditor(""); addRow(ME_ID, "Mira", text); }
+
+  // ---- fake background + KOL Mail (claim semantics as in app.py)
+  const calls = [];
+  let queue = [
+    { id: "q1", n: 1, of: 2, text: "Bonjour Fox !\nOn signe jeudi ?", zh: "你好 Fox！周四签约吗？", status: "pending" },
+    { id: "q2", n: 2, of: 2, text: "Merci !", zh: "谢谢！", status: "pending" },
+  ];
+  const lostClaims = new Set(); // another tab got these first
+  let claimDelay = 0;
+  let onClaim = null;
+  const session = {};
+  const dmOf = () => (/^\/channels\/@me\/(\d+)$/.exec(location.pathname) || [])[1];
+  function handle(msg, senderDm) {
+    const ch = msg.channel_id || (msg.payload && msg.payload.channel_id);
+    // background.js checks the sender's address when the message arrives
+    if (ch && ch !== senderDm) return { ok: false, error: "扩展内部出错，刷新页面再试" };
+    const mine = ch === CH;
+    if (msg.type === "ui_get") return { ok: true, data: { collapsed: false } };
+    if (msg.type === "ui_set") return { ok: true };
+    if (msg.type === "state_get") return { ok: true, data: session[ch] || null };
+    if (msg.type === "state_set") { session[ch] = msg.data; return { ok: true }; }
+    if (msg.type === "claim") {
+      const it = queue.find((i) => i.id === msg.item_id);
+      const changed = !!it && it.status === "pending" && !lostClaims.has(it.id);
+      if (it) it.status = "filled";
+      return { ok: true, data: { changed } };
+    }
+    if (msg.type === "update") {
+      const it = queue.find((i) => i.id === msg.item_id);
+      if (msg.status !== "filled") queue = queue.filter((i) => i.id !== msg.item_id);
+      else if (it) it.status = "filled";
+      return { ok: true, data: { changed: !!it } };
+    }
+    if (msg.type === "open") return { ok: true };
+    const items = mine ? queue.map((i) => Object.assign({}, i)) : [];
+    if (msg.type === "kol" && msg.op === "sync") {
+      return { ok: true, data: { ok: true, conv: { key: "dc:" + ch, linked: null, suggest: [{ id: "K0001", kol: "PixelFox" }], added: 1 }, queue: items } };
+    }
+    if (msg.type === "kol" && msg.op === "queue") return { ok: true, data: { items } };
+    return { ok: false, error: "unknown" };
+  }
+  const fakeChrome = {
+    runtime: {
+      id: "fake-extension-id",
+      lastError: null,
+      sendMessage(msg, cb) {
+        calls.push(JSON.parse(JSON.stringify(msg)));
+        const delay = msg.type === "claim" ? claimDelay : 15;
+        const reply = handle(msg, dmOf()); // KOL Mail has it now; the answer takes `delay` to come back
+        if (msg.type === "claim" && onClaim) onClaim(msg);
+        setTimeout(() => cb(reply), delay);
+      },
+    },
+  };
+  Object.defineProperty(window, "chrome", { value: fakeChrome, configurable: true, writable: true });
+
+  let focused = true;
+  document.hasFocus = () => focused; // the harness tab may sit in an unfocused window
+
+  // test only: let the harness see into the panel
+  const attach = Element.prototype.attachShadow;
+  Element.prototype.attachShadow = function (init) { return attach.call(this, Object.assign({}, init, { mode: "open" })); };
+
+  let keyEvents = 0;
+  document.addEventListener("keydown", () => keyEvents++, true);
+
+  // load the real content script on a DM address
+  const src = new URL("../content.js", location.href).href;
+  history.replaceState(null, "", `/channels/@me/${CH}`);
+  const s = document.createElement("script");
+  s.src = src;
+  s.onload = run;
+  document.body.appendChild(s);
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  async function until(fn, ms, label) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) { if (fn()) return true; await sleep(100); }
+    throw new Error("timeout: " + label);
+  }
+  const panelRoot = () => document.getElementById("kolmail-dc").shadowRoot;
+  const panelText = () => panelRoot().textContent;
+  const button = (label, nth) => Array.from(panelRoot().querySelectorAll("button")).filter((b) => b.textContent === label)[nth || 0];
+  const updates = () => calls.filter((c) => c.type === "update" || c.type === "claim").map((c) => c.item_id + ":" + (c.status || "claim"));
+
+  async function run() {
+    const fails = [];
+    const eq = (name, got, want) => { if (JSON.stringify(got) !== JSON.stringify(want)) fails.push(`${name}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`); };
+    const log = [];
+    try {
+      eq("visible tab", document.visibilityState, "visible");
+
+      // 0. nothing is filled before the conversation is on screen, nor in a tab without focus
+      await until(() => calls.some((c) => c.op === "queue"), 4000, "first queue poll");
+      await sleep(3500);
+      eq("no fill while the list is empty", [editorText(), updates()], ["", []]);
+      focused = false;
+      addRow(PEER_ID, "PixelFox_", "Mon tarif est 300 €");
+      addRow(ME_ID, "Mira", "Je regarde ça");
+      await sleep(3500);
+      eq("no fill without focus", [editorText(), updates()], ["", []]);
+      focused = true;
+      log.push("waits for the list and for focus");
+
+      // 1. claim, then fill
+      await until(() => editorText() === queue[0].text, 6000, "auto-fill q1");
+      eq("claimed before the paste", updates()[0], "q1:claim");
+      await until(() => calls.some((c) => c.op === "sync" && c.payload.messages.length === 2), 4000, "sync with the rows");
+      const sync = calls.filter((c) => c.op === "sync" && c.payload.messages.length === 2)[0];
+      eq("sync me", sync.payload.me, { id: ME_ID, name: "Mira" });
+      eq("sync peer", sync.payload.peer, { id: PEER_ID, name: "PixelFox_", username: "pixelfox_" });
+      eq("sync messages", sync.payload.messages.map((m) => [m.author, m.out, m.text]), [["PixelFox_", false, "Mon tarif est 300 €"], ["Mira", true, "Je regarde ça"]]);
+      await until(() => panelText().includes("已填入第 1 条，检查后按回车发送"), 3000, "fill notice");
+      eq("panel link state", ["已连接 KOL Mail", "还没关联总表", "可能是 PixelFox（K0001）", "第 1/2 条", "你好 Fox！周四签约吗？"].filter((t) => !panelText().includes(t)), []);
+      eq("no separate filled update after a claim", updates().filter((u) => u === "q1:filled"), []);
+      log.push("q1 claimed and auto-filled");
+
+      // 2. the owner presses Enter: q1 marked sent, q2 claimed and filled after the pause
+      ownerSends("Bonjour Fox !\nOn signe jeudi ?");
+      await until(() => updates().includes("q1:sent"), 3000, "q1 sent");
+      await until(() => editorText() === "Merci !", 5000, "auto-fill q2");
+      log.push("q1 sent, q2 auto-filled");
+
+      // 3. 跳过 q2: dropped; its text stays in the input, so q3 (new) is not auto-filled over it
+      button("跳过").click();
+      await until(() => updates().includes("q2:dropped"), 3000, "q2 dropped");
+      queue.push({ id: "q3", n: 1, of: 1, text: "Je t'envoie le contrat ce soir.", zh: "我今晚把合同发你。", status: "pending" });
+      await until(() => panelText().includes("我今晚把合同发你。"), 5000, "q3 shown");
+      await sleep(3500);
+      eq("no overwrite of non-empty input", editorText(), "Merci !");
+      log.push("q2 skipped, q3 waits");
+
+      // 4. 填入 replaces the input with q3 (manual: reported as filled, no claim needed)
+      button("填入").click();
+      await until(() => editorText() === "Je t'envoie le contrat ce soir.", 3000, "manual fill q3");
+      await until(() => updates().includes("q3:filled"), 3000, "q3 filled reported");
+      log.push("q3 filled by hand");
+
+      // 5. the owner edits a word before sending: still counted as sent
+      ownerSends("Je t'envoie le contrat demain soir.");
+      await until(() => updates().includes("q3:sent"), 3000, "q3 sent after edit");
+      await until(() => calls.some((c) => c.op === "sync" && c.payload.messages.length === 4), 4000, "sync after sends");
+      log.push("edited q3 detected as sent");
+
+      // 6. another tab won the claim: nothing pasted here; 填入 still works
+      lostClaims.add("q4");
+      queue.push({ id: "q4", n: 1, of: 1, text: "On se parle demain.", zh: "明天聊。", status: "pending" });
+      await until(() => updates().includes("q4:claim"), 5000, "q4 claim");
+      await sleep(3500);
+      eq("lost claim: input empty", editorText(), "");
+      eq("lost claim: claimed once only", updates().filter((u) => u === "q4:claim").length, 1);
+      button("填入").click();
+      await until(() => editorText() === "On se parle demain.", 3000, "manual fill q4");
+      log.push("lost claim not pasted, 填入 still works");
+
+      // 7. KOL Mail drops the draft in the input (the KOL wrote again): a clear warning
+      queue = queue.filter((i) => i.id !== "q4");
+      addRow(PEER_ID, "PixelFox_", "Attends, j'ai une question");
+      await until(() => panelText().includes("对方有新消息，这条草稿已作废，输入框里的字先别发"), 5000, "vanished warning");
+      eq("vanished: not reported as sent", updates().includes("q4:sent"), false);
+      setEditor("");
+      log.push("vanished draft warned");
+
+      // 8. the owner switches DM while a claim is in flight: nothing pasted anywhere
+      claimDelay = 600;
+      onClaim = (m) => { if (m.item_id === "q5") history.pushState(null, "", "/channels/@me/300000000000000099"); };
+      queue.push({ id: "q5", n: 1, of: 1, text: "Ne colle pas ça ailleurs", zh: "别贴到别处", status: "pending" });
+      await until(() => updates().includes("q5:claim"), 5000, "q5 claim");
+      await sleep(2500);
+      eq("moved: nothing pasted", editorText(), "");
+      onClaim = null;
+      claimDelay = 0;
+      history.pushState(null, "", `/channels/@me/${CH}`);
+      await until(() => panelText().includes("别贴到别处"), 6000, "back on the DM");
+      await sleep(3500);
+      eq("claimed item not auto-filled again", [editorText(), updates().filter((u) => u === "q5:claim").length], ["", 1]);
+      log.push("DM switch during a claim pasted nothing");
+
+      // 9. 在 KOL Mail 里起草 asks the background to open KOL Mail on this conversation
+      button("在 KOL Mail 里起草").click();
+      await until(() => calls.some((c) => c.type === "open" && c.channel_id === CH), 2000, "open");
+
+      // 10. collapse to a pill and back
+      button("收起").click();
+      await until(() => panelRoot().querySelector(".pill") && !panelRoot().querySelector(".panel"), 2000, "collapsed");
+      panelRoot().querySelector(".pill").click();
+      await until(() => panelRoot().querySelector(".panel"), 2000, "expanded");
+
+      // 11. a third person writes: a group DM, left alone
+      addRow("300000000000000009", "Manager", "Bonjour à tous");
+      await until(() => panelText().includes("这是群聊私信，扩展在这里不同步，也不填入"), 5000, "group note");
+      const afterGroup = calls.length;
+      queue.push({ id: "q6", n: 1, of: 1, text: "group", zh: "群", status: "pending" });
+      await sleep(4000);
+      eq("group: no sync, queue or claim", calls.slice(afterGroup).filter((c) => c.type === "kol" || c.type === "claim").length, 0);
+      eq("group: nothing filled", editorText(), "");
+      log.push("group DM left alone");
+
+      // 12. never a key event, and the extension being reloaded stops it quietly
+      eq("key events dispatched", keyEvents, 0);
+      const before = calls.length;
+      fakeChrome.runtime.id = undefined;
+      await until(() => panelText().includes("扩展已更新"), 3000, "dead note");
+      await sleep(3500);
+      eq("no calls after teardown", calls.length, before);
+      log.push("teardown quiet");
+    } catch (e) {
+      fails.push(String(e && e.message || e));
+    }
+    const res = document.getElementById("result");
+    res.textContent = fails.length ? `FAIL (${fails.length})` : "PASS";
+    res.className = fails.length ? "fail" : "pass";
+    document.getElementById("out").textContent = [...fails, "", ...log, "", "updates: " + updates().join(", ")].join("\n");
+    window.__appResult = { pass: !fails.length, fails, log, updates: updates() };
+  }
+</script>
+</body>
+</html>

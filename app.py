@@ -13,11 +13,13 @@ import base64
 import collections
 import contextlib
 import contextvars
+import dataclasses
 import email.utils
 import glob
 import hashlib
 import json
 import os
+import random
 import re
 import secrets
 import shutil
@@ -46,6 +48,7 @@ import config  # noqa: E402
 import autoreport  # noqa: E402
 import accounts  # noqa: E402
 import autoreply  # noqa: E402
+import chats  # noqa: E402
 import awake  # noqa: E402
 import petfeed  # noqa: E402
 import skin  # noqa: E402
@@ -59,6 +62,7 @@ import received  # noqa: E402
 import replyflow  # noqa: E402
 import compliance  # noqa: E402
 import onboarding  # noqa: E402
+import tgsetup  # noqa: E402
 import mailserver  # noqa: E402
 import signature  # noqa: E402
 import folders  # noqa: E402
@@ -399,8 +403,10 @@ class MailBridge:
     params() may return None while the backend cannot start yet (e.g. Telegram not logged in)."""
 
     def __init__(self, name: str, params=mail_params, base_args: dict | None = None, label: str = "邮件后端",
-                 parallel: int = 1):
+                 parallel: int = 1, drop_after: int = 0):
         self.name = name
+        self.drop_after = drop_after  # with parallel > 1: reconnect after this many timeouts in a row (0: never)
+        self.timeouts = 0
         self.params = params
         self.base_args = base_args  # None: mcp-email-server, every call for the current account
         self.label = label
@@ -410,6 +416,7 @@ class MailBridge:
         self.parallel = parallel
         self.lock = asyncio.Semaphore(parallel)  # each call opens its own IMAP connection, so a few may overlap
         self.error: str | None = None
+        self.wake = asyncio.Event()  # restart(): stop waiting and connect again now
 
     def _drop(self, session):
         """Reconnect, but only if the failing session is still the live one: a late failure of an old session
@@ -422,12 +429,13 @@ class MailBridge:
         while True:
             params = self.params()
             if params is None:
-                await asyncio.sleep(30)
+                await self._pause(30)
                 continue
+            self.broken.clear()  # params() just now is fresh: only a restart() from here on must reconnect
             started = time.monotonic()
             try:
                 async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
-                    await session.initialize()
+                    await asyncio.wait_for(session.initialize(), 90)  # a child stuck starting up is tried again
                     self.session, self.error = session, None
                     self.ready.set()
                     log(f"{self.label} ({self.name}) connected")
@@ -443,7 +451,23 @@ class MailBridge:
                 self.broken.clear()
             # A child that keeps dying right away (e.g. a revoked Telegram login) must not log in every 3 s.
             delay = 3 if time.monotonic() - started > 300 else min(delay * 2, 600)
-            await asyncio.sleep(delay)
+            if await self._pause(delay):
+                delay = 3
+
+    async def _pause(self, seconds: float) -> bool:
+        """Wait, or less when restart() is called: True then."""
+        try:
+            await asyncio.wait_for(self.wake.wait(), seconds)
+        except asyncio.TimeoutError:
+            return False
+        self.wake.clear()
+        return True
+
+    def restart(self):
+        """Connect again now with fresh params(): an install, login or logout in the settings takes effect at once."""
+        self.error = None
+        self.broken.set()  # a live or still-connecting session ends
+        self.wake.set()    # a pause (no params yet, or a failure back-off) ends
 
     async def call(self, tool: str, timeout: float = 180, raw: bool = False, **args):
         """The tool's result as JSON (or {"result": text}); with raw=True its content blocks as they came, so an
@@ -476,6 +500,12 @@ class MailBridge:
         except asyncio.TimeoutError as e:
             if self.parallel > 1:
                 # One slow call (a big full-text search) says nothing about the child; keep the others running.
+                # Several in a row with nothing answered in between do: a hung child.
+                self.timeouts += 1
+                if self.drop_after and self.timeouts >= self.drop_after:
+                    self.timeouts = 0
+                    self.error = f"{self.label}连续没有响应，正在重连"
+                    self._drop(session)
                 raise MailError(f"{self.label}{timeout:.0f} 秒没有响应") from e
             # A hung child would otherwise block every later call behind the lock: drop it and reconnect.
             self.error = f"{self.label}{timeout:.0f} 秒没有响应，正在重连"
@@ -490,6 +520,7 @@ class MailBridge:
                 self.error = f"{self.label}连接中断，正在重连"
                 self._drop(session)
             raise MailError(err_text(e)) from e
+        self.timeouts = 0  # the child answered
         text = "\n".join(getattr(c, "text", "") for c in result.content)
         if result.isError:
             raise MailError(text[:500] or f"{tool} failed")
@@ -560,7 +591,8 @@ class MailBridge:
             raise MailError(result[:300])
 
     async def sent_to(self, address: str, limit: int = 3) -> list[dict]:
-        """Our earlier one-to-one emails to exactly this address (IMAP TO search is a substring match)."""
+        """Our earlier emails to exactly this address, alone or with others on To and Cc (IMAP TO search is a
+        substring match, so each one is checked)."""
         if not sent_box():
             return []
         try:
@@ -575,7 +607,7 @@ class MailBridge:
             await asyncio.sleep(2)
             meta = await self.call("list_emails_metadata", mailbox=sent_box(), to_address=address, page_size=20)
         ids = [e["email_id"] for e in meta.get("emails", [])
-               if [sender_address(r) for r in e.get("recipients") or []] == [address]][:limit]
+               if address in [sender_address(r) for r in e.get("recipients") or []]][:limit]
         if not ids:
             return []
         data = await self.call("get_emails_content", mailbox=sent_box(), email_ids=ids,
@@ -738,18 +770,32 @@ def telegram_session() -> str | None:
 
 def telegram_params() -> StdioServerParameters | None:
     session = telegram_session()
-    if not session or TG_REPO is None:
+    repo = tgsetup.repo_path()  # read each time: the settings page may install it while KOL Mail runs
+    if not session or repo is None:
         return None
     # Process env beats telegram-mcp's own .env (load_dotenv never overrides), so this login is the one used.
     env = dict(os.environ, TELEGRAM_SESSION_STRING=session, TELEGRAM_EXPOSED_TOOLS="read-only+send_message",
-               TELEGRAM_DEVICE_MODEL="KOL Mail autoreply")
-    venv_python = TG_REPO / ".venv" / ("bin/python" if MACOS else "Scripts/python.exe")
-    return StdioServerParameters(command=str(venv_python),
-                                 args=[str(TG_REPO / "main.py")], env=env)
+               TELEGRAM_DEVICE_MODEL="KOL Mail")
+    env.update(tgsetup.backend_env())  # {} for the owner: the checkout's .env keeps the API keys
+    return StdioServerParameters(command=str(tgsetup.venv_python(repo)), args=[str(repo / "main.py")], env=env)
 
 
 replies = autoreply.ReplyLog(AUTOREPLY_DB)
-tg = MailBridge("autoreply", params=telegram_params, base_args={}, label="Telegram 后端")
+# parallel: telegram_loop's wait_for_settled_message holds one slot for up to 50 s; 私信's reads and sends use the rest
+tg = MailBridge("autoreply", params=telegram_params, base_args={}, label="Telegram 后端", parallel=3, drop_after=3)
+
+
+async def telegram_changed():
+    """设置 → 私信渠道 installed, logged in or logged out: reconnect now, and let the old child let go of its session
+    before a logout's helper ends it on Telegram's side."""
+    state["telegram_error"] = None
+    state["telegram_restarted"] = time.monotonic()  # telegram_loop's call cut short by this is no error to show
+    tg_me.clear()  # another account may be logged in now: its own Saved Messages is the one to leave out
+    tg.restart()
+    for _ in range(50):
+        if tg.session is None:
+            return
+        await asyncio.sleep(0.1)
 
 
 # ---------------------------------------------------------------- read caches
@@ -2125,6 +2171,9 @@ async def telegram_loop():
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            if time.monotonic() - state.get("telegram_restarted", -1e9) < 20:  # 设置 just reconnected it
+                await asyncio.sleep(3)
+                continue
             state["telegram_error"] = err_text(e) if telegram_session() else None
             await asyncio.sleep(30)
             continue
@@ -2133,6 +2182,9 @@ async def telegram_loop():
         who = str(burst.get("name") or burst.get("chat_id"))
         if burst.get("username"):
             who = f"{who} (@{burst['username']})"
+        if tg_private(burst.get("chat_id"), burst.get("username")):  # into 私信 at any hour (and 沟通记录 if linked)
+            spawn(tg_sync_chat(burst["chat_id"], str(burst.get("name") or ""), str(burst.get("username") or "")),
+                  "Telegram 私信同步")
         try:
             await offhours_telegram(burst, who)
         except asyncio.CancelledError:
@@ -2186,12 +2238,14 @@ async def offhours_telegram(burst: dict, who: str):
     except MailError as e:
         status, result_text = "uncertain", err_text(e)
     finish("Telegram", peer, who, period, language, note, status, "" if status == "sent" else result_text[:200])
+    spawn(tg_resync(chat_id), "Telegram 私信同步")  # the automatic reply reaches 私信 and 沟通记录 like any other
 
 
 # ---------------------------------------------------------------- shared by the automations
 
 def answered_by_hand(ours: list[dict], received: datetime, address: str) -> bool:
-    """One of our one-to-one mails to this person, sent after this mail arrived, that is not an automatic reply."""
+    """One of our mails to this person (alone or with others), sent after this mail arrived, that is not an
+    automatic reply."""
     for m in ours:
         d = parse_date(m.get("date"))
         if not d or d < received:
@@ -2376,14 +2430,29 @@ async def push_strategies(case_id: int, reply_to: int | None = None):
     ctx_zh = ""
     with contextlib.suppress(Exception):
         ctx_zh = (await case_context(case)).get("zh", "")
-    text = mobile.strategies_text(case, ctx_zh.split("〔以下为引用")[0], s.get("situation_zh", ""),
+    situation = "\n".join(x for x in (s.get("person_zh"), s.get("situation_zh")) if x)
+    text = mobile.strategies_text(case, ctx_zh.split("〔以下为引用")[0], situation,
                                   s.get("options", []), s.get("recommended", 0))
     await tell_owner(text, mobile.strategy_buttons(case_id, len(s.get("options", []))), case_id, reply_to)
+
+
+def case_feedback(case_id: int) -> list[str]:
+    """What the owner said on the phone for this case's draft so far, oldest first (the notes it was drafted from,
+    then each change request): it all still holds."""
+    with contextlib.suppress(ValueError, TypeError):
+        return replyflow.clean_history(json.loads(cases.get_kv(f"feedback:{case_id}", "[]")))
+    return []
+
+
+def remember_case_feedback(case_id: int, history: list[str]):
+    cases.set_kv(f"feedback:{case_id}", json.dumps(replyflow.clean_history(history), ensure_ascii=False))
 
 
 async def draft_case(case: dict, *, strategy: dict | None = None, chosen: int | None = None, notes: str = "",
                      previous: str = "", feedback: str = "", reply_to: int | None = None):
     ctx = await case_context(case)
+    if not previous:  # a fresh draft: earlier comments were about another version; its notes count from now on
+        remember_case_feedback(case["id"], [notes] if notes.strip() else [])
     draft, pairs = await checked_draft(ctx, strategy=strategy, notes=notes, previous=previous, feedback=feedback)
     await store_and_push_draft(case, draft["reply_body"], draft.get("notes_zh", ""), draft.get("needs_approval_zh", ""),
                                draft.get("warnings", []), draft.get("reply_language", ""), chosen, reply_to, pairs)
@@ -2450,6 +2519,7 @@ async def _send_case(case: dict) -> tuple[str, str]:
         if not text.startswith("Message sent successfully"):
             return "uncertain", f"发送结果不确定：{text[:150]}"
         record_autoreply("Telegram·手机审批", case["who"] or case["peer"], case.get("language") or "-", "已发送", "")
+        spawn(tg_resync(chat_id), "Telegram 私信同步")  # the approved reply reaches 私信 and 沟通记录
         return "sent", "已发送 ✅"
     try:
         msg = await _checked(mail.get_message(case["mailbox"], case["email_id"]))  # live, never from a cache
@@ -2644,10 +2714,11 @@ async def on_owner_text(m: dict):
         await tell_owner(f"收到，#{case['id']} 处理中…", case_id=case["id"], reply_to=m.get("message_id"))
         if text in ("重新对照", "对照"):
             if case["body"]:
-                # The rules are checked again (no rewrite): a flagged draft never comes back looking clean.
+                # The rules are checked again (no rewrite): a flagged draft never comes back looking clean, and
+                # what the owner asked for is held against what they said, as when it was drafted.
                 draft, pairs = await enforce_rules(await case_context(case), {
                     "reply_body": case["body"], "notes_zh": "重新生成了中文对照", "needs_approval_zh": "", "warnings": []},
-                    rewrites=0)
+                    rewrites=0, history=case_feedback(case["id"]))
                 await store_and_push_draft(case, case["body"], draft["notes_zh"], draft["needs_approval_zh"],
                                            draft["warnings"], "", None, m.get("message_id"), pairs)
             return
@@ -2656,11 +2727,14 @@ async def on_owner_text(m: dict):
             return
         cases.move(case["id"], ("confirming",), "drafted")
         ctx = await case_context(case)
-        result = await chat_about_draft(ctx, case["body"], text)
+        history = case_feedback(case["id"])
+        result = await chat_about_draft(ctx, case["body"], text, history)
         if result["answer_zh"]:
             await tell_owner(result["answer_zh"], case_id=case["id"], reply_to=m.get("message_id"))
         if result["reply_body"]:
-            draft, pairs = await enforce_rules(ctx, {**result, "notes_zh": "按你的意见改了"}, feedback=text)
+            remember_case_feedback(case["id"], history + [text])
+            draft, pairs = await enforce_rules(ctx, {**result, "notes_zh": "按你的意见改了"}, feedback=text,
+                                               history=history)
             await store_and_push_draft(case, draft["reply_body"], draft["notes_zh"], draft["needs_approval_zh"],
                                        draft["warnings"], "", None, m.get("message_id"), pairs)
 
@@ -2908,6 +2982,7 @@ async def api_mobile_case(request: Request):
         return JSONResponse({"case": None})
     view = case_view(case)
     view["body"] = case["body"] or ""
+    view["feedback"] = case_feedback(case["id"])  # the owner's words on the phone: a revision at the office keeps them
     s = case["strategies"] or {}
     if case["chosen"] is not None and 0 <= case["chosen"] < len(s.get("options", [])):
         view["strategy"] = s["options"][case["chosen"]]
@@ -4628,10 +4703,65 @@ async def warm_indexes(boxes: list[str]):
             log("warm index failed", box, err_text(result))
 
 
-async def thread_members(address: str) -> list[tuple[str, dict]]:
+async def thread_members(address: str, entries: list[tuple[str, dict]] | None = None) -> list[tuple[str, dict]]:
     """Every message exchanged with this address in the KOL folders and Sent Items (whole folders, see refresh_index).
     Each IMAP call costs seconds, so this reads per-folder indexes the bg session keeps warm instead of searching
-    five folders per click; only a missing or very old index is fetched live."""
+    five folders per click; only a missing or very old index is fetched live. entries: indexed_entries() already
+    read for this click."""
+    return [(box, e) for box, e in (entries if entries is not None else await indexed_entries())
+            if counterpart(e) == address]
+
+
+def participants(meta: dict) -> set[str]:
+    """Everyone on a message but us: its sender, To and Cc."""
+    me = self_address()
+    found = {sender_address(meta.get("sender") or "")} | {sender_address(r) for r in meta.get("recipients") or []}
+    return {a for a in found if a and a != me}
+
+
+def thread_refs(meta: dict) -> set[str]:
+    """The Message-IDs a mail answers or quotes (In-Reply-To, References)."""
+    refs = set((meta.get("references") or "").split())
+    return refs | ({meta["in_reply_to"]} if meta.get("in_reply_to") else set())
+
+
+async def conversation_members(anchor: str, subject: str,
+                               entries: list[tuple[str, dict]] | None = None) -> list[tuple[str, dict]]:
+    """The messages of one conversation across the indexed folders: the same subject (reply prefixes aside), about
+    one person (anchor). Every message with that subject that has anchor on it (as sender, To or Cc) belongs: their
+    mails, our mails to them alone or with others, an agency's mails with them on Cc. A message without anchor on it
+    joins only when the mail headers tie it to the conversation (it answers or quotes a member, or a member answers
+    or quotes it), such as an agency answering our outreach to the KOL without copying them. Sharing an address is
+    not enough: an agency handling two creators under the same templated subject keeps two conversations."""
+    same = [(box, e) for box, e in (entries if entries is not None else await indexed_entries())
+            if norm_subject(e.get("subject")) == subject and not is_bounce(e)]
+    members = [m for m in same if anchor in participants(m[1])]
+    people = {a for _, e in members for a in participants(e)}
+    rest = [m for m in same if anchor not in participants(m[1]) and participants(m[1]) & people]
+    if not members or not rest:
+        return members
+    full = await thread_bodies(members + rest)  # the headers are in the bodies; most are cached already
+
+    def refs(m: tuple[str, dict]) -> set[str]:
+        return thread_refs(m[1] if "body" in m[1] else full.get((m[0], str(m[1]["email_id"]))) or {})
+
+    ids = {e["message_id"] for _, e in members if e.get("message_id")}
+    cited = set().union(*(refs(m) for m in members))
+    while rest:
+        tied = [m for m in rest if (m[1].get("message_id") and m[1]["message_id"] in cited) or refs(m) & ids]
+        if not tied:
+            break
+        members += tied
+        rest = [m for m in rest if all(m is not t for t in tied)]
+        for m in tied:
+            ids |= {m[1]["message_id"]} if m[1].get("message_id") else set()
+            cited |= refs(m)
+    return members
+
+
+async def indexed_entries() -> list[tuple[str, dict]]:
+    """Every message of the indexed folders (KOL folders and Sent Items), from the warm indexes; only a missing or
+    very old index is fetched live."""
     indexes = fresh_indexes()
     for attempt in range(2):  # one retry: a folder that fails once (busy server, dropped login) usually works next
         stale = [box for box in index_boxes() if box not in indexes]
@@ -4646,7 +4776,7 @@ async def thread_members(address: str) -> list[tuple[str, dict]]:
                 raise result
             else:
                 indexes[box] = result
-    return [(box, e) for box in index_boxes() for e in indexes.get(box, []) if counterpart(e) == address]
+    return [(box, e) for box in index_boxes() for e in indexes.get(box, [])]
 
 
 def sent_changed():
@@ -4742,15 +4872,36 @@ def thread_others(mailbox: str, email_id: str, opened: str, subject: str,
     return others[-(THREAD_MAX - 1):]
 
 
+async def thread_candidates(meta: dict) -> list[tuple[str, dict]]:
+    """The messages that may belong to this one's conversation: everything exchanged with the person it is filed
+    under (main_address), and the conversation_members of its subject. thread_others picks the conversation out of
+    them."""
+    who = main_address(meta)
+    if not who:
+        return []
+    entries = await indexed_entries()  # once per click: a failing folder is retried once, not four times
+    return await thread_members(who, entries) + await conversation_members(who, norm_subject(meta.get("subject")),
+                                                                           entries)
+
+
+def main_address(meta: dict) -> str:
+    """The person a conversation is filed under (its saved draft, its KOL总表 row): the counterpart, or for our own
+    mail to several people the first of them. "" for a bounce."""
+    if is_bounce(meta):
+        return ""
+    me = self_address()
+    return counterpart(meta) or next((a for a in (sender_address(r) for r in meta.get("recipients") or [])
+                                      if a and a != me), "")
+
+
 def warm_thread(mailbox: str, email_id: str, meta: dict):
     """quick=1 went partial: start loading the rest of the conversation now, so the page's second request finds
     it in flight instead of starting it 3-7 s later. Both share the same fetches (coalesced)."""
-    who = counterpart(meta)
-    if not who or is_bounce(meta):
+    if is_bounce(meta) or not participants(meta):
         return
 
     async def run():
-        candidates = await thread_members(who)
+        candidates = await thread_candidates(meta)
         await thread_bodies(thread_others(mailbox, email_id, message_identity(mailbox, meta),
                                           norm_subject(meta.get("subject")), candidates))
     spawn(coalesced(("thread warm", mailbox, email_id), run), "warm thread")
@@ -4779,16 +4930,17 @@ async def api_thread(request: Request):
         if listed:
             warm_thread(mailbox, email_id, listed)  # costs no IMAP when everything is cached already
     msg = await load_body(mail, mailbox, email_id)
-    who, subject = counterpart(msg), norm_subject(msg.get("subject"))
+    who, subject = main_address(msg), norm_subject(msg.get("subject"))
     opened = message_identity(mailbox, msg)
     others: list[tuple[str, dict]] = []
     candidates: list[tuple[str, dict]] = []
     partial = False
-    if who and not is_bounce(msg) and threaded and quick and len(fresh_indexes()) < len(index_boxes()):
+    linked = bool(who) and threaded
+    if linked and quick and len(fresh_indexes()) < len(index_boxes()):
         partial = True
-    elif who and not is_bounce(msg) and threaded:
+    elif linked:
         try:
-            candidates = await thread_members(who)
+            candidates = await thread_candidates(msg)
         except MailError as e:
             log("thread lookup failed", who, err_text(e))  # still show the opened message on its own
             candidates = []
@@ -4846,13 +4998,15 @@ async def api_thread(request: Request):
     # Channel links: what this person wrote, in this conversation and any other cached email from them
     # (no extra IMAP). Our own emails are left out, so a link we mention never shows up as theirs.
     texts = [m["body"] for m in out if not m["own"] and not is_skippable(m)]
-    kol_address = who if who and not is_bounce(msg) else ""
+    kol_address = who
     if kol_address:
         texts += [bodies[(box, str(meta["email_id"]))].get("body", "") for box, meta in candidates
                   if box != sent_box() and sender_address(meta.get("sender")) == who
                   and (box, str(meta["email_id"])) in bodies]
     kol_msg = next((m for m in reversed(out) if not m["own"] and not is_skippable(m)), None)
-    return JSONResponse({"messages": out, "subject": msg.get("subject"), "partial": partial,
+    # Any message of the conversation can be answered: the page fills To and Cc from its sender and recipients,
+    # leaving out our own address ("me").
+    return JSONResponse({"messages": out, "subject": msg.get("subject"), "partial": partial, "me": self_address(),
                          "channels": known_channels(kol_address, texts), "kol_address": kol_address,
                          "kol_name": display_name(kol_msg) if kol_msg else "",
                          "reply_target": {"mailbox": target["mailbox"], "email_id": target["email_id"],
@@ -5759,16 +5913,22 @@ class ReplyRefused(Exception):
 
 
 async def gather_reply_context(mailbox: str, email_id: str) -> dict:
+    """What a reply to this message is drafted from. The message may be ours (a follow-up the other side has not
+    answered): it is then shown to the model as our email, never as the KOL's words."""
     msg = await load_body(bg, mailbox, email_id)
-    kol = sender_address(msg.get("sender", ""))
-    if not kol or is_skippable(msg):
-        raise ReplyRefused("这封邮件没有可回复的 KOL 发件人")
-    ours, earlier = await indexed_history(kol, msg.get("message_id"))
-    t = cache.get(msg.get("message_id") or "") or {}
+    own = sender_address(msg.get("sender", "")) == self_address()
+    kol = main_address(msg) if own else ("" if is_skippable(msg) else sender_address(msg.get("sender", "")))
+    if not kol:
+        raise ReplyRefused("这封邮件没有可回复的对方")
+    ours, earlier = await indexed_history(kol, msg.get("message_id"), subject=norm_subject(msg.get("subject")))
+    if own:
+        ours = [m for m in ours if m.get("message_id") != msg.get("message_id")]
+    t = {} if own else cache.get(msg.get("message_id") or "") or {}
     zh = t.get("body_zh") if t.get("body_zh") and t.get("body_hash") == body_hash(msg.get("body", "")) else ""
-    found = await email_materials([{**msg, "mailbox": mailbox}] + earlier)
+    found = await email_materials(([] if own else [{**msg, "mailbox": mailbox}]) + earlier)
     return {"mailbox": mailbox, "email_id": email_id, "kol": kol, "msg": msg, "zh": zh or "", "earlier": earlier,
-            "ours": ours, "subject": reply_subject(msg.get("subject") or ""), "materials": found}
+            "ours": ours, "subject": reply_subject(msg.get("subject") or ""), "materials": found,
+            **({"own_target": True} if own else {})}
 
 
 HISTORY_THEIRS = 10  # the KOL's earlier emails a draft sees (channel data is often a few mails back)
@@ -5776,18 +5936,28 @@ HISTORY_OURS = 6     # our own earlier emails to them
 
 
 async def indexed_history(kol: str, exclude_message_id: str | None, limit: int = HISTORY_THEIRS,
-                          ours_limit: int = HISTORY_OURS) -> tuple[list[dict], list[dict]]:
-    """(our last one-to-one mails to them, their earlier mails), newest first, from the warm folder indexes and the
-    body cache the conversation view already filled. Searching IMAP per folder costs seconds per call, so the live
-    searches are only the fallback when the indexes know nothing about this person. Each of their mails carries the
-    "mailbox" it is in, so its attachments can be read."""
-    members = await thread_members(kol)
-    if not members:
+                          ours_limit: int = HISTORY_OURS, subject: str | None = None) -> tuple[list[dict], list[dict]]:
+    """(our last mails to them, their earlier mails), newest first, from the warm folder indexes and the body cache
+    the conversation view already filled. Ours are the one-to-one mails to kol plus, with a subject, every mail of
+    that conversation (conversation_members): an agency or a second address on Cc is part of the history the draft
+    reads. Searching IMAP per folder costs seconds per call, so the live searches are only the fallback when the
+    indexes know nothing about this person. Each of their mails carries the "mailbox" it is in, so its attachments
+    can be read."""
+    entries = await indexed_entries()
+    members = await thread_members(kol, entries)
+    linked = await conversation_members(kol, subject, entries) if subject is not None else []
+    if not members and not linked:
         return (await bg.sent_to(kol, limit=ours_limit),
                 await bg.received_from(kol, exclude_message_id, limit=limit, max_body=30000))
+    in_thread = {message_identity(box, e) for box, e in linked}
+    seen: set[str] = set()
+    members = [m for m in members + linked
+               if message_identity(*m) not in seen and not seen.add(message_identity(*m))]
     mine = [m for m in members if m[0] == sent_box()
-            and [sender_address(r) for r in m[1].get("recipients") or []] == [kol]]
+            and ([sender_address(r) for r in m[1].get("recipients") or []] == [kol]
+                 or message_identity(*m) in in_thread)]
     theirs = [m for m in members if m[0] != sent_box() and not is_bounce(m[1])
+              and sender_address(m[1].get("sender") or "") != self_address()
               and not (exclude_message_id and m[1].get("message_id") == exclude_message_id)]
     mine = sorted(mine, key=thread_when, reverse=True)[:ours_limit]
     theirs = sorted(theirs, key=thread_when, reverse=True)[:limit]
@@ -6064,7 +6234,8 @@ async def propose_strategies(ctx: dict, notes: str) -> dict:
         parts.append(section(boundary, "OWNER_NOTES", notes))
     result = await run_claude(system, "\n\n".join(parts), replyflow.STRATEGY_SCHEMA, DRAFT_MODEL, timeout=300)
     situation, options, recommended = replyflow.clean_options(result)
-    return {"situation_zh": situation, "options": options, "recommended": recommended}
+    return {"person_zh": replyflow.person_text(result), "situation_zh": situation, "options": options,
+            "recommended": recommended}
 
 
 def clean_reply(text: str, channel: str) -> tuple[str, list[str]]:
@@ -6077,27 +6248,43 @@ def clean_reply(text: str, channel: str) -> tuple[str, list[str]]:
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip(), warnings
 
 
+def history_section(boundary: str, history: list[str] | None) -> list[str]:
+    """The owner's earlier rounds of feedback on this reply, oldest first, as one section (none when there are none)."""
+    rounds = [t for t in history or [] if t and t.strip()]
+    if not rounds:
+        return []
+    return [section(boundary, "OWNER_EARLIER_FEEDBACK",
+                    "\n\n".join(f"Round {n}:\n{t.strip()}" for n, t in enumerate(rounds, 1)))]
+
+
 async def write_draft(ctx: dict, *, mode: str = "draft", strategy: dict | None = None, notes: str = "",
-                      previous: str = "", feedback: str = "", broken: str = "") -> dict:
-    """broken: the rules PREVIOUS_DRAFT broke (compliance.revision_brief); the draft is then rewritten in MODE comply.
-    A ctx from compose_context makes it a new email (replyflow.compose_system), which also gets a subject."""
+                      previous: str = "", feedback: str = "", broken: str = "", history: list[str] | None = None,
+                      missed: list[str] | None = None) -> dict:
+    """broken: the rules PREVIOUS_DRAFT broke (compliance.revision_brief) and missed: the owner's instructions it
+    does not carry out yet (owner_check); with either, the draft is rewritten in MODE comply. history: the owner's
+    earlier rounds of feedback on this reply, oldest first, which still hold. A ctx from compose_context makes it a
+    new email (replyflow.compose_system), which also gets a subject."""
     boundary = secrets.token_hex(8)
     channel = ctx.get("channel", "email")
     compose = bool(ctx.get("compose"))
     system = (replyflow.compose_system if compose else replyflow.draft_system)(
         **prompt_args(boundary), signature=SIGNATURE, channel=channel)
-    parts = [f"MODE: {('comply translate' if mode == 'translate' else 'comply') if broken else mode}",
+    fixing = bool(previous and (broken or missed))
+    parts = [f"MODE: {('comply translate' if mode == 'translate' else 'comply') if fixing else mode}",
              *(replyflow.compose_sections if compose else replyflow.context_sections)(boundary, ctx)]
     if strategy:
         parts.append(section(boundary, "CHOSEN_STRATEGY", replyflow.strategy_text(strategy)))
     if notes:
         parts.append(section(boundary, "OWNER_NOTES", notes))
-    if previous and (feedback or broken):
+    parts += history_section(boundary, history)
+    if previous and (feedback or fixing):
         parts.append(section(boundary, "PREVIOUS_DRAFT", previous))
     if previous and feedback:
         parts.append(section(boundary, "OWNER_FEEDBACK", feedback))
     if previous and broken:
         parts.append(section(boundary, "COMPLIANCE_FEEDBACK", broken))
+    if previous and missed:
+        parts.append(section(boundary, "OWNER_NOT_DONE", "\n".join(f"- {m}" for m in missed)))
     result = await run_claude(system, "\n\n".join(parts), replyflow.COMPOSE_SCHEMA if compose else replyflow.DRAFT_SCHEMA,
                               DRAFT_MODEL, timeout=300)
     reply, warnings = clean_reply(result["reply_body"], channel)
@@ -6110,13 +6297,14 @@ async def write_draft(ctx: dict, *, mode: str = "draft", strategy: dict | None =
     return out
 
 
-async def chat_about_draft(ctx: dict, previous: str, feedback: str) -> dict:
-    """The phone conversation: a question, a change request or both. Returns the answer and maybe a new draft."""
+async def chat_about_draft(ctx: dict, previous: str, feedback: str, history: list[str] | None = None) -> dict:
+    """The phone conversation: a question, a change request or both. Returns the answer and maybe a new draft.
+    history: the owner's earlier change requests for this reply, which still hold."""
     boundary = secrets.token_hex(8)
     channel = ctx.get("channel", "email")
     system = replyflow.chat_system(**prompt_args(boundary), signature=SIGNATURE, channel=channel)
-    parts = [*replyflow.context_sections(boundary, ctx), section(boundary, "PREVIOUS_DRAFT", previous),
-             section(boundary, "OWNER_FEEDBACK", feedback)]
+    parts = [*replyflow.context_sections(boundary, ctx), *history_section(boundary, history),
+             section(boundary, "PREVIOUS_DRAFT", previous), section(boundary, "OWNER_FEEDBACK", feedback)]
     result = await run_claude(system, "\n\n".join(parts), replyflow.CHAT_SCHEMA, DRAFT_MODEL, timeout=300)
     revised = str(result.get("revised_body") or "").strip()
     out = {"answer_zh": str(result.get("answer_zh") or "").strip(), "reply_body": "", "warnings": [],
@@ -6166,24 +6354,52 @@ async def side_by_side(text: str) -> dict:
 
 
 async def checked_draft(ctx: dict, *, mode: str = "draft", strategy: dict | None = None, notes: str = "",
-                        previous: str = "", feedback: str = "") -> tuple[dict, dict]:
-    """write_draft held to the hard rules (enforce_rules): the draft and its Chinese side-by-side."""
-    draft = await write_draft(ctx, mode=mode, strategy=strategy, notes=notes, previous=previous, feedback=feedback)
-    return await enforce_rules(ctx, draft, mode=mode, strategy=strategy, notes=notes, feedback=feedback)
+                        previous: str = "", feedback: str = "", history: list[str] | None = None) -> tuple[dict, dict]:
+    """write_draft held to the owner's instructions and the hard rules (enforce_rules): the draft and its Chinese
+    side-by-side."""
+    draft = await write_draft(ctx, mode=mode, strategy=strategy, notes=notes, previous=previous, feedback=feedback,
+                              history=history)
+    return await enforce_rules(ctx, draft, mode=mode, strategy=strategy, notes=notes, feedback=feedback,
+                               history=history)
 
 
 def unchecked(draft: dict, why: str) -> dict:
     return {**draft, "warnings": [*draft.get("warnings", []), f"⚠️ 这版没做合规检查：{why}"],
-            "compliance": {"checked": False, "ok": False, "revisions": 0, "fixed": [], "broken": []}}
+            "compliance": {"checked": False, "ok": False, "revisions": 0, "fixed": [], "broken": [],
+                           "waived": [], "missed": []}}
+
+
+# The regex check of the owner's wording stands in for owner_check only when owner_check cannot run.
+SUPERSEDED_BY_OWNER_CHECK = {"owner_wording"}
+
+
+async def owner_check(owner: list[str], body: str, zh: str,
+                      flags: list[compliance.Violation]) -> tuple[set[str], list[str]]:
+    """(the flagged rules the owner's instructions asked for or allowed, the owner's instructions the draft does not
+    carry out yet), judged by a model that is shown the owner's words, the draft and its Chinese, and the flags.
+    The owner's word is final: a rule they overrode is never rewritten back."""
+    boundary = secrets.token_hex(8)
+    system = replyflow.OWNER_CHECK_SYSTEM.replace("{owner}", OWNER).replace("{boundary}", boundary)
+    items = [{"id": v.rule, "rule": v.title_zh, "evidence": v.evidence} for v in flags]
+    user = "\n\n".join([section(boundary, "OWNER_INSTRUCTIONS", json.dumps(owner, ensure_ascii=False)),
+                        section(boundary, "DRAFT", body), section(boundary, "DRAFT_ZH", zh),
+                        section(boundary, "FLAGS", json.dumps(items, ensure_ascii=False))])
+    result = await run_claude(system, user, replyflow.OWNER_CHECK_SCHEMA, DRAFT_MODEL, timeout=180)
+    return replyflow.owner_verdict(result, {v.rule for v in flags})
 
 
 async def enforce_rules(ctx: dict, draft: dict, *, mode: str = "draft", strategy: dict | None = None, notes: str = "",
-                        feedback: str = "", rewrites: int | None = None) -> tuple[dict, dict]:
-    """The draft and its side-by-side, checked against rules/negotiation_rules.yaml (compliance.py). A draft that
-    breaks a rule is rewritten with the broken rules as the brief, at most max_revisions times (rewrites=0: check
-    only); whatever is still broken then is flagged to the owner in warnings and draft["compliance"]. Rules no
-    rewrite can settle (amounts the owner must approve) go into needs_approval_zh. The owner's notes and feedback
-    are kept in every rewrite. Nothing about the check (a broken rule file, a failed rewrite) ever loses the draft."""
+                        feedback: str = "", rewrites: int | None = None,
+                        history: list[str] | None = None) -> tuple[dict, dict]:
+    """The draft and its side-by-side, held to the owner's instructions first and to rules/negotiation_rules.yaml
+    (compliance.py) second. Whenever the owner said anything for this reply (notes, earlier feedback, feedback),
+    owner_check decides which flagged rules the owner asked for (those stay, and are only mentioned) and which of
+    the owner's instructions the draft has not carried out. A draft that breaks a rule on its own or misses an
+    instruction is rewritten with both as the brief, at most max_revisions times (rewrites=0: check only); what is
+    still wrong then is flagged in warnings and draft["compliance"]. When owner_check cannot run, nothing is
+    rewritten: the flags only go to the owner, who decides. Rules no rewrite can settle (amounts the owner must
+    approve) go into needs_approval_zh. Nothing about the check (a broken rule file, a failed rewrite) ever loses
+    the draft."""
     pairs = await side_by_side(draft["reply_body"])
     try:
         rules = compliance.load()
@@ -6191,27 +6407,44 @@ async def enforce_rules(ctx: dict, draft: dict, *, mode: str = "draft", strategy
     except (compliance.RulesError, OSError) as e:
         log("compliance check skipped", err_text(e))
         return unchecked(draft, err_text(e)), pairs
-    owner = [t for t in (notes, feedback) if t]
+    owner = replyflow.owner_instructions(notes, history, feedback)
     limit = rules.max_revisions if rewrites is None else rewrites
     notes_zh, warnings = draft.get("notes_zh", ""), list(draft.get("warnings", []))
     fixed: list[str] = []
+    waived: dict[str, str] = {}  # title -> the text the owner asked for
+    missed: list[str] = []
+    held: list[compliance.Violation] = []  # flagged while owner_check could not run: left to the owner
     revisions = 0
     while True:
+        zh = "\n\n".join(r["zh"] for r in pairs["rows"] if not r.get("failed"))
         try:
             found = compliance.check(draft["reply_body"], compliance.context_for(
-                ctx, signature=SIGNATURE, playbook=playbook, owner_texts=owner,
-                zh="\n\n".join(r["zh"] for r in pairs["rows"] if not r.get("failed")),
+                ctx, signature=SIGNATURE, playbook=playbook, owner_texts=owner, zh=zh,
                 needs_approval=draft.get("needs_approval_zh", "")), rules)
         except Exception as e:  # noqa: BLE001  a rule that trips over this text never stops the draft
             log("compliance check failed", err_text(e))
             return unchecked({**draft, "notes_zh": notes_zh, "warnings": warnings}, f"检查出错：{err_text(e)}"), pairs
         broken = [v for v in found if v.action == "revise"]
-        if not broken or revisions >= limit:
+        missed = []
+        if owner:
+            flags = [v for v in broken if v.check not in SUPERSEDED_BY_OWNER_CHECK]
+            try:
+                allowed, missed = await owner_check(owner, draft["reply_body"], zh, flags)
+            except ClaudeError as e:
+                log("owner check failed", err_text(e))
+                warnings.append(f"核对“是否照你的意见改”时出错（{err_text(e)}），这版没有自动改写")
+                held, broken = broken, []
+                break
+            waived = {v.title_zh: " / ".join(v.evidence) for v in flags if v.rule in allowed}  # in this version
+            broken = [v for v in flags if v.rule not in allowed]
+        if (not broken and not missed) or revisions >= limit:
             break
-        log("draft breaks rules, rewriting", revisions + 1, ",".join(v.rule for v in broken))
+        log("draft sent back, rewriting", revisions + 1, ",".join(v.rule for v in broken),
+            f"{len(missed)} owner instruction(s) not done" if missed else "")
         try:
             rewritten = await write_draft(ctx, mode=mode, strategy=strategy, notes=notes, feedback=feedback,
-                                          previous=draft["reply_body"], broken=compliance.revision_brief(broken))
+                                          previous=draft["reply_body"], broken=compliance.revision_brief(broken),
+                                          history=history, missed=missed)
             rewritten_pairs = await side_by_side(rewritten["reply_body"])
         except ClaudeError as e:
             log("compliance rewrite failed", err_text(e))
@@ -6225,14 +6458,22 @@ async def enforce_rules(ctx: dict, draft: dict, *, mode: str = "draft", strategy
     done = [t for t in fixed if t not in still]
     if done:
         warnings.append(f"合规检查自动改写了 {revisions} 次，已改掉：{'；'.join(done)}")
+    if waived:
+        warnings.append(f"已按你的意见保留：{'；'.join(waived)}")
     if broken:
         warnings.append(f"⚠️ 合规检查没通过（自动改写 {revisions} 次后仍违反），请人工改过再发：{compliance.summary_zh(broken)}")
+    if missed:
+        after = f"（自动改写 {revisions} 次后）" if revisions else ""
+        warnings.append(f"⚠️ 你的意见还有没做到的{after}，请直接改正文或再提一次：{'；'.join(missed)}")
+    if held:
+        warnings.append(f"规则检查提示（是你要求的就不用管）：{compliance.summary_zh(held)}")
     return {**draft, "notes_zh": notes_zh, "warnings": warnings,
             "needs_approval_zh": materials.merge_approval(draft.get("needs_approval_zh", ""),
                                                           compliance.review_notes(found)),
-            "compliance": {"checked": True, "ok": not broken, "revisions": revisions, "fixed": done,
+            "compliance": {"checked": True, "ok": not (broken or missed or held), "revisions": revisions,
+                           "fixed": done, "waived": list(waived), "missed": missed,
                            "broken": [{"rule": v.rule, "title_zh": v.title_zh, "evidence": v.evidence}
-                                      for v in broken]}}, pairs
+                                      for v in broken + held]}}, pairs
 
 
 def reply_error(e: Exception):
@@ -6243,12 +6484,23 @@ def reply_error(e: Exception):
     return bad(err_text(e), 502)
 
 
+def with_recipients(ctx: dict, body: dict) -> dict:
+    """The reply context plus who the page says this reply goes to (To and Cc as typed; wrong entries are left out
+    here, the send refuses them), so the draft greets the right person."""
+    to, _ = addresses(body.get("to"))
+    cc, _ = addresses(body.get("cc"))
+    me = self_address()
+    to = [a for a in to if a != me][:COMPOSE_MAX_RECIPIENTS]
+    cc = [a for a in cc if a != me and a not in to][:COMPOSE_MAX_RECIPIENTS]
+    return {**ctx, "reply_to": {"to": to, "cc": cc}} if to else ctx
+
+
 async def api_reply_strategies(request: Request):
     body = await request.json()
     try:
         token, ctx = await reply_context(body)
         with feed.working("thinking"):
-            result = await propose_strategies(ctx, (body.get("notes") or "").strip())
+            result = await propose_strategies(with_recipients(ctx, body), (body.get("notes") or "").strip())
     except (ReplyRefused, OSError, ClaudeError) as e:
         return reply_error(e)
     return JSONResponse({"ctx": token, "to": ctx["kol"], "reply_subject": ctx["subject"], **result})
@@ -6260,6 +6512,7 @@ async def api_reply_draft(request: Request):
     notes, feedback = (body.get("notes") or "").strip(), (body.get("feedback") or "").strip()
     previous = (body.get("previous_body") or "").strip()
     strategy = body.get("strategy") if isinstance(body.get("strategy"), dict) else None
+    history = replyflow.clean_history(body.get("feedback_history")) if previous and feedback else []
     if mode == "translate" and not notes:
         return bad("先在输入框里写好中文回复")
     if mode == "draft" and not (strategy or (previous and feedback)):
@@ -6267,8 +6520,8 @@ async def api_reply_draft(request: Request):
     try:
         token, ctx = await reply_context(body)
         with feed.working("thinking"):
-            draft, pairs = await checked_draft(ctx, mode=mode, strategy=strategy, notes=notes, previous=previous,
-                                               feedback=feedback)
+            draft, pairs = await checked_draft(with_recipients(ctx, body), mode=mode, strategy=strategy, notes=notes,
+                                               previous=previous, feedback=feedback, history=history)
     except (ReplyRefused, OSError, ClaudeError) as e:
         return reply_error(e)
     return JSONResponse({"ctx": token, "to": ctx["kol"], "reply_subject": ctx["subject"], **draft, "pairs": pairs})
@@ -6373,6 +6626,7 @@ async def api_compose_draft(request: Request):
     mode = "translate" if body.get("mode") == "translate" else "draft"
     notes, feedback = (body.get("notes") or "").strip(), (body.get("feedback") or "").strip()
     previous = (body.get("previous_body") or "").strip()
+    history = replyflow.clean_history(body.get("feedback_history")) if previous and feedback else []
     if mode == "translate" and not notes:
         return bad("先在要点框里写好中文邮件")
     if mode == "draft" and not (notes or (previous and feedback)):
@@ -6380,7 +6634,8 @@ async def api_compose_draft(request: Request):
     try:
         token, ctx = await compose_context(body)
         with feed.working("thinking"):
-            draft, pairs = await checked_draft(ctx, mode=mode, notes=notes, previous=previous, feedback=feedback)
+            draft, pairs = await checked_draft(ctx, mode=mode, notes=notes, previous=previous, feedback=feedback,
+                                               history=history)
             # the subject that will show in the field: the owner's own, or the one the model wrote
             subject = ctx["subject"] or draft.get("subject") or ""
             subject_zh, subject_ok = await subject_side_by_side(subject)
@@ -6391,7 +6646,10 @@ async def api_compose_draft(request: Request):
                          "pairs": pairs})
 
 
-DRAFT_FIELDS = ("notes", "to", "subject", "body", "lang", "summary", "approval", "feedback", "cc", "language")
+# bcc and target (the answered message, "mailbox\nemail_id") belong to a reply; feedback_log is the JSON list of the
+# owner's earlier rounds of feedback on this draft.
+DRAFT_FIELDS = ("notes", "to", "subject", "body", "lang", "summary", "approval", "feedback", "cc", "language",
+                "bcc", "target", "feedback_log")
 DRAFT_LIMIT = 50_000  # characters of one field; a reply is a few thousand
 
 
@@ -6469,13 +6727,23 @@ async def api_reply_unupload(request: Request):
 
 
 async def api_send(request: Request):
+    """A reply to one message of a conversation (any of them, ours included), to whoever the owner put in To, Cc and
+    Bcc. It is threaded under that message (In-Reply-To, References)."""
     body = await request.json()
     mailbox, email_id = body.get("mailbox"), str(body.get("email_id", ""))
-    to = (body.get("to") or "").strip().lower()
+    to, wrong = addresses(body.get("to"))
+    cc, wrong_cc = addresses(body.get("cc"))
+    bcc, wrong_bcc = addresses(body.get("bcc"))
+    cc = [a for a in cc if a not in to]
+    bcc = [a for a in bcc if a not in to and a not in cc]
     subject = strip_hidden(re.sub(r"[\r\n]+", " ", body.get("subject") or "")).strip()
     text = strip_hidden((body.get("body") or "").replace("\r\n", "\n")).strip()
+    if wrong or wrong_cc or wrong_bcc:
+        return bad("这些不像邮箱地址：" + "、".join(wrong + wrong_cc + wrong_bcc))
     if not (mailbox and email_id.isdigit() and subject and text and to):
         return bad("收件人、主题和正文都不能为空")
+    if len(to) + len(cc) + len(bcc) > COMPOSE_MAX_RECIPIENTS:
+        return bad(f"收件人、抄送、密送加起来最多 {COMPOSE_MAX_RECIPIENTS} 个")
     try:
         attachments = outbox.resolve(body.get("attachments") or [])
     except (outgoing.AttachmentError, OSError) as e:
@@ -6486,12 +6754,24 @@ async def api_send(request: Request):
     sending_ids.update(ids)
     try:
         with feed.working("sending"):
-            return await send_reply(body, mailbox, email_id, to, subject, text, attachments)
+            return await send_reply(body, mailbox, email_id, Recipients(to, cc, bcc), subject, text, attachments)
     finally:
         sending_ids.difference_update(ids)
 
 
-async def send_reply(body: dict, mailbox: str, email_id: str, to: str, subject: str, text: str, attachments: list):
+@dataclasses.dataclass
+class Recipients:
+    to: list[str]
+    cc: list[str]
+    bcc: list[str]
+
+    @property
+    def all(self) -> list[str]:
+        return self.to + self.cc + self.bcc
+
+
+async def send_reply(body: dict, mailbox: str, email_id: str, who: Recipients, subject: str, text: str,
+                     attachments: list):
     if DEV:
         return bad("开发模式不发送邮件")
     try:
@@ -6501,33 +6781,42 @@ async def send_reply(body: dict, mailbox: str, email_id: str, to: str, subject: 
         for key in [k for k in lists if k[0] == mailbox]:
             lists.pop(key, None)
         raise
-    kol = sender_address(msg.get("sender", ""))
-    if not kol or is_skippable(msg):
-        return bad("找不到可回复的收件人")
-    if to != kol:
-        return bad(f"收件人不一致：草稿是写给 {to} 的，但当前邮件的发件人是 {kol}，已拦截发送")
+    if self_address() in who.all:
+        return bad("收件人里有你自己的邮箱，去掉再发")
     if text_hash(text) not in checked_texts:
         return bad("正文和中文对照对不上（改过正文，或者对照没生成成功），先点“更新对照”核对后再发")
-    close_cases_for("email", kol)  # before sending: a phone confirmation arriving now must find the case closed
+    # The saved draft and the KOL总表 row go by the person the conversation is filed under (the page's draft key);
+    # a reply that leaves them out is filed under its first To.
+    key = draft_address(body.get("draft_key"))
+    key = key if key and key != COMPOSE_KEY else main_address(msg) or who.to[0]
+    filed = key if key in who.all else who.to[0]
+    # The people answered (To, and the conversation's own person wherever they are): a phone case still open for
+    # them is answered by this mail. Someone only copied keeps theirs. Done before sending, so a phone confirmation
+    # arriving now finds it closed.
+    for address in dict.fromkeys(who.to + ([key] if key in who.all else [])):
+        close_cases_for("email", address)
+    account = current_account.get()
     refs = " ".join(x for x in [msg.get("references"), msg.get("message_id")] if x)
     try:
         extra = {"timeout": 420} if attachments else {}
-        result = await mail.send(recipients=[kol], subject=subject, **mail_args(text, [str(p) for p in attachments]),
+        result = await mail.send(recipients=who.to, subject=subject, **mail_args(text, [str(p) for p in attachments]),
+                                 **({"cc": who.cc} if who.cc else {}), **({"bcc": who.bcc} if who.bcc else {}),
                                  in_reply_to=msg.get("message_id"), references=refs or None, **extra)
     except MailError as e:
         # The connection may have dropped after SMTP accepted the message: treat as "maybe sent", never retry blindly.
-        log("send outcome unknown", kol, err_text(e))
-        cache.draft_uncertain(current_account.get(), kol)
+        log("send outcome unknown", ",".join(who.to), err_text(e))
+        cache.draft_uncertain(account, key)
         return JSONResponse({"error": f"发送结果不确定：{err_text(e)}", "uncertain": True}, status_code=502)
-    delivered, warning, message_id = send_outcome(result, [kol])
+    delivered, warning, message_id = send_outcome(result, who.all)
     if not delivered:
-        log("send not confirmed", kol, result[:200])
-        cache.draft_uncertain(current_account.get(), kol)
+        log("send not confirmed", ",".join(who.to), result[:200])
+        cache.draft_uncertain(account, key)
         return JSONResponse({"error": f"发送结果不确定：{result[:300]}", "uncertain": True}, status_code=502)
-    log("sent reply to", kol, f"with {len(attachments)} attachment(s)" if attachments else "",
+    log("sent reply to", ",".join(who.to), f"cc {','.join(who.cc)}" if who.cc else "",
+        f"bcc {len(who.bcc)}" if who.bcc else "", f"with {len(attachments)} attachment(s)" if attachments else "",
         f"(no Sent copy: {result[:200]})" if warning else "")
     try:  # the mail is out: bookkeeping problems below must never look like a failed send (and invite a resend)
-        cache.drop_draft(current_account.get(), kol)  # sent: the saved draft must not come back as unsent work
+        cache.drop_draft(account, key)  # sent: the saved draft must not come back as unsent work
         for item in body.get("attachments") or []:
             outbox.remove(str(item))
         sent_changed()  # reopening the conversation must show this reply, or it invites a second send
@@ -6535,12 +6824,14 @@ async def send_reply(body: dict, mailbox: str, email_id: str, to: str, subject: 
         zh = body.get("body_zh")
         zh = strip_hidden(zh).strip() if isinstance(zh, str) else ""
         note = f"（附件 {len(attachments)} 个）" if attachments else ""
-        if is_primary():  # KOL总表 follows the primary mailbox only
-            sheet_guard("记录回信", sheet_after_send, kol, subject, "我方回信" + note + "：" + gist(zh or text), "",
-                        message_id)
+        company = (CFG["mail"].get("company_domain") or "").lower()
+        if is_primary() and not (company and filed.endswith(company)):  # KOL总表: primary mailbox, no colleagues
+            # One row, the conversation's; the Message-ID only for a mail to one person, as for a new email.
+            sheet_guard("记录回信", sheet_after_send, filed, subject, "我方回信" + note + "：" + gist(zh or text), "",
+                        message_id if len(who.all) == 1 else None)
     except Exception as e:  # noqa: BLE001
-        log("after-send bookkeeping failed", kol, err_text(e))
-    return JSONResponse({"ok": True, "to": kol, "warning": warning})
+        log("after-send bookkeeping failed", ",".join(who.to), err_text(e))
+    return JSONResponse({"ok": True, "to": who.to, "cc": who.cc, "bcc": who.bcc, "warning": warning})
 
 
 async def api_compose_send(request: Request):
@@ -6625,6 +6916,908 @@ async def send_new(body: dict, to: list[str], cc: list[str], subject: str, text:
     return JSONResponse({"ok": True, "to": to, "cc": cc, "warning": warning})
 
 
+# ---------------------------------------------------------------- 私信 (Telegram and Discord)
+# The owner's private chats with KOLs, kept in chats.py. Telegram comes in through this app's own login (tg): each
+# burst telegram_loop waits for, plus a look at the most recent private chats every TG_SYNC_EVERY seconds, which also
+# catches what the owner typed in the Telegram app. Discord comes from the browser extension (extension/discord),
+# which posts the DM the owner has open. Every message of a chat linked to a KOL总表 row goes to 沟通记录 like a mail
+# (sheet_post) and to 私信记录, the transcript the triage task reads to judge stage and intent. A reply is drafted
+# like a mail reply (checked_draft, side_by_side) and only goes out once its Chinese side-by-side was verified:
+# Telegram replies are sent from here, Discord replies wait in a queue until the extension puts them into Discord's
+# input box, where the owner presses Enter.
+
+CHATS = chats.Store(DATA / "chats.sqlite3")
+CHAT_RECORD = AUTOREPLY_RECORD.parent / "私信记录"  # next to 自动回复记录.md, in the folder the triage task reads
+TG_SYNC_EVERY = 120      # seconds between looks at the recent Telegram chats
+TG_SYNC_TOP = 8          # the most recent private chats read each time, plus any with unread messages
+TG_SYNC_FIRST = 60       # ... and on the first look after a start
+TG_SYNC_HISTORY = 30     # messages read of a chat
+CHAT_CONTEXT_MSGS = 80   # messages of a chat a draft sees
+CHAT_TRANSLATE_BATCH = 40
+CHAT_SEND_GAP = (2.5, 4.5)  # seconds between the parts of one Telegram reply, varied like a person typing
+EXT_TOKEN_FILE = DATA / "ext_token"
+EXT_ORIGINS = ("chrome-extension://", "moz-extension://", "extension://")
+EXT_MAX_MESSAGES = 80
+DISCORD_ID = chats.DISCORD_ID
+CHAT_SENT_KEEP = 3600    # seconds a reply sent (or maybe sent) is remembered, so the same text never goes twice
+POPO_EVERY = timedelta(hours=2)  # the owner's rule (2026-10-29): POPO follows KOL总表 every two working hours
+chat_contexts: dict[str, tuple[float, dict]] = {}
+chat_locks: dict[str, asyncio.Lock] = {}
+chat_send_locks: dict[str, asyncio.Lock] = {}
+chat_sent: dict[tuple[str, str], float] = {}  # (chat key, text_hash) -> when it went out or may have
+chat_rows_cache: dict = {"at": 0.0, "rows": [], "error": None}
+tg_me: dict = {}
+ext_token_cache: list[str] = []
+
+
+def chat_lock(key: str) -> asyncio.Lock:
+    return chat_locks.setdefault(key, asyncio.Lock())
+
+
+def tg_message(m) -> dict | None:
+    """A telegram-mcp message as chats.py stores it."""
+    if not isinstance(m, dict) or not isinstance(m.get("id"), int):
+        return None
+    extra = {k: m[k] for k in ("media", "web_preview", "forwarded", "transcript") if m.get(k)}
+    return {"id": str(m["id"]), "at": m.get("date"), "out": bool(m.get("out")), "author": m.get("sender") or "",
+            "text": m.get("text") or "", "extra": extra}
+
+
+def tg_private(chat_id, username="") -> bool:
+    """A one-to-one chat with a person: not a group or channel (negative ids), not Telegram's own accounts, not a bot
+    (bot usernames end in "bot"), not Saved Messages."""
+    return isinstance(chat_id, int) and not isinstance(chat_id, bool) and chat_id > 0 \
+        and chat_id not in TG_SERVICE_CHATS and not str(username or "").lower().endswith("bot") \
+        and chat_id != tg_me.get("id")
+
+
+def tg_results(data) -> list[dict]:
+    rows = data.get("results") if isinstance(data, dict) else data
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+
+async def tg_sync_chat(chat_id: int, name: str = "", username: str = "") -> int:
+    """Read a Telegram chat's recent messages into chats.py; returns how many were new."""
+    history = await tg.call("get_history", timeout=60, chat_id=chat_id, limit=TG_SYNC_HISTORY)
+    msgs = history.get("results") if isinstance(history, dict) else None
+    if not isinstance(msgs, list):
+        raise MailError(f"读取 Telegram 聊天记录失败：{str(history)[:200]}")
+    theirs = [m for m in msgs if isinstance(m, dict) and not m.get("out")]
+    name = name or next((str(m.get("sender") or "") for m in theirs if m.get("sender")), "")
+    username = username or next((str(m.get("username") or "") for m in theirs if m.get("username")), "")
+    key = f"tg:{chat_id}"
+    CHATS.upsert_conv(key, peer_id=chat_id, peer_name=name, username=username)
+    new = CHATS.add_messages(key, [x for x in map(tg_message, msgs) if x])
+    chat_autolink(key)
+    if new:
+        spawn(chat_record(key), "记录私信")
+    return len(new)
+
+
+AUTOLINK_RECENT = timedelta(hours=1)  # what a chat linked by its 聊天账号 brings into 沟通记录 from before the link
+
+
+def chat_autolink(key: str):
+    """A chat whose account KOL总表 already lists (聊天账号, written by the owner, a Claude session or an earlier link)
+    is linked without asking. Its older messages were recorded by whoever wrote that account in, so only the last
+    hour's go to 沟通记录."""
+    conv = CHATS.conv(key)
+    if not conv or conv["ignored"] or conv.get("no_autolink") or chat_linked(conv):
+        return  # no_autolink: the owner unlinked it by hand
+    row = chats.token_row(conv, chat_rows_cache["rows"])
+    if not row:
+        return
+    CHATS.link(key, row["id"], row["kol"], row["email"])
+    CHATS.skip_old(key, datetime.now(timezone.utc) - AUTOLINK_RECENT)
+    log("chat linked by its account", key, row["id"])
+    spawn(chat_catch_up(key), "补记私信")
+
+
+SHEET_LOG_SLACK = timedelta(minutes=2)  # a row typed in a session carries the time it was written, not the message's
+
+
+def sheet_time(value) -> datetime | None:
+    """A 沟通记录 time ("2026-10-29 12:06", local time without a zone) as an aware datetime."""
+    try:
+        d = datetime.fromisoformat(str(value or "").strip().replace(" ", "T"))
+    except ValueError:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=autoreply.TZ)
+
+
+async def chat_catch_up(key: str):
+    """A linked chat's messages after the newest 沟通记录 row of this KOL in this channel (written by a Claude session,
+    by hand or by us) go to the sheet; everything up to that row is already there. Without such a row only the last
+    hour is written. Rows KOL Mail wrote itself carry message ids, so writing one twice changes nothing."""
+    conv = CHATS.conv(key)
+    if not (chat_linked(conv) and conv.get("kol_id") and SHEET_MODE == "legacy" and sheet_enabled()):
+        return
+    label = chats.LABELS[conv["channel"]]
+    logs = (await sheet_get(conv["kol_id"], timeout=120)).get("recent_logs") or []
+    times = [t for t in (sheet_time(r.get("时间")) for r in logs
+                         if isinstance(r, dict) and str(r.get("渠道") or "") == label) if t]
+    if not times:
+        return
+    after = max(times) + SHEET_LOG_SLACK
+    async with chat_lock(key):
+        CHATS.unskip_after(key, after)
+    await chat_record(key)
+
+
+async def tg_resync(chat_id: int, delay: float = 3):
+    """After something went out to a Telegram chat: read it back, so the message reaches 私信 and 沟通记录."""
+    await asyncio.sleep(delay)
+    if tg_private(chat_id):
+        await tg_sync_chat(chat_id)
+
+
+async def tg_sync_loop():
+    """The most recent private Telegram chats, every TG_SYNC_EVERY seconds: new chats show up in 私信, and what the
+    owner typed in the Telegram app reaches 沟通记录 too (telegram_loop only hears the other side)."""
+    first = True
+    while True:
+        try:
+            await asyncio.wait_for(tg.ready.wait(), timeout=TG_SYNC_EVERY)
+        except asyncio.TimeoutError:
+            continue
+        try:
+            if not tg_me.get("id"):  # Saved Messages is a chat with ourselves, never a KOL
+                with contextlib.suppress(MailError):
+                    me = await tg.call("get_me", timeout=30)
+                    me = tg_results(me)[0] if tg_results(me) else me
+                    if isinstance(me, dict) and isinstance(me.get("id"), int):
+                        tg_me["id"] = me["id"]
+            if first:
+                await refresh_chat_rows()  # before the first reads, so 聊天账号 links chats as they come in
+            elif time.time() - chat_rows_cache["at"] >= 300:
+                spawn(refresh_chat_rows(), "读 KOL总表")  # never hold the Telegram reads up on Excel
+            # limit counts groups and channels too (telegram-mcp filters after fetching): ask for more than needed
+            dialogs = tg_results(await tg.call("list_chats", timeout=60, chat_type="user",
+                                               limit=TG_SYNC_FIRST * 2 if first else TG_SYNC_TOP * 5))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001  the next look tries again; 私信 shows the error meanwhile
+            state["chat_tg_error"] = err_text(e)
+            log("telegram chat list failed", err_text(e))
+            await asyncio.sleep(TG_SYNC_EVERY)
+            continue
+        people = [d for d in dialogs if tg_private(d.get("chat_id"), d.get("username"))]
+        failed = []
+        for i, d in enumerate(people[:TG_SYNC_FIRST]):
+            if not (first or i < TG_SYNC_TOP or (d.get("unread") or 0) > 0):
+                continue
+            try:  # one chat that cannot be read never keeps the others out
+                await tg_sync_chat(d["chat_id"], str(d.get("name") or ""), str(d.get("username") or ""))
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                failed.append(f"{chats.plain(d.get('name'), 30)}：{err_text(e)}")
+            if first:
+                await asyncio.sleep(0.5)  # one read after another, not a burst Telegram would throttle
+        if first:  # after a start: whatever a linked chat said that is not in the sheet yet goes in now
+            for conv in CHATS.convs():
+                if chat_linked(conv):
+                    try:
+                        await chat_catch_up(conv["key"])
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:  # noqa: BLE001  the next start tries again
+                        log("chat catch-up failed", conv["key"], err_text(e))
+        first = False
+        state["chat_tg_error"] = f"有 {len(failed)} 个会话没读到，比如 {failed[0]}" if failed else None
+        if failed:
+            log("telegram chat sync: some chats failed", "; ".join(failed)[:300])
+        await asyncio.sleep(TG_SYNC_EVERY)
+
+
+def chat_linked(conv: dict | None) -> bool:
+    return bool(conv and not conv["ignored"] and (conv.get("kol_id") or conv.get("kol_email")))
+
+
+async def chat_record(key: str):
+    """New messages of a linked chat: translated (so 沟通记录 reads in Chinese), then written to KOL总表 and 私信记录.
+    Messages from before the link's backfill window (scrolled up to in Discord, say) never reach the sheet."""
+    async with chat_lock(key):
+        conv = CHATS.conv(key)
+        if not chat_linked(conv):
+            return
+        linked_at = chats.parse_time(conv.get("linked_at"))
+        if linked_at:
+            CHATS.skip_old(key, linked_at - chats.BACKFILL)
+        todo = CHATS.unlogged(key)
+        if not todo:
+            return
+        try:
+            await chat_translate(key, todo)
+        except ClaudeError as e:  # the row goes in anyway, in the original language
+            log("chat translation failed", key, err_text(e))
+        conv = CHATS.conv(key)  # the translation takes a while: unlinked or relinked meanwhile counts
+        if chat_linked(conv):
+            chat_log(conv, CHATS.unlogged(key))
+
+
+def chat_log(conv: dict, todo: list[dict]):
+    if not todo:
+        return
+    key, label = conv["key"], chats.LABELS[conv["channel"]]
+    token = chats.peer_token(conv)
+    for run in chats.runs(todo):
+        last = run[-1]
+        when = chats.parse_time(last["at"]) or datetime.now(timezone.utc)
+        op = {"op": "event", "dir": "out" if last["out"] else "in", "channel": label, "type": label,
+              "summary": ("我方消息：" if last["out"] else "对方消息：") + chats.gist(run),
+              "time": when.astimezone().isoformat(timespec="seconds"), "message_id": f"{key}:{run[0]['id']}"}
+        for field, value in (("id", conv.get("kol_id")), ("email", conv.get("kol_email")), ("chat", token),
+                             ("kol", conv.get("kol_name"))):
+            if value:
+                op[field] = value
+        sheet_post(op)
+    try:
+        chats.append_transcript(CHAT_RECORD, conv, todo, autoreply.TZ)
+    except OSError as e:
+        state["sheet_error"] = f"私信记录写不进去：{err_text(e)}"
+        log("chat transcript not written", key, err_text(e))
+    CHATS.mark_logged(key, [m["id"] for m in todo])
+
+
+async def chat_translate(key: str, msgs: list[dict]) -> int:
+    """Chinese for the messages that have none (one model call per CHAT_TRANSLATE_BATCH); returns how many got it.
+    A message with nothing to translate (Chinese already, a bare link, an emoji) keeps its own words as its zh, and so
+    does one whose translation came back as the original copied (replyflow.translation_ok): neither is asked again."""
+    done = 0
+    todo = []
+    for m in msgs:
+        if m.get("zh") or not (m.get("text") or "").strip():
+            continue
+        if not replyflow.needs_translation(m["text"], "") or not re.search(r"[^\W\d_]", m["text"]):
+            CHATS.set_zh(key, m["id"], m["text"])
+            m["zh"] = m["text"]
+            done += 1
+        else:
+            todo.append(m)
+    for i in range(0, len(todo), CHAT_TRANSLATE_BATCH):
+        part = todo[i:i + CHAT_TRANSLATE_BATCH]
+        boundary = secrets.token_hex(8)
+        system = replyflow.BACKTRANSLATE_SYSTEM.replace("{boundary}", boundary)
+        user = section(boundary, "PARAGRAPHS", json.dumps([m["text"][:2000] for m in part], ensure_ascii=False))
+        result = await run_claude(system, user, replyflow.PARAGRAPHS_SCHEMA, TRANSLATE_MODEL, timeout=180)
+        zh = [str(x) for x in llm.scrub(result.get("zh") or [])]
+        if len(zh) != len(part):
+            log("chat translation dropped: wrong count", key, len(zh), len(part))
+            continue
+        for m, z in zip(part, zh):
+            ok = replyflow.translation_ok(m["text"][:2000], z)
+            if ok or z.strip() == m["text"][:2000].strip():
+                m["zh"] = z.strip() if ok else m["text"]
+                CHATS.set_zh(key, m["id"], m["zh"])
+                done += ok
+    return done
+
+
+async def sheet_list(fields: str) -> list[dict]:
+    proc = await asyncio.create_subprocess_exec(
+        SHEET_PYTHON, str(SHEET_TOOL), "list", "--fields", fields, cwd=str(SHEET_TOOL.parent), env=SHEET_ENV,
+        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), 120)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise
+    data = json.loads(out.decode("utf-8", "replace") or "{}")
+    rows = data.get("rows") if isinstance(data, dict) else None
+    if proc.returncode != 0 or not isinstance(rows, list):
+        raise ValueError(f"kol.py list exit {proc.returncode}: {str(data)[:200]}")
+    return rows
+
+
+# Column sets tried in order: the owner's 总表 (聊天账号 needs migrate_2026_10_29_chat_column.py), then a colleague's
+# mapped sheet, which may only know 邮箱 and 频道链接.
+CHAT_ROW_FIELDS = ("ID,KOL,项目,平台,阶段,邮箱,频道链接,聊天账号", "ID,KOL,项目,平台,阶段,邮箱,频道链接", "邮箱,频道链接")
+
+
+async def chat_rows(force: bool = False) -> list[dict]:
+    """KOL总表 rows a chat can be linked to, cached for 5 minutes: {"id", "kol", "email", "project", "platform",
+    "stage", "channel", "chat"}."""
+    if not sheet_enabled():
+        return []
+    if not force and time.time() - chat_rows_cache["at"] < 300:
+        return chat_rows_cache["rows"]
+    rows, error = None, None
+    for fields in CHAT_ROW_FIELDS:
+        try:
+            rows = await sheet_list(fields)
+            break
+        except Exception as e:  # noqa: BLE001  try the next, smaller set of columns
+            error = e
+    if rows is None:
+        chat_rows_cache.update(at=time.time() - 240, error=err_text(error))  # try again in a minute
+        raise ReplyRefused(f"读不到 KOL总表：{err_text(error)}")
+    out = []
+    for r in rows:
+        emails = sheet_emails(r.get("邮箱"))
+        row = {"id": chats.plain(r.get("ID"), 12), "kol": chats.plain(r.get("KOL"), 80) or (emails[0] if emails else ""),
+               "email": emails[0] if emails else "", "project": chats.plain(r.get("项目"), 30),
+               "platform": chats.plain(r.get("平台"), 20), "stage": chats.plain(r.get("阶段"), 10),
+               "channel": chats.plain(r.get("频道链接"), 200), "chat": chats.plain(r.get("聊天账号"), 400)}
+        if row["id"] or row["email"]:
+            out.append(row)
+    chat_rows_cache.update(at=time.time(), rows=out, error=None)
+    return out
+
+
+async def refresh_chat_rows():
+    """Read the rows again (one read at a time, however many ask), then link every chat 聊天账号 now names."""
+    with contextlib.suppress(ReplyRefused):  # unreadable now (Excel busy): chat_rows_cache says so, a retry follows
+        await coalesced(("chat_rows",), lambda: chat_rows(force=True))
+        for conv in CHATS.convs():
+            chat_autolink(conv["key"])
+
+
+def chat_key(value) -> str:
+    key = str(value or "").strip()
+    if not chats.KEY.match(key):
+        raise ReplyRefused("会话参数不对")
+    return key
+
+
+def conv_view(c: dict) -> dict:
+    linked = {"id": c.get("kol_id") or "", "kol": c.get("kol_name") or "", "email": c.get("kol_email") or ""} \
+        if (c.get("kol_id") or c.get("kol_email")) else None
+    return {"key": c["key"], "channel": c["channel"], "label": chats.LABELS[c["channel"]],
+            "name": c.get("peer_name") or c.get("username") or c["key"], "username": c.get("username") or "",
+            "peer_id": c.get("peer_id") or "", "linked": linked, "ignored": bool(c.get("ignored")),
+            "unread": chats.unread(c), "last_at": c.get("last_at"), "preview": c.get("preview", ""),
+            "preview_out": c.get("preview_out", False), "token": chats.peer_token(c)}
+
+
+def msg_view(m: dict) -> dict:
+    extra = m.get("extra") or {}
+    preview = extra.get("web_preview") if isinstance(extra.get("web_preview"), dict) else {}
+    return {"id": m["id"], "at": m["at"], "out": bool(m["out"]), "author": m.get("author") or "", "text": m.get("text") or "",
+            "zh": m.get("zh") or "", "media": chats.plain(extra.get("media"), 120),
+            "attachments": [chats.plain(a.get("name"), 80) for a in extra.get("attachments") or [] if isinstance(a, dict)],
+            "reply_to": chats.plain(extra.get("reply_to"), 200), "link": chats.plain(preview.get("url"), 300)}
+
+
+async def api_chat_list(request: Request):
+    ignored = request.query_params.get("ignored") == "1"
+    convs = await asyncio.to_thread(CHATS.convs, ignored)
+    return JSONResponse({
+        "convs": [conv_view(c) for c in convs],
+        "telegram": {"configured": telegram_params() is not None, "ready": tg.ready.is_set(),
+                     "error": state.get("chat_tg_error") or (tg.error if telegram_params() is not None else None)},
+        "discord": {"seen": state.get("ext_seen")}, "sheet": sheet_enabled(), "dev": DEV,
+        "popo_error": state.get("popo_error")})
+
+
+async def api_chat_conv(request: Request):
+    try:
+        key = chat_key(request.query_params.get("key"))
+    except ReplyRefused as e:
+        return bad(str(e))
+    conv = CHATS.conv(key)
+    if not conv:
+        return bad("找不到这个会话", 404)
+    CHATS.seen(key)
+    conv["preview"] = ""
+    return JSONResponse({"conv": conv_view(conv), "messages": [msg_view(m) for m in CHATS.messages(key, 150)],
+                         "queue": CHATS.pending(key) if conv["channel"] == "discord" else []})
+
+
+async def api_chat_translate(request: Request):
+    body = await request.json()
+    try:
+        key = chat_key(body.get("key"))
+        with feed.working("translating"):
+            done = await chat_translate(key, CHATS.messages(key, 60))
+    except (ReplyRefused, ClaudeError) as e:
+        return reply_error(e)
+    return JSONResponse({"ok": True, "translated": done,
+                         "messages": [msg_view(m) for m in CHATS.messages(key, 150)]})
+
+
+async def api_chat_sync(request: Request):
+    """The page's 刷新 on a Telegram chat: read it now instead of at the next look."""
+    body = await request.json()
+    try:
+        key = chat_key(body.get("key"))
+    except ReplyRefused as e:
+        return bad(str(e))
+    if not key.startswith("tg:"):
+        return JSONResponse({"ok": True, "added": 0})
+    try:
+        added = await tg_sync_chat(int(key[3:]))
+    except MailError as e:
+        return bad(f"Telegram 读取失败：{err_text(e)}", 502)
+    return JSONResponse({"ok": True, "added": added})
+
+
+async def api_chat_rows(request: Request):
+    q = (request.query_params.get("q") or "").strip().casefold()
+    key = request.query_params.get("key") or ""
+    try:
+        rows = await chat_rows(force=request.query_params.get("fresh") == "1")
+    except ReplyRefused as e:
+        return bad(str(e), 502)
+    conv = CHATS.conv(key) if chats.KEY.match(key) else None
+    hits = [r for r in rows if not q or any(q in str(r[f]).casefold() for f in ("id", "kol", "email", "channel"))]
+    return JSONResponse({"rows": hits[:40], "total": len(hits), "suggest": chats.suggest(conv, rows) if conv else [],
+                         "sheet": sheet_enabled()})
+
+
+async def api_chat_link(request: Request):
+    body = await request.json()
+    try:
+        key = chat_key(body.get("key"))
+        conv = CHATS.conv(key)
+        if not conv:
+            raise ReplyRefused("找不到这个会话")
+        want_id, want_email = str(body.get("id") or "").strip(), str(body.get("email") or "").strip().lower()
+        row = next((r for r in await chat_rows(force=True)
+                    if (want_id and r["id"] == want_id) or (not want_id and want_email and r["email"] == want_email)),
+                   None)
+        if not row:
+            raise ReplyRefused("KOL总表里找不到这一行，刷新后再选")
+    except ReplyRefused as e:
+        return bad(str(e))
+    CHATS.link(key, row["id"], row["kol"], row["email"])
+    conv = CHATS.conv(key)
+    token = chats.peer_token(conv)
+    if token and row["id"] and SHEET_MODE == "legacy" and sheet_enabled():
+        # The row learns this account (聊天账号), so Claude sessions and the triage task find it too. Queued as it is:
+        # sheet_post stamps a time, which kol.py refuses in an upsert.
+        sheet_ops.append({"op": "upsert", "id": row["id"], "chat": token, "create": False,
+                          "source": "KOL Mail 私信关联"})
+        sheet_wake.set()
+    chat_rows_cache["at"] = 0.0
+    spawn(chat_record(key), "记录私信")  # the last few days of the chat (chats.BACKFILL) go to 沟通记录 now
+    return JSONResponse({"ok": True, "conv": conv_view(conv)})
+
+
+async def api_chat_unlink(request: Request):
+    body = await request.json()
+    try:
+        key = chat_key(body.get("key"))
+    except ReplyRefused as e:
+        return bad(str(e))
+    CHATS.unlink(key)
+    return JSONResponse({"ok": True, "conv": conv_view(CHATS.conv(key) or {"key": key, "channel": chats.channel_of(key)})})
+
+
+async def api_chat_ignore(request: Request):
+    body = await request.json()
+    try:
+        key = chat_key(body.get("key"))
+    except ReplyRefused as e:
+        return bad(str(e))
+    CHATS.ignore(key, bool(body.get("ignored", True)))
+    return JSONResponse({"ok": True})
+
+
+def chat_line(conv: dict, m: dict) -> str:
+    """One message for the prompt, with what it carried besides words."""
+    extra = m.get("extra") or {}
+    if conv["channel"] == "telegram":
+        return materials.tg_line({**extra, "date": m["at"], "text": m.get("text") or ""})
+    parts = [f"[{m['at']}] {m.get('text') or ''}".rstrip()]
+    if extra.get("reply_to"):
+        parts.append(f"[replying to: {materials.shown(str(extra['reply_to']), 200)}]")
+    names = [materials.shown(str(a.get("name") or "file"), 80) for a in extra.get("attachments") or []
+             if isinstance(a, dict)]
+    if names:
+        parts.append(f"[attached: {', '.join(names)}]")
+    return " ".join(parts)
+
+
+async def sheet_get(kol_id: str, timeout: float = 60) -> dict:
+    """`kol.py get --id`: {"matches": [the row], "recent_logs": [...]}, or {} when it cannot be read now."""
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            SHEET_PYTHON, str(SHEET_TOOL), "get", "--id", kol_id, cwd=str(SHEET_TOOL.parent), env=SHEET_ENV,
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+        data = json.loads(out.decode("utf-8", "replace"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError, asyncio.TimeoutError) as e:
+        if proc is not None and proc.returncode is None:
+            proc.kill()  # a kol.py waiting on a busy Excel must not hang on after the caller went ahead
+        log("sheet row not read", kol_id, err_text(e))
+        return {}
+
+
+async def chat_sheet_note(conv: dict) -> str:
+    """The owner's own KOL总表 row for this KOL, for the draft: what was quoted, offered and agreed so far."""
+    if not (conv.get("kol_id") and SHEET_MODE == "legacy" and sheet_enabled()):
+        return ""
+    matches = (await sheet_get(conv["kol_id"])).get("matches") or []
+    row = matches[0] if matches and isinstance(matches[0], dict) else {}
+    lines = [f"{h}: {chats.plain(row.get(h), 400)}" for h in ("项目", "阶段", "意向", "对方报价", "方案/条件", "频道数据",
+                                                              "进展摘要") if row.get(h)]
+    return "\n".join(lines)
+
+
+async def gather_chat_context(key: str) -> dict:
+    conv = CHATS.conv(key)
+    if not conv:
+        raise ReplyRefused("找不到这个会话")
+    msgs = CHATS.messages(key, CHAT_CONTEXT_MSGS)
+    theirs = [m for m in msgs if not m["out"]]
+    if not theirs:
+        raise ReplyRefused("对方还没发过消息，先在聊天软件里打个招呼")
+    with contextlib.suppress(ClaudeError):
+        await chat_translate(key, theirs[-20:])
+    # One snapshot from here on: the draft's text, its newest and newest_in (what api_chat_send checks against)
+    msgs = CHATS.messages(key, CHAT_CONTEXT_MSGS)
+    theirs = [m for m in msgs if not m["out"]]
+    last_out = max((i for i, m in enumerate(msgs) if m["out"]), default=-1)
+    new = [m for m in msgs[last_out + 1:] if not m["out"]]
+    if not new:  # we spoke last (a follow-up): their latest messages are what the draft answers
+        tail = [i for i, m in enumerate(msgs) if not m["out"]]
+        end = tail[-1]
+        start = end
+        while start > 0 and not msgs[start - 1]["out"]:
+            start -= 1
+        new = msgs[start:end + 1]
+    new_ids = {m["id"] for m in new}
+    older = [m for m in msgs if not m["out"] and m["id"] not in new_ids]
+    ours = [m for m in msgs if m["out"]]
+    label = chats.LABELS[conv["channel"]]
+    text = lambda ms: "\n".join(chat_line(conv, m) for m in ms)  # noqa: E731
+    earlier = [{"date": "", "subject": f"{label} (earlier messages from them)", "body": text(older)}] if older else []
+    ours_ctx = [{"date": "", "subject": f"{label} (our earlier messages)", "body": text(ours)}] if ours else []
+    if conv.get("kol_email"):  # what was said by mail counts as much as what was said in the chat
+        try:
+            mail_ours, mail_theirs = await indexed_history(conv["kol_email"], None)
+            earlier += mail_theirs[:3]
+            ours_ctx += mail_ours[:3]
+        except Exception as e:  # noqa: BLE001  the draft still goes ahead on the chat alone
+            log("mail history not read for a chat draft", key, err_text(e))
+    note = await chat_sheet_note(conv)
+    if note:
+        ours_ctx.append({"date": "", "subject": "KOL总表: our internal notes on this KOL (never sent to them; never "
+                                                "quote them)", "body": note})
+    if conv["channel"] == "telegram":
+        tg_msgs = [{"id": int(m["id"]), "date": m["at"], "text": m.get("text") or "",
+                    **{k: v for k, v in (m.get("extra") or {}).items() if k in ("media", "web_preview")}}
+                   for m in theirs[-20:] if m["id"].isdigit()]
+        found = await telegram_materials(int(key[3:]), tg_msgs)
+    else:
+        texts = [(f"Discord {m['at'][:16].replace('T', ' ')} 的消息",
+                  "\n".join([m.get("text") or ""] + [str(a.get("url") or "") for a in (m.get("extra") or {}).get(
+                      "attachments") or [] if isinstance(a, dict)])) for m in theirs[-20:]]
+        found = await gather_materials([], texts)
+    return {"channel": "telegram",  # replyflow's chat format and cut: a Discord DM is written like a Telegram one
+            "chat": conv["channel"], "key": key, "kol": key, "subject": "", "newest": msgs[-1]["id"],
+            "newest_in": theirs[-1]["id"], "zh": "\n".join(m["zh"] for m in new if m.get("zh")),
+            "msg": {"date": new[-1]["at"], "sender": conv.get("peer_name") or conv.get("username") or key,
+                    "subject": f"{label} private chat", "body": text(new)},
+            "earlier": earlier, "ours": ours_ctx, "materials": found}
+
+
+async def chat_context(key: str, token: str = "") -> tuple[str, dict]:
+    now = time.time()
+    for k in [k for k, (at, _) in chat_contexts.items() if now - at > REPLY_CTX_TTL]:
+        chat_contexts.pop(k, None)
+    newest = CHATS.newest_id(key)
+    hit = chat_contexts.get(token)
+    if hit and hit[1]["key"] == key and hit[1]["newest"] == newest:
+        return token, hit[1]
+    ctx = await coalesced(("chat_ctx", key, newest), lambda: gather_chat_context(key))
+    token = secrets.token_hex(12)
+    chat_contexts[token] = (now, ctx)
+    return token, ctx
+
+
+async def api_chat_strategies(request: Request):
+    body = await request.json()
+    try:
+        key = chat_key(body.get("key"))
+        token, ctx = await chat_context(key, str(body.get("ctx") or ""))
+        with feed.working("thinking"):
+            result = await propose_strategies(ctx, (body.get("notes") or "").strip())
+    except (ReplyRefused, OSError, ClaudeError, MailError) as e:
+        return reply_error(e)
+    return JSONResponse({"ctx": token, **result})
+
+
+async def api_chat_draft(request: Request):
+    body = await request.json()
+    mode = "translate" if body.get("mode") == "translate" else "draft"
+    notes, feedback = (body.get("notes") or "").strip(), (body.get("feedback") or "").strip()
+    previous = (body.get("previous_body") or "").strip()
+    strategy = body.get("strategy") if isinstance(body.get("strategy"), dict) else None
+    if mode == "translate" and not notes:
+        return bad("先在输入框里写好中文回复")
+    if mode == "draft" and not (strategy or notes or (previous and feedback)):
+        return bad("先选一个回复策略，或者写几句要点")
+    try:
+        key = chat_key(body.get("key"))
+        token, ctx = await chat_context(key, str(body.get("ctx") or ""))
+        with feed.working("thinking"):
+            # the owner's earlier change requests for this reply still hold, as in a mail reply
+            history = replyflow.clean_history(body.get("feedback_history")) if previous and feedback else []
+            draft, pairs = await checked_draft(ctx, mode=mode, strategy=strategy, notes=notes, previous=previous,
+                                               feedback=feedback, history=history)
+    except (ReplyRefused, OSError, ClaudeError, MailError) as e:
+        return reply_error(e)
+    # newest: the last message the draft saw, either side; sending checks nothing came in or went out since
+    return JSONResponse({"ctx": token, "newest": ctx["newest"], **draft, "pairs": pairs})
+
+
+def chat_parts(text: str, zh) -> list[dict]:
+    """A reply cut into the chat messages it goes out as: one per paragraph, with its verified Chinese."""
+    parts = [p.strip() for p in replyflow.split_paragraphs(text) if p.strip()]
+    zh = zh if isinstance(zh, list) and len(zh) == len(parts) else [""] * len(parts)
+    return [{"text": p, "zh": chats.plain(z, 1000)} for p, z in zip(parts, zh)]
+
+
+async def api_chat_send(request: Request):
+    """Telegram: sent now, part by part. Discord: queued for the extension. Either way only a text whose Chinese
+    side-by-side was verified, and only if the other side wrote nothing new since the draft was made."""
+    body = await request.json()
+    try:
+        key = chat_key(body.get("key"))
+    except ReplyRefused as e:
+        return bad(str(e))
+    conv = CHATS.conv(key)
+    if not conv:
+        return bad("找不到这个会话", 404)
+    text = strip_hidden((body.get("text") or "").replace("\r\n", "\n")).strip()
+    if not text:
+        return bad("正文是空的")
+    if text_hash(text) not in checked_texts:
+        return bad("正文和中文对照对不上（改过正文，或者对照没生成成功），先点“更新对照”核对后再发")
+    parts = chat_parts(text, body.get("zh"))
+    if len(parts) > chats.QUEUE_MAX:
+        return bad(f"一次最多发 {chats.QUEUE_MAX} 条，合并几段再发")
+    limit = chats.PART_MAX[conv["channel"]]
+    if any(len(p["text"]) > limit for p in parts):
+        return bad(f"有一段超过 {limit} 个字符，{chats.LABELS[conv['channel']]} 一条消息发不下，拆成几段再发")
+    seen = str(body.get("newest") or "")
+    if not seen:  # the draft's snapshot: without it nothing says the conversation is still where the draft left it
+        return bad("草稿缺少会话位置，重新起草一次再发")
+    digest = text_hash(text)
+    lock = chat_send_locks.setdefault(key, asyncio.Lock())
+    if lock.locked():
+        return bad("这个会话正在发送，等它发完")
+    async with lock:  # two tabs, or a click repeated while the first send is still going, never both send
+        now = time.time()
+        for k in [k for k, at in chat_sent.items() if now - at > CHAT_SENT_KEEP]:
+            chat_sent.pop(k, None)
+        if (key, digest) in chat_sent:
+            return bad("这段回复刚才已经发过（或者可能已经发出），先看一眼聊天记录；要再发就改几个字重新核对")
+        if conv["channel"] == "telegram":
+            if DEV:
+                return bad("开发模式不发送消息")
+            chat_id = int(key[3:])
+            try:
+                await tg_sync_chat(chat_id)
+            except MailError as e:
+                return bad(f"Telegram 后端没连上，没有发出：{err_text(e)}", 502)
+        msgs = CHATS.messages(key, 80)
+        ids = [m["id"] for m in msgs]
+        if not ids or ids[-1] != seen:
+            later = msgs[ids.index(seen) + 1:] if seen in ids else []
+            why = "你刚在聊天软件里回过这个人" if later and all(m["out"] for m in later) else "对方刚发了新消息"
+            return JSONResponse({"error": f"{why}，先看一眼再决定要不要改稿", "changed": True}, status_code=409)
+        if conv["channel"] == "discord":
+            CHATS.queue(key, parts)
+            chat_sent[(key, digest)] = now
+            return JSONResponse({"ok": True, "queued": len(parts)})
+        chat_sent[(key, digest)] = now  # from the first part on: an uncertain send must never be repeated
+        sent = 0
+        with feed.working("sending"):
+            for i, part in enumerate(parts):
+                if i:
+                    await asyncio.sleep(random.uniform(*CHAT_SEND_GAP))
+                try:
+                    result = await tg.call("send_message", chat_id=chat_id, message=part["text"])
+                    outcome = str(result.get("result", result) if isinstance(result, dict) else result)
+                except NotReady as e:  # never reached Telegram
+                    if not sent:
+                        chat_sent.pop((key, digest), None)
+                    return JSONResponse({"error": f"Telegram 后端断开，已发 {sent}/{len(parts)} 条：{err_text(e)}",
+                                         "sent": sent, "uncertain": bool(sent)}, status_code=502)
+                except MailError as e:  # may have gone out before the connection dropped: never resend blindly
+                    outcome = err_text(e)
+                if not outcome.startswith("Message sent successfully"):
+                    spawn(tg_resync(chat_id), "Telegram 私信同步")
+                    return JSONResponse({"error": f"第 {i + 1} 条发送结果不确定（{outcome[:150]}），先到 Telegram 看一眼，"
+                                                  f"已确认发出 {sent} 条", "sent": sent, "uncertain": True},
+                                        status_code=502)
+                sent += 1
+    with contextlib.suppress(Exception):
+        close_cases_for("telegram", str(chat_id))  # an off-hours phone case for this chat is answered now
+    spawn(tg_resync(chat_id), "Telegram 私信同步")
+    log("sent chat reply", key, f"{sent} part(s)")
+    return JSONResponse({"ok": True, "sent": sent})
+
+
+def ext_token() -> str:
+    """The Discord extension's key to /ext/: made on first use, shown in 设置 → 私信渠道 for pasting once."""
+    if ext_token_cache:
+        return ext_token_cache[0]
+    token = ""
+    with contextlib.suppress(OSError):
+        token = EXT_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    if not re.fullmatch(r"[0-9a-f]{32}", token):
+        token = secrets.token_hex(16)
+        save_ext_token(token)
+    ext_token_cache[:] = [token]
+    return token
+
+
+def save_ext_token(token: str):
+    EXT_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = EXT_TOKEN_FILE.with_suffix(".tmp")
+    tmp.write_text(token, encoding="utf-8")
+    if os.name != "nt":  # this user only (Windows keeps the profile folder private)
+        os.chmod(tmp, 0o600)
+    os.replace(tmp, EXT_TOKEN_FILE)
+
+
+async def api_chat_ext(request: Request):
+    if request.method == "POST":  # 重新生成: the old key stops working at once
+        token = secrets.token_hex(16)
+        try:
+            save_ext_token(token)
+        except OSError as e:
+            return bad(f"新令牌存不进去，旧令牌还有效：{err_text(e)}", 500)
+        ext_token_cache[:] = [token]
+    return JSONResponse({"token": ext_token(), "seen": state.get("ext_seen"), "port": PORT,
+                         "folder": str(BASE / "extension" / "discord")})
+
+
+async def ext_json(request: Request) -> dict:
+    try:
+        body = await request.json()
+    except ValueError:
+        raise ReplyRefused("请求不是 JSON")
+    if not isinstance(body, dict):
+        raise ReplyRefused("请求不是 JSON 对象")
+    state["ext_seen"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    return body
+
+
+def ext_channel(body: dict) -> str:
+    channel = str(body.get("channel_id") or "")
+    if not DISCORD_ID.match(channel):
+        raise ReplyRefused("channel_id 不对")
+    return f"dc:{channel}"
+
+
+def ext_items(key: str) -> list[dict]:
+    return [{"id": f"q{r['id']}", "n": r["n"], "of": r["of_n"], "text": r["text"], "zh": r["zh"] or "",
+             "status": r["status"]} for r in CHATS.pending(key)]
+
+
+async def ext_hello(request: Request):
+    try:
+        await ext_json(request)
+    except ReplyRefused as e:
+        return bad(str(e))
+    return JSONResponse({"ok": True, "version": config.version()})
+
+
+async def ext_sync(request: Request):
+    """The DM the owner has open in Discord, as the extension reads it off the page."""
+    try:
+        body = await ext_json(request)
+        key = ext_channel(body)
+    except ReplyRefused as e:
+        return bad(str(e))
+    peer = body.get("peer") if isinstance(body.get("peer"), dict) else {}
+    msgs = []
+    for m in (body.get("messages") or [])[-EXT_MAX_MESSAGES:] if isinstance(body.get("messages"), list) else []:
+        if not isinstance(m, dict) or not DISCORD_ID.match(str(m.get("id") or "")) or not chats.parse_time(m.get("at")):
+            continue
+        extra = {}
+        atts = [{"name": chats.plain(a.get("name"), 120), "url": str(a.get("url") or "")[:500]}
+                for a in (m.get("attachments") or [])[:10] if isinstance(a, dict)] \
+            if isinstance(m.get("attachments"), list) else []
+        if atts:
+            extra["attachments"] = atts
+        if m.get("reply_to"):
+            extra["reply_to"] = chats.plain(m.get("reply_to"), 300)
+        msgs.append({"id": str(m["id"]), "at": m["at"], "out": m.get("out") is True, "author": m.get("author"),
+                     "text": str(m.get("text") or "")[:chats.TEXT_MAX], "extra": extra})
+    pid = str(peer.get("id") or "")
+    CHATS.upsert_conv(key, peer_id=pid if DISCORD_ID.match(pid) else None, peer_name=peer.get("name"),
+                      username=peer.get("username"))
+    new = CHATS.add_messages(key, msgs)
+    chat_autolink(key)
+    if new:
+        spawn(chat_record(key), "记录私信")
+    conv = CHATS.conv(key)
+    linked = conv_view(conv)["linked"]
+    suggest = []
+    if not linked:
+        if time.time() - chat_rows_cache["at"] >= 300:
+            spawn(refresh_chat_rows(), "读 KOL总表")  # never wait on Excel here: the suggestions come next sync
+        suggest = [{"id": r["id"], "kol": r["kol"]} for r in chats.suggest(conv, chat_rows_cache["rows"])]
+    return JSONResponse({"ok": True, "conv": {"key": key, "linked": linked and {"id": linked["id"], "kol": linked["kol"]},
+                                              "suggest": suggest, "added": len(new)}, "queue": ext_items(key)})
+
+
+async def ext_queue(request: Request):
+    try:
+        key = ext_channel(await ext_json(request))
+    except ReplyRefused as e:
+        return bad(str(e))
+    return JSONResponse({"items": ext_items(key)})
+
+
+async def ext_queue_update(request: Request):
+    try:
+        body = await ext_json(request)
+        key = ext_channel(body)
+        item = str(body.get("item_id") or "")
+        if not re.fullmatch(r"q\d{1,12}", item):
+            raise ReplyRefused("item_id 不对")
+        status = str(body.get("status") or "")
+        if status not in ("filled", "sent", "dropped"):
+            raise ReplyRefused("status 不对")
+    except ReplyRefused as e:
+        return bad(str(e))
+    # Always ok: an item already final here (sent, dropped as stale, claimed by another tab) is no reason to retry
+    return JSONResponse({"ok": True, "changed": CHATS.update_item(key, int(item[1:]), status)})
+
+
+POPO_SYNC_STATE = POPO_SYNC.parent / "popo_sync_state.json"
+
+
+def popo_last_run() -> datetime | None:
+    """The latest run of popo_sync by anyone (this loop, the triage task, a person): its state file's time."""
+    times = [datetime.fromtimestamp(POPO_SYNC_STATE.stat().st_mtime, autoreply.TZ)] if POPO_SYNC_STATE.exists() else []
+    mine = chats.parse_time(CHATS.get_kv("popo_tried_at"))
+    if mine:
+        times.append(mine.astimezone(autoreply.TZ))
+    return max(times) if times else None
+
+
+async def popo_sync_loop():
+    """KOL组's POPO sheets follow KOL总表 every two working hours (the 9:40 and 17:00 triage runs sync too), so a KOL
+    the owner reached this morning is in the team's dedupe sheets before a colleague writes to them. Only where
+    popo_sync.py sits next to the sheet tool (the owner's computer)."""
+    while True:
+        await asyncio.sleep(600)
+        proc = None
+        try:
+            if SHEET_MODE != "legacy" or not (SHEET_PYTHON and POPO_SYNC.exists()):
+                continue
+            cfg = load_autoreply_config()
+            now = datetime.now(autoreply.TZ)
+            last = popo_last_run()
+            if not cfg or not cfg.schedule.is_work_time(now) or (last and now - last < POPO_EVERY):
+                continue
+            CHATS.set_kv("popo_tried_at", now.isoformat(timespec="seconds"))
+            proc = await asyncio.create_subprocess_exec(
+                SHEET_PYTHON, str(POPO_SYNC), "run", cwd=str(POPO_SYNC.parent), env=SHEET_ENV,
+                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            out, err = await asyncio.wait_for(proc.communicate(), 900)
+            res = json.loads((out or b"").decode("utf-8", "replace") or "{}")
+            if not isinstance(res, dict):
+                raise ValueError(f"popo_sync 输出看不懂：{str(res)[:100]}")
+            added = [a.get("kol") or a.get("KOL") or "?" for a in res.get("added") or [] if isinstance(a, dict)]
+            log("popo_sync run", res.get("status"), f"{len(added)} added", f"{len(res.get('proposals') or [])} to confirm",
+                f"errors: {res.get('errors')}" if res.get("errors") else "")
+            state["popo_error"] = None if res.get("status") == "ok" and not res.get("errors") else \
+                f"POPO 同步：{str(res.get('errors') or res.get('error') or res.get('status'))[:200]}"
+        except BaseException as e:
+            if proc is not None and proc.returncode is None:
+                # popo_sync runs node, which runs node: end the whole tree, or it keeps holding popo_sync's lock
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
+                    if sys.platform == "win32":
+                        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=30)
+                    else:
+                        proc.kill()
+            if isinstance(e, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+                raise
+            state["popo_error"] = f"POPO 同步没跑完：{err_text(e)}"
+            log("popo_sync run failed", err_text(e))
+
+
 # ---------------------------------------------------------------- guard & app
 
 # Open on the login screen too (everything else needs a mailbox): these exactly, and what starts with LOGIN_PREFIXES.
@@ -6643,7 +7836,15 @@ async def guard(scope, receive, send, app):
     if headers.get("host") not in ALLOWED_HOSTS:
         await JSONResponse({"error": "forbidden host"}, status_code=403)(scope, receive, send)
         return
-    if scope["path"].startswith("/api/"):
+    if scope["path"].startswith("/ext/"):
+        # The Discord extension only: it holds the key shown in 设置 → 私信渠道, and no web page can send it (a page's
+        # request carries the page's Origin, and the key never reaches one).
+        origin = headers.get("origin")
+        if (origin and not origin.startswith(EXT_ORIGINS)) \
+                or not secrets.compare_digest(headers.get("x-kol-ext", "").encode(), ext_token().encode()):
+            await JSONResponse({"error": "forbidden"}, status_code=403)(scope, receive, send)
+            return
+    elif scope["path"].startswith("/api/"):
         cross_site = headers.get("sec-fetch-site") not in (None, "same-origin", "none")
         bad_origin = scope["method"] != "GET" and headers.get("origin") not in ALLOWED_ORIGINS
         if cross_site or bad_origin or headers.get("x-kol-mail") != "1":
@@ -6697,7 +7898,7 @@ async def lifespan(app):
     loops = [] if LOGGED_OUT else [mail.run(), bg.run(), finder.run(), translator_loop(), prefetch_loop()]
     if not DEV and not LOGGED_OUT:  # a dev copy next to the real service must never answer, notify, log or send anything
         loops += [scan_loop(), tg.run(), telegram_loop(), sheet_loop(), sheet_channels_loop(), mobile_loop(),
-                  case_worker(), awake_loop()]
+                  case_worker(), awake_loop(), tg_sync_loop(), popo_sync_loop()]
     if not DEV or os.environ.get("KOL_PET") == "1":  # a dev copy shows its own pet only when asked
         loops.append(keeper.run())
     if autoreport.enabled():
@@ -6782,6 +7983,23 @@ routes = [
     Route("/api/mobile/mode", api_mobile_mode, methods=["POST"]),
     Route("/api/mobile/case", api_mobile_case),
     Route("/api/send", api_send, methods=["POST"]),
+    Route("/api/chat/list", api_chat_list),
+    Route("/api/chat/conv", api_chat_conv),
+    Route("/api/chat/translate", api_chat_translate, methods=["POST"]),
+    Route("/api/chat/sync", api_chat_sync, methods=["POST"]),
+    Route("/api/chat/rows", api_chat_rows),
+    Route("/api/chat/link", api_chat_link, methods=["POST"]),
+    Route("/api/chat/unlink", api_chat_unlink, methods=["POST"]),
+    Route("/api/chat/ignore", api_chat_ignore, methods=["POST"]),
+    Route("/api/chat/strategies", api_chat_strategies, methods=["POST"]),
+    Route("/api/chat/draft", api_chat_draft, methods=["POST"]),
+    Route("/api/chat/send", api_chat_send, methods=["POST"]),
+    Route("/api/chat/ext", api_chat_ext, methods=["GET", "POST"]),
+    Route("/ext/discord/hello", ext_hello, methods=["POST"]),
+    Route("/ext/discord/sync", ext_sync, methods=["POST"]),
+    Route("/ext/discord/queue", ext_queue, methods=["POST"]),
+    Route("/ext/discord/queue/update", ext_queue_update, methods=["POST"]),
+    *tgsetup.routes(on_change=telegram_changed, get_me=lambda: tg.call("get_me", timeout=20), log=log),
     Mount("/static", StaticFiles(directory=BASE / "static"), name="static"),
 ]
 starlette_app = Starlette(routes=routes, lifespan=lifespan,

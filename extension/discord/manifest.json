@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "KOL Mail Discord 私信助手",
+  "version": "0.7.0",
+  "description": "把 Discord 网页版私信同步到本机 KOL Mail，并把审过的回复填进输入框。只填不发，回车由你自己按。",
+  "minimum_chrome_version": "110",
+  "permissions": ["storage"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://discord.com/*", "https://ptb.discord.com/*", "https://canary.discord.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "KOL Mail Discord 私信助手",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

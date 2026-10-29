@@ -167,16 +167,32 @@ GOOD = "Hi!\n\nPayment is made in full after the video goes live. The banner is 
     app.SIGNATURE
 
 
-def fake_model(monkeypatch, bodies: list[str], fail_from: int = 0):
+class Calls(list):
+    """The draft calls in order; .checks holds the owner checks (owner_check) in order."""
+    checks: list
+
+
+def fake_model(monkeypatch, bodies: list[str], fail_from: int = 0, verdicts=None, check_fails: bool = False):
     """run_claude faked: drafts come from bodies in turn (from call fail_from on, the model fails); each
-    back-translation is Chinese with its paragraph echoed, so a side-by-side shows which text it belongs to."""
-    calls = []
+    back-translation is Chinese with its paragraph echoed, so a side-by-side shows which text it belongs to. The
+    owner check answers from verdicts in turn, each (rule ids the owner asked for, instructions missed); by default
+    the owner asked for none of the flags and nothing is missed. check_fails: the owner check fails."""
+    import json
+    calls = Calls()
+    calls.checks = []
 
     async def fake_claude(system, user_text, schema, model, timeout, files=None):
         if schema is replyflow.PARAGRAPHS_SCHEMA:
-            import json
             paragraphs = json.loads(user_text.split(">>\n", 1)[1].rsplit("\n<</", 1)[0])
             return {"zh": [f"这是这一段话的中文翻译内容，原文是：{p}" for p in paragraphs]}
+        if schema is replyflow.OWNER_CHECK_SCHEMA:
+            calls.checks.append(user_text)
+            if check_fails:
+                raise app.ClaudeError("超时")
+            allowed, missed = (verdicts or [((), [])])[min(len(calls.checks), len(verdicts or [0])) - 1]
+            flags = json.loads(user_text.split(":FLAGS>>\n", 1)[1].rsplit("\n<</", 1)[0])
+            return {"flags": [{"id": f["id"], "owner_asked": f["id"] in allowed, "why_zh": "x"} for f in flags],
+                    "missed": list(missed)}
         calls.append(user_text)
         if fail_from and len(calls) >= fail_from:
             raise app.ClaudeError("超时")
@@ -195,7 +211,8 @@ def test_a_breaking_draft_is_rewritten_until_it_complies(monkeypatch):
     calls = fake_model(monkeypatch, [BAD, GOOD])
     draft, pairs = asyncio.run(app.checked_draft(CTX, notes="回他"))
     assert draft["reply_body"] == GOOD and pairs["ok"]
-    assert draft["compliance"] == {"checked": True, "ok": True, "revisions": 1, "broken": [],
+    assert draft["compliance"] == {"checked": True, "ok": True, "revisions": 1, "broken": [], "waived": [],
+                                   "missed": [],
                                    "fixed": [r["title_zh"] for r in c.load().rules
                                              if r["id"] in ("payment-after-publication", "no-extra-banner-promise")]}
     assert any(w.startswith("合规检查自动改写了 1 次") for w in draft["warnings"])
@@ -216,9 +233,15 @@ def test_a_draft_still_breaking_after_two_rewrites_is_flagged(monkeypatch):
 
 def test_review_rules_go_to_the_owner_not_back_to_the_model(monkeypatch):
     calls = fake_model(monkeypatch, ["Hi!\n\nWe can offer 150 USD for two videos.\n\n" + app.SIGNATURE])
-    draft, _ = asyncio.run(app.checked_draft(CTX, notes="报 150"))
+    draft, _ = asyncio.run(app.checked_draft(CTX, notes="回他"))
     assert len(calls) == 1 and draft["compliance"]["ok"]
     assert "草稿里写了金额 150 USD" in draft["needs_approval_zh"]
+
+
+def test_an_amount_the_owner_gave_is_not_listed_for_approval(monkeypatch):
+    fake_model(monkeypatch, ["Hi!\n\nWe can offer 150 USD for two videos and 2 free coupons.\n\n" + app.SIGNATURE])
+    draft, _ = asyncio.run(app.checked_draft(CTX, notes="报 150 美元两条，送 2 张券"))
+    assert "150" not in draft["needs_approval_zh"] and "张数" not in draft["needs_approval_zh"]
 
 
 def test_an_unreadable_rule_file_never_stops_a_draft(monkeypatch, tmp_path):
@@ -267,6 +290,22 @@ def test_owner_feedback_that_removes_or_changes_something_is_not_a_claim_to_keep
 ])
 def test_wordings_the_playbook_allows_are_not_flagged(text):
     assert not revise_rules(text, our_texts=["You get 20% of the net profit."])
+
+
+def test_a_fixed_fee_with_a_profit_share_is_not_a_pure_cps_opening():
+    """Every fixed fee closed in 2026-10 came with 20% of net profit (手册第二节, 第十三节)."""
+    body = "We can offer 60 USD for the video plus 20% of the net profit on every order through your link."
+    assert "cps-opens-at-default" not in revise_rules(body, kol_texts=["My rate is $200 per video."])
+    assert "cps-opens-at-default" in revise_rules("You'd get 20% of the net profit on every order.",
+                                                  kol_texts=["Sounds interesting, tell me more."])
+    turned_down = "100 USD per video is more than I can get approved. You'd get 20% of the net profit instead."
+    assert "cps-opens-at-default" in revise_rules(turned_down, kol_texts=["price 100 bucks a video?"])
+
+
+def test_a_competitor_named_counts_as_pushback():
+    body = "We can offer you 20% of the net profit on every order through your link."
+    assert "cps-opens-at-default" not in revise_rules(
+        body, kol_texts=["Mi contrato con Eneba de fijo más comisión terminó en septiembre."])
 
 
 def test_the_default_affiliate_offer_is_not_a_card_shown_too_early():
@@ -346,6 +385,132 @@ def test_owner_feedback_goes_into_every_rewrite(monkeypatch):
     calls = fake_model(monkeypatch, [BAD, GOOD])
     asyncio.run(app.checked_draft(CTX, previous="old text", feedback="语气热情一点"))
     assert "OWNER_FEEDBACK>>\n语气热情一点" in calls[1] and "PREVIOUS_DRAFT>>\n" + BAD in calls[1]
+
+
+PAY = "payment-after-publication"
+BANNER = "no-extra-banner-promise"
+
+
+def title(rule_id: str) -> str:
+    return next(r["title_zh"] for r in c.load().rules if r["id"] == rule_id)
+
+
+def test_what_the_owner_asked_for_is_never_rewritten_away(monkeypatch):
+    """2026-10-29: the owner's word beats the playbook. A flagged sentence the owner asked for stays; only what the
+    AI put in on its own goes back."""
+    keeps_upfront = "Hi!\n\nWe can pay 50% upfront.\n\n" + app.SIGNATURE
+    calls = fake_model(monkeypatch, [BAD, keeps_upfront], verdicts=[({PAY}, [])])
+    draft, _ = asyncio.run(app.checked_draft(CTX, previous="old", feedback="告诉他可以先付一半"))
+    assert draft["reply_body"] == keeps_upfront
+    rewrite = calls[1]
+    assert f"Rule {BANNER}" in rewrite and f"Rule {PAY}" not in rewrite
+    assert draft["compliance"]["ok"] and draft["compliance"]["waived"] == [title(PAY)]
+    assert f"已按你的意见保留：{title(PAY)}" in draft["warnings"]
+    assert not any("合规检查没通过" in w for w in draft["warnings"])
+
+
+def test_a_draft_that_skipped_the_owners_feedback_is_sent_back_for_it(monkeypatch):
+    calls = fake_model(monkeypatch, [GOOD, GOOD], verdicts=[((), ["主人要求价格改成两条 150 美元，草稿没改"]), ((), [])])
+    draft, _ = asyncio.run(app.checked_draft(CTX, previous="old", feedback="价格改成两条 150 美元"))
+    assert len(calls) == 2 and calls[1].startswith("MODE: comply")
+    assert "OWNER_NOT_DONE>>\n- 主人要求价格改成两条 150 美元，草稿没改" in calls[1]
+    assert draft["compliance"]["ok"] and draft["compliance"]["missed"] == []
+
+
+def test_feedback_still_missed_after_the_rewrites_is_said_plainly(monkeypatch):
+    fake_model(monkeypatch, [GOOD], verdicts=[((), ["语气没变热情"])])
+    draft, _ = asyncio.run(app.checked_draft(CTX, previous="old", feedback="语气热情一点"))
+    assert draft["compliance"]["ok"] is False and draft["compliance"]["missed"] == ["语气没变热情"]
+    assert any(w.startswith("⚠️ 你的意见还有没做到的（自动改写 2 次后）") for w in draft["warnings"])
+
+
+def test_earlier_rounds_of_feedback_still_hold(monkeypatch):
+    calls = fake_model(monkeypatch, [BAD, GOOD])
+    asyncio.run(app.checked_draft(CTX, notes="回他", previous="old", feedback="第三轮", history=["第一轮", "第二轮"]))
+    assert "OWNER_EARLIER_FEEDBACK>>\nRound 1:\n第一轮\n\nRound 2:\n第二轮" in calls[0]
+    assert "OWNER_EARLIER_FEEDBACK>>" in calls[1]  # the rewrite keeps them too
+    assert '["回他", "第一轮", "第二轮", "第三轮"]' in calls.checks[0]
+
+
+def test_when_the_owner_check_fails_nothing_is_rewritten(monkeypatch):
+    calls = fake_model(monkeypatch, [BAD, GOOD], check_fails=True)
+    draft, _ = asyncio.run(app.checked_draft(CTX, previous="old", feedback="告诉他可以先付一半"))
+    assert len(calls) == 1 and draft["reply_body"] == BAD
+    assert draft["compliance"]["ok"] is False and draft["compliance"]["revisions"] == 0
+    assert any(w.startswith("核对“是否照你的意见改”时出错") for w in draft["warnings"])
+    assert any(w.startswith("规则检查提示（是你要求的就不用管）") for w in draft["warnings"])
+    assert not any("合规检查没通过" in w for w in draft["warnings"])
+
+
+def test_the_owner_check_replaces_the_wording_regex(monkeypatch):
+    """The regex check of the owner's wording was the rule tripping most often (11 of 27 rewrites by 2026-10-29):
+    with the owner check running it never sends a draft back on its own."""
+    fake_model(monkeypatch, ["Hi!\n\nThanks for your reply.\n\n" + app.SIGNATURE])
+    draft, _ = asyncio.run(app.checked_draft(CTX, notes="强调我们是全网最低价"))
+    assert draft["compliance"]["ok"] and draft["compliance"]["revisions"] == 0
+
+
+def test_the_wording_regex_is_never_put_to_the_owner_check(monkeypatch):
+    calls = fake_model(monkeypatch, ["Hi!\n\nThanks for your reply.\n\n" + app.SIGNATURE], verdicts=[({"owner-wording-kept"}, [])])
+    draft, _ = asyncio.run(app.checked_draft(CTX, notes="强调我们是全网最低价"))
+    assert "owner-wording-kept" not in calls.checks[0] and draft["compliance"]["waived"] == []
+
+
+def test_a_waiver_is_only_reported_for_what_the_final_draft_still_says(monkeypatch):
+    fake_model(monkeypatch, [BAD, GOOD], verdicts=[({PAY}, [])])
+    draft, _ = asyncio.run(app.checked_draft(CTX, previous="old", feedback="告诉他可以先付一半"))
+    assert draft["reply_body"] == GOOD and draft["compliance"]["waived"] == []
+    assert not any(w.startswith("已按你的意见保留") for w in draft["warnings"])
+
+
+def test_the_page_marks_hand_edits_with_the_same_words_the_prompts_explain():
+    page = (Path(app.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
+    assert f'const HAND_EDIT = "{replyflow.HAND_EDIT}";' in page
+    system = replyflow.draft_system(owner="Me", owner_role="r", company="C", boundary="b", playbook="p", signature="Me")
+    assert replyflow.HAND_EDIT in system and replyflow.HAND_EDIT in replyflow.OWNER_CHECK_SYSTEM
+
+
+def test_a_phone_draft_keeps_the_owners_notes_as_their_words(monkeypatch):
+    """Notes typed on the phone count in every later round, as feedback does, and a fresh draft starts over."""
+    async def context(case):
+        return CTX
+
+    async def drafted(ctx, **kwargs):
+        return {"reply_body": GOOD, "warnings": []}, {"ok": True, "rows": []}
+
+    async def pushed(*args, **kwargs):
+        return None
+    monkeypatch.setattr(app, "case_context", context)
+    monkeypatch.setattr(app, "checked_draft", drafted)
+    monkeypatch.setattr(app, "store_and_push_draft", pushed)
+    app.remember_case_feedback(9101, ["an old round"])
+    asyncio.run(app.draft_case({"id": 9101}, notes="告诉他可以先付一半"))
+    assert app.case_feedback(9101) == ["告诉他可以先付一半"]
+    asyncio.run(app.draft_case({"id": 9101}, strategy={"title_zh": "t", "approach_zh": "a"}))
+    assert app.case_feedback(9101) == []
+
+
+def test_a_draft_without_owner_words_is_not_checked_against_them(monkeypatch):
+    calls = fake_model(monkeypatch, [BAD, GOOD])
+    asyncio.run(app.checked_draft(CTX, strategy={"title_zh": "t", "approach_zh": "a"}))
+    assert calls.checks == [] and len(calls) == 2
+
+
+def test_the_owner_verdict_only_takes_flags_it_was_shown():
+    allowed, missed = replyflow.owner_verdict(
+        {"flags": [{"id": PAY, "owner_asked": True}, {"id": "made-up", "owner_asked": True},
+                   {"id": BANNER, "owner_asked": "yes"}], "missed": ["a", "a", " ", 5, "b <ip_reminder>x</ip_reminder>"]},
+        {PAY, BANNER})
+    assert allowed == {PAY} and missed == ["a", "b"]
+
+
+def test_every_prompt_puts_the_owner_first():
+    for make in (replyflow.draft_system, replyflow.compose_system, replyflow.chat_system):
+        system = make(owner="Me", owner_role="r", company="C", boundary="b", playbook="p", signature="Me")
+        assert "Who decides, highest first" in system and "Me wins" in system
+        assert "Unless Me's own words ask otherwise" in system
+    strategy = replyflow.strategy_system(owner="Me", owner_role="r", company="C", boundary="b", playbook="p")
+    assert "person_zh" in strategy and "not a default first move" in strategy
 
 
 def test_check_only_flags_without_rewriting(monkeypatch):

@@ -1,10 +1,12 @@
 """KOL 总表同步，给用自己表格的同事用（主人那张固定格式的总表还是走 kol.py）。
 
 每个人的总表格式不一样，这里不改结构、不加列、不加工作表、不动格式，只往“列对应”里对上的几列写值：
-邮箱（必须）、KOL 名字、频道链接、最近联系时间、待办方、进展摘要。没对上的列就不写那一项。
+邮箱（必须）、KOL 名字、频道链接、最近联系时间、待办方、进展摘要、聊天账号。没对上的列就不写那一项。
 
 - 每收到或发出一封 KOL 邮件：按邮箱找到那一行，写最近联系时间、轮到谁回、一句话进展。比表里已有的更旧的邮件
   不会盖掉新情况。表里没有这个邮箱时在末尾加一行，格式照抄上一行（在 Excel 表格对象里就让表格自己扩一行）。
+- Telegram / Discord 私信也一样记，按邮箱找，找不到再按“聊天账号”列（tg:数字、dc:数字）找；都找不到就加一行。
+  没有对应“聊天账号”列时，不带邮箱的私信不写总表（结果是 skipped，不算失败）。这里没有 ID 列，操作里的 id 不用。
 - 页面打开一封信时显示的频道快捷链接，来自“邮箱”和“频道链接”两列（list 命令，直接读文件，不启动 Excel）。
 
 Windows 用 Excel COM：表在 Excel 里开着就写进打开的窗口，没开就在后台开一个看不见的 Excel 写完保存再关。
@@ -31,6 +33,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))  # kol.py (the Excel COM helpers) sits next to this file
+import kol as fixed  # noqa: E402  the chat account format (tg:<id>, dc:<id>) is kol.py's, so both read cells alike
 # a file path, popo:<docId>[:<teamSpaceId>] (popogrid.py) or google:<spreadsheetId> (googlegrid.py)
 RAW_WORKBOOK = os.environ.get("KOL_SHEET_PATH") or ""
 WORKBOOK = Path(RAW_WORKBOOK)
@@ -58,6 +61,7 @@ FIELDS = {
     "last_contact": "最近联系时间",
     "owner": "待办方",
     "summary": "进展摘要",
+    "chat": "聊天账号",
 }
 REQUIRED = ("email",)
 # header words that usually mean the field (compared lower-case, spaces and punctuation removed)
@@ -75,11 +79,17 @@ SYNONYMS = {
               "whosenext"],
     "summary": ["进展摘要", "进展", "最新进展", "跟进情况", "沟通情况", "沟通进展", "最新情况", "summary", "progress",
                 "lastmessage", "latestupdate"],
+    "chat": ["聊天账号", "telegram", "tg", "discord", "dc", "telegram账号", "discord账号", "tg账号", "dc账号",
+             "telegramid", "discordid", "chataccount", "chatid", "telegramdiscord", "tgdc"],
 }
+# Too short to look for inside a longer header ("tg" is in "lastgame"): these count only as the whole header.
+EXACT_ONLY = {"tg", "dc", "tgdc"}
 OURS = ["我方", "我们", "我", "己方", "自己", "本方", "me", "us", "we", "ours", "oursside", "myturn", "our turn"]
 THEIRS = ["对方", "kol", "达人", "博主", "红人", "主播", "他们", "them", "they", "theirs", "creator", "influencer",
           "theirturn", "their turn"]
 LINK = re.compile(r"https?://\S+|(?:www\.)?(?:youtube\.com|youtu\.be|twitch\.tv|tiktok\.com|t\.me)/\S+", re.IGNORECASE)
+# a chat account with its display name, "tg:1274797389(@yummytim)": its "@" does not make it an address
+CHAT_TEXT = re.compile(r"(?<![a-z0-9])(?:tg|dc)\s*:\s*\d{1,20}\s*(?:\([^;；]*\))?", re.IGNORECASE)
 
 
 class UsageError(Exception):
@@ -189,7 +199,7 @@ def column_profile(rows: list[list], header_row: int, col: int, sample: int = 30
     body = [text(r[col - 1]) if col - 1 < len(r) else "" for r in rows[header_row:header_row + sample]]
     filled = [v for v in body if v]
     return {"filled": len(filled),
-            "emails": sum(1 for v in filled if split_emails(v)),
+            "emails": sum(1 for v in filled if split_emails(CHAT_TEXT.sub(" ", v))),
             "links": sum(1 for v in filled if LINK.search(v)),
             "dates": sum(1 for v in filled if from_serial(v)),
             "samples": filled[:3]}
@@ -208,7 +218,7 @@ def guess_map(rows: list[list], header_row: int) -> dict:
             s = 0.0
             if key in normed:
                 s = 10 - normed.index(key) * 0.05
-            elif any(w and len(w) >= 2 and w in key for w in normed):
+            elif any(w and len(w) >= 2 and w not in EXACT_ONLY and w in key for w in normed):
                 s = 5
             if field == "email":
                 s += 6 * p["emails"] / max(p["filled"], 1)
@@ -218,6 +228,8 @@ def guess_map(rows: list[list], header_row: int) -> dict:
                 s += 2 * p["dates"] / max(p["filled"], 1) if s else 0
             if p["emails"] and field != "email":
                 s -= 4
+            if field == "chat":  # a "Telegram" column of t.me links or addresses is not where accounts go
+                s -= 8 * (p["emails"] + p["links"]) / max(p["filled"], 1)
             if s >= 5:
                 scores.append((s, field, c))
     out: dict[str, str] = {}
@@ -506,7 +518,8 @@ def open_grid(write: bool = True):
 
 # ---------------------------------------------------------------- the sync itself
 
-OUR_SUMMARY = ("对方来信", "对方回信", "我方回信", "收到回信")  # how every summary this tool writes starts
+# how every summary this tool writes starts (the last two: Telegram / Discord messages from kol-mail)
+OUR_SUMMARY = ("对方来信", "对方回信", "我方回信", "收到回信", "对方消息", "我方消息")
 
 class UserSheet:
     def __init__(self, grid: Grid, mapping: dict, state: dict):
@@ -551,6 +564,34 @@ class UserSheet:
             if email in split_emails(self.cell(r, "email")):
                 return r
         return None
+
+    def find_chat(self, tokens: list[str]) -> int | None:
+        if "chat" not in self.col or not tokens:
+            return None
+        want = {fixed.parse_chat(t)[0] for t in tokens}
+        for r in range(self.hr + 1, len(self.rows) + 1):
+            if want & set(fixed.chat_ids(text(self.cell(r, "chat")))):
+                return r
+        return None
+
+    def locate(self, op: dict) -> int | None:
+        """By address first, then by chat account (only when that column is mapped)."""
+        r = self.find(op["email"]) if op.get("email") else None
+        return r if r is not None else self.find_chat(op.get("chat") or [])
+
+    def fill_chat(self, r: int, tokens: list[str]) -> bool | None:
+        """Chat accounts into row r's 聊天账号 cell, merged the way kol.py does. Only an empty cell or one holding
+        nothing but accounts is changed; a colleague's own text stays (False). None: nothing to change."""
+        if "chat" not in self.col or not tokens:
+            return None
+        cur = text(self.cell(r, "chat")).lstrip("'")
+        if cur and not all(fixed.parse_chat(p) for p in fixed.chat_pieces(cur)):
+            return False
+        new = fixed.merge_chats(cur, tokens)
+        if new == cur:
+            return None
+        self.put(r, "chat", new)
+        return True
 
     def put(self, r: int, field: str, value):
         c = self.col.get(field)
@@ -602,26 +643,32 @@ class UserSheet:
     # -- operations
 
     def event(self, op: dict) -> dict:
-        email, when, key = op["email"], op["time"], op.get("key") or ""
+        email, chat, when, key = op["email"], op.get("chat") or [], op["time"], op.get("key") or ""
         if op.get("auto"):  # an automatic reply says nothing about whose turn it is
             return {"status": "skipped", "note": "自动回复不改总表"}
-        seen = self.state.setdefault("emails", {}).get(email) or {}
+        if not email and "chat" not in self.col:  # nothing to find the row by; not a failure, so never retried
+            return {"status": "skipped", "note": "没有对应“聊天账号”列，不带邮箱的私信不写总表"}
+        person = email or fixed.parse_chat(chat[0])[0]  # whose newest message the state remembers
+        seen = self.state.setdefault("emails", {}).get(person) or {}
         keys = self.state.setdefault("keys", [])
         repeat = bool(key) and key in keys
-        r = self.find(email)
+        r = self.locate(op)
         created = False
         if r is None:
             if repeat:
-                return {"status": "skipped", "note": "这封信记过，那一行后来被删了，不再加回去"}
+                return {"status": "skipped", "note": "这条记过，那一行后来被删了，不再加回去"}
             last = self.last_row()
             r = self.g.append_row(self.sheet, self.hr, last, self.free_row(last))
-            self.put(r, "email", email)
-            self.put(r, "name", op.get("name") or email.split("@")[0])
+            if email:
+                self.put(r, "email", email)
+            self.put(r, "name", op.get("name") or (email.split("@")[0] if email else chat_name(chat)))
+            self.fill_chat(r, chat)
             if op.get("channel_url"):
                 self.put(r, "channel", op["channel_url"])
             created = True
         if op.get("channel_url") and not created and not text(self.cell(r, "channel")):
             self.put(r, "channel", op["channel_url"])  # a link found in the mail fills an empty cell, never replaces
+        chat_kept = not created and self.fill_chat(r, chat) is False
         latest = from_serial(seen.get("time"))
         in_cell = from_serial(self.cell(r, "last_contact"))
         newest = max([d for d in (latest, in_cell) if d], default=None)
@@ -629,7 +676,7 @@ class UserSheet:
             if seen.get("key") == key and op.get("summary_given") and self.ours_to_change(r, "summary"):
                 self.put(r, "summary", op["summary"])  # the Chinese gist of the newest mail
                 return {"status": "ok", "row": r, "updated": ["summary"]}
-            return {"status": "skipped", "row": r, "note": "这封信已经记过"}
+            return {"status": "skipped", "row": r, "note": "这条已经记过"}
         if key:
             keys.append(key)
             del keys[:-KEEP_KEYS]
@@ -644,45 +691,70 @@ class UserSheet:
                 self.put(r, field, value)
             else:
                 kept.append(FIELDS[field])
-        self.state["emails"][email] = {"time": when.isoformat(), "key": key}
+        if chat_kept:
+            kept.append(FIELDS["chat"])
+        self.state["emails"][person] = {"time": when.isoformat(), "key": key}
         out = {"status": "ok", "row": r, "created": created}
         if kept:
             out["note"] = f"{'、'.join(kept)}里是你自己写的内容，没有覆盖"
         return out
 
     def upsert(self, op: dict) -> dict:
-        """Only what kol-mail sends: a channel link saved by hand, filled in when that cell is empty."""
-        r = self.find(op["email"])
+        """Only what kol-mail sends: a channel link saved by hand, filled in when that cell is empty, and chat
+        accounts of a linked chat. Never adds a row."""
+        if not op["email"] and "chat" not in self.col:
+            return {"status": "skipped", "note": "没有对应“聊天账号”列，不带邮箱的聊天账号不写总表"}
+        r = self.locate(op)
         if r is None:
-            return {"status": "skipped", "note": "邮箱不在总表里"}
+            return {"status": "skipped", "note": "邮箱不在总表里" if op["email"] else "聊天账号不在总表里"}
+        updated = []
         if op.get("channel") and "channel" in self.col and not text(self.cell(r, "channel")):
             self.put(r, "channel", op["channel"])
-            return {"status": "ok", "row": r, "updated": ["channel"]}
-        return {"status": "ok", "row": r, "updated": []}
+            updated.append("channel")
+        filled = self.fill_chat(r, op.get("chat") or [])
+        if filled:
+            updated.append("chat")
+        out = {"status": "ok", "row": r, "updated": updated}
+        if filled is False:
+            out["note"] = f"{FIELDS['chat']}里是你自己写的内容，没有覆盖"
+        return out
+
+
+def chat_name(tokens: list[str]) -> str:
+    """A new row's name from a chat account: its display name, else the account itself."""
+    ident, display = fixed.parse_chat(tokens[0]) if tokens else ("", "")
+    return display.lstrip("@") or ident
 
 
 def norm_op(op: dict) -> dict:
     if not isinstance(op, dict) or op.get("op") not in ("event", "upsert"):
         raise UsageError(f"不认识的操作：{str(op)[:120]}")
     emails = split_emails(op.get("email"))
-    if not emails:
-        raise UsageError(f"{op['op']} 需要邮箱：{str(op)[:120]}")
+    try:  # a chat op: tg:<id> / dc:<id>, the format kol.py reads and writes. Its "id" is kol.py's, unused here.
+        chat = fixed.norm_chats(op["chat"]) if op.get("chat") else []
+    except fixed.UsageError as e:
+        raise UsageError(str(e)) from None
+    if not emails and not chat:
+        raise UsageError(f"{op['op']} 需要邮箱或聊天账号：{str(op)[:120]}")
+    email = emails[0] if emails else ""
     if op["op"] == "upsert":
-        return {"op": "upsert", "email": emails[0], "channel": str(op.get("channel") or "").strip()[:300]}
+        return {"op": "upsert", "email": email, "chat": chat, "channel": str(op.get("channel") or "").strip()[:300]}
     direction = {"in": "in", "收": "in", "out": "out", "发": "out"}.get(str(op.get("dir") or "").strip().lower())
     if not direction:
         raise UsageError(f"event 的 dir 只能是 in 或 out：{op.get('dir')!r}")
     subject = re.sub(r"\s+", " ", str(op.get("subject") or "")).strip()[:150]
     summary = re.sub(r"\s+", " ", str(op.get("summary") or "")).strip()[:300]
     given = bool(summary)
-    if not summary:
+    if not summary and chat:
+        summary = ("对方消息：" if direction == "in" else "我方消息：") + (subject or "（无内容）")
+    elif not summary:
         summary = ("对方来信：" if direction == "in" else "我方回信：") + (subject or "（无主题）")
     when = parse_when(op["time"]) if op.get("time") else now()
     when = min(when, now())  # a sender's clock in the future must not freeze the stale guard
     links = LINK.findall(str(op.get("channel_url") or ""))
-    return {"op": "event", "email": emails[0], "dir": direction, "summary": summary, "summary_given": given,
-            "time": when, "key": str(op.get("message_id") or "").strip()[:300],
-            "name": re.sub(r"\s+", " ", str(op.get("name") or "")).strip().strip('"')[:80],
+    return {"op": "event", "email": email, "chat": chat, "dir": direction, "summary": summary,
+            "summary_given": given, "time": when, "key": str(op.get("message_id") or "").strip()[:300],
+            "name": re.sub(r"\s+", " ", str(op.get("name") or op.get("kol") or "")).strip().strip('"')[:80],
             "auto": str(op.get("type") or "").strip().endswith("自动回复"),
             "channel_url": links[0] if links else ""}
 
@@ -784,6 +856,7 @@ def queue(ops: list[dict], source: str, reason: str):
 def apply_ops(sheet: UserSheet, ops: list[dict], set_aside: bool = False) -> list[dict]:
     out = []
     for op in ops:
+        who = op.get("email") or "; ".join(op.get("chat") or [])
         try:
             out.append(sheet.event(op) if op["op"] == "event" else sheet.upsert(op))
         except UsageError:
@@ -795,11 +868,11 @@ def apply_ops(sheet: UserSheet, ops: list[dict], set_aside: bool = False) -> lis
             # can never go in (a protected sheet on the Mac) does not hold up every later change.
             if not set_aside:
                 raise
-            out.append({"status": "error", "error": f"{op.get('email')}: {type(e).__name__}: {e}"[:300]})
+            out.append({"status": "error", "error": f"{who}: {type(e).__name__}: {e}"[:300]})
         except Exception as e:  # noqa: BLE001  one odd row must not stop the rest
             if is_transient(e):
                 raise
-            out.append({"status": "error", "error": f"{op.get('email')}: {type(e).__name__}: {e}"[:300]})
+            out.append({"status": "error", "error": f"{who}: {type(e).__name__}: {e}"[:300]})
     return out
 
 
@@ -914,7 +987,8 @@ def list_rows(mapping: dict, fields: list[str]) -> list[dict]:
     headers = rows[hr - 1] if hr - 1 < len(rows) else []
     by_text = {norm_header(h): i for i, h in reversed(list(enumerate(headers))) if text(h)}
     idx = {f: by_text.get(norm_header(h)) for f, h in mapping["columns"].items()}
-    names = {"邮箱": "email", "频道链接": "channel", "KOL": "name", "待办方": "owner", "进展摘要": "summary"}
+    names = {"邮箱": "email", "频道链接": "channel", "KOL": "name", "待办方": "owner", "进展摘要": "summary",
+             "聊天账号": "chat"}
     out = []
     for r in rows[hr:]:
         item = {}

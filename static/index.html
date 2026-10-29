@@ -203,8 +203,13 @@
   table.pairs tr.changed td.zh { background: var(--accent-soft); }
   table.pairs tr.changed td:first-child { color: var(--muted); }
   /* a new email */
-  .compose .grid2 { display: grid; grid-template-columns: 56px 1fr; gap: 6px 8px; align-items: center; margin-bottom: 8px; }
-  .compose .grid2 label { font-size: 12px; color: var(--muted); margin: 0; }
+  .compose .grid2, .reply .rcpt { display: grid; grid-template-columns: 56px 1fr; gap: 6px 8px; align-items: center; margin-bottom: 8px; }
+  .compose .grid2 label, .reply .rcpt label { font-size: 12px; color: var(--muted); margin: 0; }
+  .reply .target { margin: 0 0 8px; }
+  .reply .target b { color: var(--text); }
+  details.msg .replyacts { float: right; display: inline-flex; gap: 6px; }
+  details.msg .replyacts .act { padding: 2px 10px; font-size: 12px; }
+  details.msg.target { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
   .compose .grid2 select { justify-self: start; }
   .compose > label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
   dialog.small:not([open]) { display: none; }
@@ -370,6 +375,7 @@ try {
     <button type="button" role="tab" id="tabMain" data-tab="setupMain" aria-controls="setupMain" aria-selected="true">签名和谈判方式</button>
     <button type="button" role="tab" id="tabMail" data-tab="setupMail" aria-controls="setupMail" aria-selected="false">邮件格式</button>
     <button type="button" role="tab" id="tabSheet" data-tab="setupSheet" aria-controls="setupSheet" aria-selected="false">KOL 总表</button>
+    <button type="button" role="tab" id="tabChat" data-tab="setupChat" aria-controls="setupChat" aria-selected="false">私信渠道</button>
   </div>
   <section id="setupMain" role="tabpanel" aria-labelledby="tabMain">
   <p class="note">第一次使用先填这两项，以后随时在右上角“设置”里改，保存后立刻生效。</p>
@@ -429,6 +435,11 @@ try {
     <button class="act" id="sheetUnlink" type="button">断开</button>
     <button class="act" id="sheetClose" type="button">关闭</button></div>
   <div class="note" id="sheetNote"></div>
+  </section>
+  <section id="setupChat" class="chat-setup" role="tabpanel" aria-labelledby="tabChat" hidden>
+  <p class="note">Telegram 和 Discord 上的 KOL 私信接进 KOL Mail 以后，在页头“私信”里看中文、按手册起草，关联了总表的会话每条消息都会记进总表。</p>
+  <section><div id="tgSetup"></div></section>
+  <section><div id="dcSetup"></div></section>
   </section>
 </dialog>
 <dialog id="lookDlg" class="small">
@@ -568,7 +579,8 @@ try {
   <details class="msg">
     <summary><span class="who" data-f="who"></span><span class="preview" data-f="preview"></span><span class="when" data-f="when"></span></summary>
     <div class="inner">
-      <div class="meta">发件人 <b data-f="from"></b> · 收件人 <span data-f="to"></span></div>
+      <div class="meta"><span class="replyacts"><button class="act" data-f="replyOne" type="button" title="回复这一封：收件人是它的发件人">回复</button><button class="act" data-f="replyAll" type="button" title="回复这一封：收件人是它的发件人，它的其他收件人进抄送">回复全部</button></span>
+        发件人 <b data-f="from"></b> · 收件人 <span data-f="to"></span></div>
       <div class="cols">
         <div class="pane"><h3>原文 <span data-f="lang"></span></h3><div class="body" data-f="body"></div></div>
         <div class="pane zhpane" data-f="zhpane"><h3>中文译文 <button class="act" data-f="retranslate">重新翻译</button></h3>
@@ -591,6 +603,12 @@ try {
   <div class="reply" data-f="replybox">
     <h3 style="margin:0 0 8px;font-size:14px">回复 <span class="note" data-f="savedNote" style="font-weight:normal"></span></h3>
     <div class="phonebar" data-f="phonebar"><span data-f="phoneText"></span><button class="act" data-f="phoneLoad">载入这版草稿</button></div>
+    <div class="note target" data-f="target"></div>
+    <div class="rcpt">
+      <label>收件人</label><input type="text" data-f="rto" placeholder="多个用逗号隔开" autocomplete="off">
+      <label>抄送</label><input type="text" data-f="rcc" placeholder="可以不填" autocomplete="off">
+      <label>密送</label><input type="text" data-f="rbcc" placeholder="可以不填；其他收件人看不到密送的人" autocomplete="off">
+    </div>
     <textarea data-f="notes" placeholder="可以留空直接点“按手册起草”，AI 会先给出 2 到 3 种回复策略让你选；也可以先写几句要点（如“接受 120 美元一条，要求两条打包”）。写好完整的中文回复的话，点“翻译我写的中文”。"></textarea>
     <div class="btns">
       <button class="act primary" data-f="draftBtn">按手册起草</button>
@@ -598,11 +616,11 @@ try {
       <span class="note" data-f="draftNote"></span>
     </div>
     <div class="strategies" data-f="strategies">
+      <label class="note">对方是个什么样的人</label><div class="hint situation" data-f="person"></div>
       <label class="note">局面分析</label><div class="hint situation" data-f="situation"></div>
       <div class="opts" data-f="opts"></div>
     </div>
     <div class="draft" data-f="draft">
-      <label>收件人</label><input type="text" data-f="to2" disabled>
       <label>主题</label><input type="text" data-f="rsubject">
       <label>回复正文（<span data-f="rlang"></span>，可直接修改）</label><textarea data-f="rbody" style="min-height:200px"></textarea>
       <div class="pairsbar"><label>中文对照（逐段回译实际要发出的正文；右边的中文可以直接改）</label>
@@ -1639,8 +1657,9 @@ async function openMessage(id, rowEl, mailbox) {
   try { data = await api(path + "&quick=1"); }
   catch (e) { loading.textContent = e.message; return; }
   if (!loading.isConnected) return;  // another conversation was opened meanwhile
-  // Everything below is bound to this conversation; replies always go to its latest KOL message.
-  const ctx = { view, cards: new Map(), urls: [], opened: { mailbox, id: String(id) }, account: st.account };
+  // Everything below is bound to this conversation. A reply answers one of its messages (the one clicked in the list,
+  // or any other picked with its 回复 / 回复全部 buttons), to whoever is in 收件人, 抄送 and 密送.
+  const ctx = { view, cards: new Map(), urls: [], opened: { mailbox, id: String(id) }, account: st.account, feedbackLog: [] };
   if (st.current && st.current.outAtts) st.current.outAtts.forEach(a => a.url && URL.revokeObjectURL(a.url));
   st.current = ctx;
   view.append($("#readerTpl").content.cloneNode(true));
@@ -1656,6 +1675,7 @@ async function openMessage(id, rowEl, mailbox) {
   field(view, "sendBtn").onclick = () => send(ctx);
   field(view, "flagBtn").onclick = () => safe(toggleReaderFlag)(ctx);
   for (const f of ["notes", "rsubject", "rbody", "feedback"]) field(view, f).addEventListener("input", () => saveSoon(ctx));
+  for (const f of ["rto", "rcc", "rbcc"]) field(view, f).addEventListener("input", () => { ctx.rcptEdited = true; saveSoon(ctx); });
   setupAttachments(ctx);
   restoreDraft(ctx, data.kol_address).catch(() => {}).finally(() => phoneDraft(ctx).catch(() => {}));
   if (!data.partial) return;
@@ -1670,14 +1690,17 @@ async function openMessage(id, rowEl, mailbox) {
 
 // Fills the message cards; called again when a partial answer is followed by the whole conversation.
 function renderThread(ctx, data) {
-  const view = ctx.view, target = data.reply_target;
-  if (!ctx.drafted) {  // a draft that was already started stays bound to the message it was written for
-    ctx.email_id = target && target.email_id; ctx.mailbox = target && target.mailbox;
-    ctx.message_id = target && target.message_id;
-    field(view, "replybox").hidden = !target;
+  const view = ctx.view, target = data.reply_target, msgs = data.messages;
+  ctx.me = (data.me || "").toLowerCase(); ctx.msgs = msgs; ctx.complete = !data.partial;
+  // A saved draft's message that is not in the whole conversation any more (moved, deleted): back to the default.
+  if (ctx.savedTarget && !data.partial && !findMsg(ctx, ctx.mailbox, ctx.email_id)) ctx.targetPinned = ctx.savedTarget = false;
+  // A draft that was already started, or a message picked by hand, stays the one answered.
+  if (!ctx.drafted && !ctx.targetPinned) {
+    const m = target && findMsg(ctx, target.mailbox, target.email_id);
+    if (m) setTarget(ctx, m, false, true);
+    else { ctx.email_id = ctx.mailbox = ctx.message_id = null; field(view, "replybox").hidden = true; }
   }
   clearInterval(ctx.poll); ctx.cards = new Map();
-  const msgs = data.messages;
   const opened = msgs.find(m => m.opened);
   if (!ctx.flagMsg || (opened && ctx.flagMsg.id !== opened.email_id))  // a flag clicked meanwhile is not undone
     ctx.flagMsg = opened ? { mailbox: opened.mailbox, id: opened.email_id, flagged: !!opened.flagged } : null;
@@ -1698,9 +1721,14 @@ function renderThread(ctx, data) {
     field(card, "from").textContent = m.sender || "";
     field(card, "to").textContent = (m.recipients || []).join(", ");
     field(card, "body").textContent = m.body || "";
+    const one = field(card, "replyOne"), all = field(card, "replyAll");
+    if (m.own) { one.textContent = "跟进这封"; one.title = "接着我方这封写：收件人是它的收件人"; all.hidden = true; }
+    else all.hidden = !replyRecipients(ctx, m, true).cc.length;  // nobody else on it: 回复 says it all
+    one.onclick = ev => { ev.preventDefault(); setTarget(ctx, m, false); };
+    all.onclick = ev => { ev.preventDefault(); setTarget(ctx, m, true); };
     const atts = field(card, "atts");
     card.addEventListener("toggle", () => { if (card.open) renderAttachments(ctx, m, atts); });
-    if (i === msgs.length - 1 || (target && m.email_id === target.email_id && m.mailbox === target.mailbox)) card.open = true;
+    if (i === msgs.length - 1 || (m.email_id === ctx.email_id && m.mailbox === ctx.mailbox)) card.open = true;
     card.msg = m;
     if (renderTranslation(card, m.translation, m.own)) ctx.cards.set(m.message_id, card);
     field(card, "retranslate").onclick = safe(async (ev) => {
@@ -1711,8 +1739,62 @@ function renderThread(ctx, data) {
     list.append(card);
     if (card.open) renderAttachments(ctx, m, atts);
   });
+  markTarget(ctx);
   const last = list.lastElementChild; if (last) last.scrollIntoView({ block: "nearest" });
   if (ctx.cards.size) startPoll(ctx);
+}
+
+// ---------------------------------------------------------------- which message a reply answers, and to whom
+const addrOf = s => { const m = /<([^<>\s]+)>\s*$/.exec(s || ""); return ((m ? m[1] : s) || "").trim().toLowerCase(); };
+const findMsg = (ctx, mailbox, id) => (ctx.msgs || []).find(m => m.mailbox === mailbox && m.email_id === String(id));
+const targetKey = ctx => ctx.email_id ? `${ctx.mailbox}\n${ctx.email_id}` : "";
+const normRcpt = s => [...new Set((s || "").toLowerCase().split(/[\s,;]+/).filter(Boolean))].sort().join(", ");
+
+// 回复: to its sender. 回复全部: its other recipients (To and Cc) go to Cc. Our own mail: to everyone it went to.
+function replyRecipients(ctx, m, all) {
+  const uniq = list => [...new Set(list.filter(a => a && a !== ctx.me))];
+  const rec = (m.recipients || []).map(addrOf);
+  if (m.own) return { to: uniq(rec), cc: [] };
+  const from = addrOf(m.sender);
+  return { to: uniq([from]), cc: all ? uniq(rec).filter(a => a !== from) : [] };
+}
+
+// auto: the default the conversation opens with; it never overwrites recipients typed by hand.
+function setTarget(ctx, m, all, auto) {
+  const v = ctx.view;
+  ctx.email_id = m.email_id; ctx.mailbox = m.mailbox; ctx.message_id = m.message_id;
+  if (!auto) { ctx.targetPinned = true; ctx.savedTarget = false; ctx.token = null; }
+  if (!auto || !ctx.rcptEdited) {
+    const { to, cc } = replyRecipients(ctx, m, all);
+    field(v, "rto").value = to.join(", "); field(v, "rcc").value = cc.join(", ");
+    if (!auto) ctx.rcptEdited = false;
+  }
+  field(v, "replybox").hidden = false;
+  markTarget(ctx);
+  if (auto) return;
+  if (ctx.strategyFor && ctx.strategyFor !== targetKey(ctx)) {  // options worked out for another message
+    field(v, "strategies").style.display = "none"; ctx.strategy = null; ctx.strategyFor = "";
+  }
+  const card = [...v.querySelectorAll("details.msg")].find(c => c.msg === m);
+  if (card && !card.open && !m.own) card.open = true;  // a picked message is opened so it can be read
+  saveSoon(ctx); field(v, "replybox").scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
+function markTarget(ctx) {
+  const v = ctx.view, m = findMsg(ctx, ctx.mailbox, ctx.email_id), el = field(v, "target");
+  v.querySelectorAll("details.msg").forEach(c => c.classList.toggle("target", !!(c.msg && m && c.msg === m)));
+  ctx.targetLabel = m ? `回复的是：${m.own ? "我方" : senderName(m.sender)} ${fmtDate(m.date)} 的邮件` + (m.own ? "（跟进我方这封）" : "")
+    : ctx.email_id ? "回复的是：自动保存草稿时选的那封邮件" : "";
+  el.textContent = ctx.targetLabel;
+  if (ctx.draftFor && ctx.draftFor !== targetKey(ctx)) {
+    const w = document.createElement("span"); w.className = "stale";
+    w.textContent = " · 正文是按另一封邮件起草的，需要的话重新起草或按意见修改";
+    el.append(w);
+  }
+}
+
+function replyRcpt(ctx) {
+  return { to: field(ctx.view, "rto").value, cc: field(ctx.view, "rcc").value };
 }
 
 function startPoll(ctx) {
@@ -1756,9 +1838,14 @@ async function strategies(ctx) {
   busy(ctx, true); note.className = "note";
   note.textContent = "AI 正在读这封信和之前的往来，按谈判手册想 2 到 3 种回法，约半分钟到一分钟…";
   try {
-    const r = await post("/api/reply/strategies", { mailbox: ctx.mailbox, email_id: ctx.email_id, ctx: ctx.token, notes: field(v, "notes").value });
+    const target = targetKey(ctx);
+    const r = await post("/api/reply/strategies", { mailbox: ctx.mailbox, email_id: ctx.email_id, ctx: ctx.token,
+                                                    notes: field(v, "notes").value, ...replyRcpt(ctx) });
     if (st.current !== ctx) return;
-    ctx.token = r.ctx;
+    ctx.token = r.ctx; ctx.strategyFor = target;
+    const person = field(v, "person");
+    person.textContent = r.person_zh || "";
+    person.hidden = person.previousElementSibling.hidden = !r.person_zh;
     field(v, "situation").textContent = r.situation_zh || "";
     const box = field(v, "opts"); box.textContent = "";
     r.options.forEach((o, i) => {
@@ -1797,15 +1884,20 @@ async function draft(ctx, opts) {
     ctx.compose ? "AI 正在按你的要点起草，跟对方以前有往来的话会先读一遍，写完再逐段回译核对，约一分钟…"
                 : "AI 正在按选定方案起草，写完再逐段回译核对，约一分钟…";
   try {
+    // A revision carries the owner's earlier rounds of feedback on this draft too: they still hold.
     const common = { ctx: ctx.token, mode: translate ? "translate" : "draft", notes: field(v, "notes").value,
-                     previous_body: opts.previous || "", feedback: opts.feedback || "" };
+                     previous_body: opts.previous || "", feedback: opts.feedback || "",
+                     feedback_history: opts.feedback ? ctx.feedbackLog || [] : [] };
     const asked = ctx.compose ? composeFields(ctx) : null;
+    const target = targetKey(ctx);
     const r = ctx.compose ? await post("/api/compose/draft", { ...common, ...asked })
-      : await post("/api/reply/draft", { ...common, mailbox: ctx.mailbox, email_id: ctx.email_id,
+      : await post("/api/reply/draft", { ...common, ...replyRcpt(ctx), mailbox: ctx.mailbox, email_id: ctx.email_id,
                                          strategy: translate ? null : (opts.strategy || ctx.strategy || null) });
     if (st.current !== ctx) return;  // the user moved on; drop this draft rather than attach it to another email
     ctx.token = r.ctx; if (opts.strategy) ctx.strategy = opts.strategy;
+    ctx.feedbackLog = opts.feedback ? [...(ctx.feedbackLog || []), opts.feedback].slice(-20) : [];
     ctx.sent = false;
+    if (!ctx.compose) { ctx.draftFor = target; ctx.draftRcpt = normRcpt(field(v, "rto").value); markTarget(ctx); }
     field(v, "draft").style.display = "block";
     if (ctx.compose) {
       if (!field(v, "rsubject").value.trim()) field(v, "rsubject").value = r.subject || "";
@@ -1813,11 +1905,12 @@ async function draft(ctx, opts) {
       ctx.draftTo = oneLine(asked.to).toLowerCase();  // send warns when 收件人 is changed after this
       showSubjectZh(ctx);
     } else {
-      field(v, "to2").value = r.to || "";
+      if (!field(v, "rto").value.trim()) field(v, "rto").value = r.to || "";
       if (!field(v, "rsubject").value) field(v, "rsubject").value = r.reply_subject || "";
     }
     field(v, "rlang").textContent = r.reply_language || "";
     field(v, "rbody").value = r.reply_body || "";
+    ctx.aiBody = r.reply_body || "";  // revise() tells a hand edit after this from the AI's own text
     field(v, "rstrategy").textContent = r.notes_zh || "";
     field(v, "rapproval").textContent = [...(r.warnings || []), r.needs_approval_zh || "无"].join("\n");
     field(v, "sendNote").textContent = "";
@@ -1830,11 +1923,18 @@ async function draft(ctx, opts) {
   finally { busy(ctx, false); }
 }
 
+// replyflow.HAND_EDIT, word for word: the draft was edited by hand after the last AI version, which wins over the
+// earlier rounds of feedback wherever they differ.
+const HAND_EDIT = "（主人在这一轮之后手动改过正文，改过的地方以正文为准）";
+
 function revise(ctx) {
-  const v = ctx.view, fb = field(v, "feedback").value.trim();
+  const v = ctx.view, fb = field(v, "feedback").value.trim(), body = field(v, "rbody").value;
   if (!fb) { field(v, "reviseNote").textContent = "先写下修改意见"; return; }
-  if (!field(v, "rbody").value.trim()) { field(v, "reviseNote").textContent = "还没有草稿可改"; return; }
-  return draft(ctx, { previous: field(v, "rbody").value, feedback: fb });
+  if (!body.trim()) { field(v, "reviseNote").textContent = "还没有草稿可改"; return; }
+  const log = ctx.feedbackLog || [], said = log.length || field(v, "notes").value.trim();
+  if (said && typeof ctx.aiBody === "string" && body !== ctx.aiBody && log[log.length - 1] !== HAND_EDIT)
+    ctx.feedbackLog = [...log, HAND_EDIT];
+  return draft(ctx, { previous: body, feedback: fb });
 }
 
 function showPairs(ctx, p) {
@@ -1975,10 +2075,12 @@ function draftFields(ctx) {
   const v = ctx.view, shown = field(v, "draft").style.display === "block";
   const common = { notes: field(v, "notes").value, feedback: field(v, "feedback").value,
     body: shown ? field(v, "rbody").value : "", lang: field(v, "rlang").textContent,
-    summary: field(v, "rstrategy").textContent, approval: field(v, "rapproval").textContent };
+    summary: field(v, "rstrategy").textContent, approval: field(v, "rapproval").textContent,
+    feedback_log: JSON.stringify(ctx.feedbackLog || []) };
   if (ctx.compose) return { ...common, to: field(v, "cto").value, cc: field(v, "ccc").value,
                             subject: field(v, "rsubject").value, language: field(v, "clang").value };
-  return { ...common, to: shown ? field(v, "to2").value : "", subject: shown ? field(v, "rsubject").value : "" };
+  return { ...common, to: field(v, "rto").value, cc: field(v, "rcc").value, bcc: field(v, "rbcc").value,
+           target: targetKey(ctx), subject: shown ? field(v, "rsubject").value : "" };
 }
 
 function saveSoon(ctx) {
@@ -2013,6 +2115,20 @@ async function restoreDraft(ctx, address) {
   if (st.current !== ctx || !d.saved_at || ctx.drafted || field(v, "notes").value || field(v, "feedback").value) return;
   field(v, "notes").value = d.notes || "";
   field(v, "feedback").value = d.feedback || "";
+  try { ctx.feedbackLog = JSON.parse(d.feedback_log || "[]").filter(x => typeof x === "string"); } catch { ctx.feedbackLog = []; }
+  if (!ctx.compose) {  // the message it answers and its recipients, as they were when it was saved
+    const [box, id] = (d.target || "").split("\n");
+    // Saved per person, not per conversation: a message this (fully loaded) conversation does not hold is not kept.
+    if (box && /^\d+$/.test(id || "") && (!ctx.complete || findMsg(ctx, box, id))) {
+      ctx.mailbox = box; ctx.email_id = id; ctx.targetPinned = ctx.savedTarget = true;
+      const m = findMsg(ctx, box, id); ctx.message_id = m ? m.message_id : null;
+      field(v, "replybox").hidden = false;
+    }
+    if (d.to) { field(v, "rto").value = d.to; ctx.rcptEdited = true; }
+    if (d.cc) field(v, "rcc").value = d.cc;
+    if (d.bcc) field(v, "rbcc").value = d.bcc;
+    markTarget(ctx);
+  }
   if (ctx.compose) {
     if (!field(v, "cto").value) field(v, "cto").value = d.to || "";
     if (!field(v, "ccc").value) field(v, "ccc").value = d.cc || "";
@@ -2021,11 +2137,12 @@ async function restoreDraft(ctx, address) {
   }
   if (d.body) {
     field(v, "draft").style.display = "block";
-    if (!ctx.compose) field(v, "to2").value = d.to || ctx.kolAddress;
+    if (!ctx.compose && !field(v, "rto").value.trim()) field(v, "rto").value = ctx.kolAddress;
+    if (!ctx.compose) { ctx.draftFor = targetKey(ctx); markTarget(ctx); }
     if (!ctx.compose || !field(v, "rsubject").value) field(v, "rsubject").value = d.subject || "";
     if (ctx.compose) { ctx.subjectOk = null; ctx.draftTo = oneLine(d.to).toLowerCase(); showSubjectZh(ctx); }
     field(v, "rlang").textContent = d.lang || "";
-    field(v, "rbody").value = d.body;
+    field(v, "rbody").value = d.body; ctx.aiBody = d.body;
     field(v, "rstrategy").textContent = d.summary || "";
     field(v, "rapproval").textContent = d.approval || "无";
     showPairs(ctx, null);
@@ -2043,21 +2160,26 @@ async function restoreDraft(ctx, address) {
 
 async function send(ctx) {
   const v = ctx.view, subject = field(v, "rsubject").value, body = field(v, "rbody").value;
-  const to = ctx.compose ? field(v, "cto").value.trim() : field(v, "to2").value, cc = ctx.compose ? field(v, "ccc").value.trim() : "";
+  const to = field(v, ctx.compose ? "cto" : "rto").value.trim(), cc = field(v, ctx.compose ? "ccc" : "rcc").value.trim();
+  const bcc = ctx.compose ? "" : field(v, "rbcc").value.trim();
   if (!body.trim() || st.current !== ctx || !ctx.pairs || ctx.pairs.text !== body) return;
   const refuse = text => { field(v, "sendNote").className = "note err"; field(v, "sendNote").textContent = text; };
   if (zhEdits(ctx).length) return refuse("你改了中文对照，但还没点“按改过的中文改原文”，原文还是旧的。先点它，或者把中文改回去");
-  if (ctx.compose && !(to && subject.trim())) return refuse("收件人和主题都要填");
+  if (!(to && subject.trim())) return refuse("收件人和主题都要填");
+  if (!ctx.compose && !ctx.email_id) return refuse("先在上面的邮件里点“回复”选一封要回的");
   if (ctx.compose && !subjectChecked(ctx)) return refuse("主题改过了，先点“更新对照”核对主题的中文");
   const preview = body.length > 300 ? body.slice(0, 300) + "…" : body;
   if ((ctx.outAtts || []).some(a => !a.id)) return refuse("附件还在上传，等一下再发");
   const atts = (ctx.outAtts || []).map(a => a.name);
   const attLine = atts.length ? `\n附件：${atts.join("、")}` : "";
-  const ccLine = cc ? `\n抄送：${cc}` : "";
+  const ccLine = (cc ? `\n抄送：${cc}` : "") + (bcc ? `\n密送：${bcc}` : "");
+  const targetLine = !ctx.compose && ctx.targetLabel ? `\n${ctx.targetLabel}` : "";
   const warnings = [ctx.uncertain ? "⚠️ 这封信上次发送结果不确定，可能已经发出过一次，先到“已发送”里确认" : "",
-    ctx.compose && ctx.draftTo && ctx.draftTo !== to.toLowerCase() ? `⚠️ 正文是按收件人 ${ctx.draftTo} 起草的，收件人后来改过，称呼和内容可能不对` : ""]
+    ctx.compose && ctx.draftTo && ctx.draftTo !== to.toLowerCase() ? `⚠️ 正文是按收件人 ${ctx.draftTo} 起草的，收件人后来改过，称呼和内容可能不对` : "",
+    !ctx.compose && ctx.draftFor && ctx.draftFor !== targetKey(ctx) ? "⚠️ 正文是按另一封邮件起草的，回复对象后来换过，内容可能对不上" : "",
+    !ctx.compose && ctx.draftRcpt && ctx.draftRcpt !== normRcpt(to) ? `⚠️ 正文是按收件人 ${ctx.draftRcpt} 起草的，收件人后来改过，称呼可能不对` : ""]
     .filter(Boolean).map(w => w + "\n").join("");
-  if (!confirm(`${warnings}确认发送？发出后无法撤回。\n\n收件人：${to}${ccLine}\n主题：${subject}${attLine}\n\n${preview}`)) return;
+  if (!confirm(`${warnings}确认发送？发出后无法撤回。\n\n收件人：${to}${ccLine}${targetLine}\n主题：${subject}${attLine}\n\n${preview}`)) return;
   const note = field(v, "sendNote");
   ctx.sent = true; updateSend(ctx);  // locked from here on: a second click must never send twice
   clearTimeout(ctx.saveTimer);
@@ -2066,8 +2188,10 @@ async function send(ctx) {
   try {
     const attachments = (ctx.outAtts || []).map(a => a.id);
     const r = ctx.compose ? await post("/api/compose/send", { to, cc, subject, body, body_zh: ctx.pairs.zh, attachments })
-      : await post("/api/send", { mailbox: ctx.mailbox, email_id: ctx.email_id, to, subject, body, body_zh: ctx.pairs.zh, attachments });
+      : await post("/api/send", { mailbox: ctx.mailbox, email_id: ctx.email_id, to, cc, bcc, draft_key: ctx.kolAddress,
+                                  subject, body, body_zh: ctx.pairs.zh, attachments });
     note.textContent = `已发送给 ${[].concat(r.to).join("、")}` + (r.cc && r.cc.length ? `，抄送 ${r.cc.join("、")}` : "") +
+                       (r.bcc && r.bcc.length ? `，密送 ${r.bcc.join("、")}` : "") +
                        (atts.length ? `，带 ${atts.length} 个附件` : "") +
                        (r.warning ? `。${r.warning}。` : "，副本在“已发送”里。");
     if (r.warning) note.className = "note err";
@@ -2423,7 +2547,9 @@ async function phoneDraft(ctx) {
     field(v, "draft").style.display = "block";
     field(v, "rbody").value = c.body;
     if (!field(v, "rsubject").value) field(v, "rsubject").value = (/^re:/i.test(c.subject || "") ? "" : "Re: ") + (c.subject || "");
-    field(v, "to2").value = c.channel === "email" ? (c.who.match(/<([^>]+)>/) || [])[1] || "" : "";
+    if (!field(v, "rto").value.trim() && c.channel === "email") field(v, "rto").value = (c.who.match(/<([^>]+)>/) || [])[1] || "";
+    ctx.draftFor = targetKey(ctx); ctx.aiBody = c.body; markTarget(ctx);
+    ctx.feedbackLog = (c.feedback || []).filter(x => typeof x === "string");  // what was said on the phone still holds
     field(v, "rstrategy").textContent = "手机上起草的版本";
     field(v, "rapproval").textContent = "无";
     showPairs(ctx, null); refreshPairs(ctx); saveSoon(ctx);
@@ -2808,7 +2934,8 @@ $("#petDemo").onclick = safe(async () => {
 });
 // ---------------------------------------------------------------- KOL 总表: link a colleague's own sheet
 const SHEET_FIELD_HINT = { email: "必须", name: "新 KOL 加行时填", channel: "邮件里显示的频道链接；只填空格子", last_contact: "写日期时间",
-  owner: "轮到我方 / 对方，沿用表里原有的叫法；格子里写的是别的字（比如人名）就不改", summary: "一句话进展；只改空格子和程序写过的格子" };
+  owner: "轮到我方 / 对方，沿用表里原有的叫法；格子里写的是别的字（比如人名）就不改", summary: "一句话进展；只改空格子和程序写过的格子",
+  chat: "Telegram / Discord 账号，写成 tg:数字(名字)、dc:数字(名字)；不带邮箱的私信靠它找到那一行；格子里是你自己写的字就不改" };
 function sheetNote(text, err) { const n = $("#sheetNote"); n.className = err ? "note err" : "note"; n.textContent = text || ""; }
 function sheetBusy(on) { for (const id of ["sheetPick", "sheetRead", "sheetNew", "sheetSave", "sheetCheck", "sheetUnlink"]) $("#" + id).disabled = on; }
 function showSheetState(info) {
@@ -3012,5 +3139,7 @@ $("#fbSend").onclick = safe(async () => {
   finally { $("#fbSend").disabled = false; }
 });
 </script>
+<script src="/static/tgsetup.js"></script>
+<script src="/static/chats.js"></script>
 </body>
 </html>

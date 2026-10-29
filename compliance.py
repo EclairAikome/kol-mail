@@ -34,6 +34,7 @@ class Violation:
     action: str
     evidence: list[str]
     fix: str = ""
+    check: str = ""
 
 
 @dataclass
@@ -221,7 +222,8 @@ def bigrams(text: str) -> set[str]:
 
 def _violation(rule: dict, evidence: list[str]) -> Violation:
     unique = list(dict.fromkeys(shown(e) for e in evidence if e and e.strip()))
-    return Violation(rule["id"], rule["title_zh"], rule["action"], unique[:3], str(rule.get("fix") or "").strip())
+    return Violation(rule["id"], rule["title_zh"], rule["action"], unique[:3], str(rule.get("fix") or "").strip(),
+                     rule["check"])
 
 
 # ---------------------------------------------------------------- the checks; each returns evidence or []
@@ -297,8 +299,15 @@ def _offers_profit_share(text: str, v: dict) -> list[str]:
 
 
 def check_cps_opens_at_default(rule: dict, body: str, ctx: Context, v: dict) -> list[str]:
+    """A pure CPS offer opens at the default rates. A fixed fee with the profit share on top is another deal (the
+    20% of net profit that came with every fixed fee closed in 2026-10), so a draft that puts a fee of ours on the
+    table is left alone. The KOL's own quote, turned down in the draft, is not a fee of ours."""
     offers = [s for s in _offers_profit_share(body, v) if not refuses(s, v)]
     if not offers:
+        return []
+    quoted = {n for t in ctx.kol_texts for n in numbers_in(own_words(t))}
+    fees = [m.group(0) for s in sentences(body) if not WITHDRAWAL.search(s) for m in MONEY.finditer(s)]
+    if any(set(numbers_in(f)) - quoted for f in fees):
         return []
     if any(_offers_profit_share(t, v) for t in ctx.our_texts):
         return []  # the profit share was on the table already: this is the escalation, not the opening
@@ -437,10 +446,11 @@ WITHDRAWAL = re.compile(r"withdraw|minimum|вывод|минимальн|retir|s
 
 
 def check_amounts_listed(rule: dict, body: str, ctx: Context, v: dict) -> list[str]:
-    """Amounts we put forward that the owner was not told about. Their own quote, figures from our earlier mails
-    and the withdrawal minimum are not new offers."""
+    """Amounts we put forward that the owner was not told about. Their own quote, figures from our earlier mails,
+    amounts the owner gave and the withdrawal minimum are not new offers."""
     said = set(numbers_in(ctx.needs_approval)) | {n for t in ctx.our_texts + ctx.kol_texts
-                                                  for n in numbers_in(own_words(t))}
+                                                  for n in numbers_in(own_words(t))} | \
+        {n for t in ctx.owner_texts for n in owner_numbers(t)}
     out = []
     for amount in [m.group(0).strip() for s in sentences(body) if not WITHDRAWAL.search(s) for m in MONEY.finditer(s)]:
         values = numbers_in(amount)
@@ -450,7 +460,7 @@ def check_amounts_listed(rule: dict, body: str, ctx: Context, v: dict) -> list[s
 
 
 def check_coupon_count_listed(rule: dict, body: str, ctx: Context, v: dict) -> list[str]:
-    if re.search(r"券|coupon|月卡", ctx.needs_approval or "", re.IGNORECASE):
+    if any(re.search(r"券|coupon|月卡", t or "", re.IGNORECASE) for t in [ctx.needs_approval, *ctx.owner_texts]):
         return []
     return [s for s in sentences(body) if any(p.search(s) for p in rule["patterns"])]
 
@@ -527,12 +537,15 @@ def review_notes(violations: list[Violation]) -> list[str]:
 
 def context_for(ctx: dict, *, signature: str = "", playbook: str = "", owner_texts: list[str] | None = None,
                 zh: str = "", needs_approval: str = "", outgoing_attachments: bool = False) -> Context:
-    """A Context from app.py's reply context (msg, earlier, ours, materials, subject)."""
+    """A Context from app.py's reply context (msg, earlier, ours, materials, subject). When the email answered is
+    one of ours (own_target), it counts with our words, never as the KOL's."""
     msg = ctx.get("msg") or {}
-    theirs = [msg] + list(ctx.get("earlier") or [])
+    own = bool(ctx.get("own_target"))
+    theirs = ([] if own else [msg]) + list(ctx.get("earlier") or [])
+    ours = ([msg] if own else []) + list(ctx.get("ours") or [])
     return Context(
         kol_texts=[str(m.get("body") or "") for m in theirs],
-        our_texts=[str(m.get("body") or "") for m in ctx.get("ours") or []],
+        our_texts=[str(m.get("body") or "") for m in ours],
         owner_texts=[t for t in owner_texts or [] if t and t.strip()],
         zh=zh, playbook=playbook, subject=str(msg.get("subject") or ctx.get("subject") or ""), signature=signature,
         needs_approval=needs_approval,
