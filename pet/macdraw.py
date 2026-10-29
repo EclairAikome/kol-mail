@@ -10,7 +10,15 @@ clip's frame and the props on top. The window server blends them with their alph
 Windows, and each frame replaces the last one whole.
 
 Everything goes through the Objective-C runtime and Core Graphics with ctypes, as win.py does with GDI+: nothing to
-install. No call here returns a struct (objc_msgSend would need its _stret twin on Intel Macs for that)."""
+install. No call here returns a struct (objc_msgSend would need its _stret twin on Intel Macs for that): a screen's
+rectangle is read boxed in an NSValue (key-value coding) and copied out of it.
+
+Tk's own "-topmost" does not last on her: each time Tk maps an overrideredirect toplevel it clears the flag
+(ApplyContainerOverrideChanges in tkMacOSXWm.c, ApplyMasterOverrideChanges in older Tk 8.6), so she and her bubble
+came out normal windows that any other window covered. Tk does put such windows on every desktop, but a normal app's
+windows are kept off other apps' full-screen Spaces, where a swipe to a full-screen app lost her: only an accessory
+app's are let on. keep_in_front() sets the level and the Spaces once Tk has mapped the window; mapping it again
+(wm deiconify) would undo both."""
 
 from __future__ import annotations
 
@@ -27,6 +35,12 @@ class CGRect(ctypes.Structure):
 BGRA = 2 | (2 << 12)   # kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little: what Core Animation shows as is
 NS_WINDOW_BELOW = -1   # NSWindowOrderingMode for addSubview:positioned:relativeTo:
 NS_VIEW_SIZABLE = 2 | 16  # NSViewWidthSizable | NSViewHeightSizable
+TOPMOST = 19           # kCGUtilityWindowLevel, the level Tk's -topmost sets: over every app's windows, under the Dock
+                       # (her bubble goes one higher, the Dock's own level: over her head and never under the Dock)
+# NSWindowCollectionBehavior CanJoinAllSpaces | Stationary | IgnoresCycle | FullScreenAuxiliary: on every desktop
+# and beside other apps in full screen, left where she is by Mission Control and out of Cmd-` window cycling
+EVERY_SPACE = 1 | 16 | 64 | 256
+ACCESSORY = 1          # NSApplicationActivationPolicyAccessory: no Dock icon or menu bar of its own
 
 
 def _sig(fn, restype, *argtypes):
@@ -186,6 +200,57 @@ def find_window(title: str) -> int:
             if name and send(name, "UTF8String", restype=c_char_p) == title.encode("utf-8"):
                 return window
     raise OSError(f"no window titled {title!r}")
+
+
+def without_dock_icon() -> bool:
+    """An accessory app, as a menu bar helper is: only such an app's windows are let onto another app's full-screen
+    Space, and the pet's Python then shows no rocket in the Dock either. Tk makes the app a regular one when AppKit
+    says it has finished launching, which comes whenever the event loop gets to it: so this is asked again later.
+    True when it had to change the policy."""
+    app = send(cls("NSApplication"), "sharedApplication")
+    if send(app, "activationPolicy", restype=c_long) == ACCESSORY:
+        return False
+    return bool(send(app, "setActivationPolicy:", ACCESSORY, restype=c_bool, argtypes=(c_long,)))
+
+
+def keep_in_front(window: int, level: int = TOPMOST):
+    """Over every app's windows and on every Space, set after Tk has mapped the window (see the top)."""
+    send(window, "setLevel:", level, restype=None, argtypes=(c_long,))
+    send(window, "setCollectionBehavior:", EVERY_SPACE, restype=None, argtypes=(c_ulong,))
+    send(window, "setHidesOnDeactivate:", False, restype=None, argtypes=(c_bool,))
+
+
+def _rect(obj: int, key: bytes) -> CGRect:
+    """obj.key for an NSRect property, through key-value coding: AppKit boxes it in an NSValue."""
+    name = send(cls("NSString"), "stringWithUTF8String:", key, argtypes=(c_char_p,))
+    value = send(obj, "valueForKey:", name, argtypes=(c_void_p,))
+    if not value:
+        raise OSError(f"no {key.decode()}")
+    r = CGRect()
+    send(value, "getValue:size:", ctypes.addressof(r), ctypes.sizeof(r), restype=None, argtypes=(c_void_p, c_size_t))
+    return r
+
+
+def screens() -> list[tuple[tuple[int, int, int, int], tuple[int, int, int, int]]]:
+    """Each screen's rectangle and the part of it without the menu bar and the Dock, as left, top, right, bottom in
+    Tk's coordinates: points from the top left of the first screen (the one with the menu bar), y downwards. AppKit
+    counts from that screen's bottom left upwards. The first screen comes first."""
+    rects = []
+    with Pool():
+        found = send(cls("NSScreen"), "screens")
+        for i in range(send(found, "count", restype=c_ulong) if found else 0):
+            screen = send(found, "objectAtIndex:", i, argtypes=(c_ulong,))
+            rects.append((_rect(screen, b"frame"), _rect(screen, b"visibleFrame")))
+    if not rects:
+        return []
+    height = rects[0][0].h
+    return [(tk_rect(frame, height), tk_rect(visible, height)) for frame, visible in rects]
+
+
+def tk_rect(r: CGRect, first_height: float) -> tuple[int, int, int, int]:
+    """An AppKit rectangle as left, top, right, bottom in Tk's coordinates, flipped about the first screen's height
+    as Tk itself does (TkMacOSXZeroScreenHeight)."""
+    return round(r.x), round(first_height - r.y - r.h), round(r.x + r.w), round(first_height - r.y)
 
 
 class Layers:

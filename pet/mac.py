@@ -7,7 +7,12 @@ layers not come up, Tk 8.6 still draws her itself (below); Tk 9 gives up (exit c
 Notification Center, as when Tk is missing altogether and main.py's import fails.
 
 On a Mac the pet always has its normal size. Which frame shows follows the clock, as on Windows, about 60 times a
-second. Pictures hold five frames each: a tall one takes long to decode."""
+second. Pictures hold five frames each: a tall one takes long to decode.
+
+She and her bubble stay over every app's windows and on every Space, full-screen apps' included: macdraw.keep_in_front
+once Tk has mapped each window (Tk's own -topmost does not last on a window without a frame), and the app an
+accessory one (macdraw.without_dock_icon, checked again with every poll: Tk makes it a regular app once). Tk knows the
+size of the first screen only, so where she may stand and where her bubble goes come from macdraw.screens()."""
 
 from __future__ import annotations
 
@@ -19,7 +24,7 @@ import tkinter as tk
 import webbrowser
 from pathlib import Path
 
-from . import macdraw
+from . import macdraw, place
 from .brain import Brain
 from .client import Client, own_page
 from .sprites import Sprites
@@ -28,6 +33,7 @@ CREAM, NAVY, INK, MUTED = "#FFFBF4", "#283070", "#1E2233", "#5A6075"
 DRAG_THRESHOLD = 4
 UNSUPPORTED = 4  # main.UNSUPPORTED: this Mac cannot show the pet, the app uses Notification Center
 WINDOW_TITLE = f"KOL Mail pet {os.getpid()}"  # how macdraw finds Tk's window; never shown (no title bar)
+BUBBLE_TITLE = f"KOL Mail pet bubble {os.getpid()}"  # and each bubble's, numbered: a closed one may linger a moment
 
 
 RETRY_AFTER = 30.0  # seconds before a picture that could not be read is tried again
@@ -97,12 +103,15 @@ class PetApp:
         self.image = tk.PhotoImage(width=cw, height=ch)
         self.label = tk.Label(root, image=self.image, bg="systemTransparent", bd=0, highlightthickness=0)
         self.label.pack()
+        self.said: set[str] = set()  # what went wrong already, printed once each
+        self.accessory, self.made_regular = False, 0  # see stay_accessory
         x, y = self.settings.get("x"), self.settings.get("y")
-        if x is None or y is None or not (0 <= x < root.winfo_screenwidth() and 0 <= y < root.winfo_screenheight()):
+        if x is None or y is None or not place.holder(self.screens(), int(x) + cw // 2, int(y) + ch // 2):
             x, y = root.winfo_screenwidth() - cw - 40, root.winfo_screenheight() - ch - 90  # above the Dock
         self.pos = (int(x), int(y))
         root.geometry(f"{cw}x{ch}+{self.pos[0]}+{self.pos[1]}")
         self.bubble_win: tk.Toplevel | None = None
+        self.bubbles = 0  # bubbles shown so far: each one's window has a title of its own
         self.bubble_key = None
         self.shown, self.frame, self.started = "", -1, 0.0
         self.shown_key = None  # the state and the one-off move it belongs to
@@ -209,7 +218,6 @@ class PetApp:
             return
         w = self.bubble_win = tk.Toplevel(self.root)
         w.overrideredirect(True)
-        w.wm_attributes("-topmost", True)
         frame = tk.Frame(w, bg=CREAM, highlightbackground=NAVY, highlightthickness=2, padx=12, pady=9,
                          cursor="arrow" if b.say else "pointinghand")
         frame.pack()
@@ -223,18 +231,66 @@ class PetApp:
                 lbl.pack(fill="x")
                 lbl.bind("<ButtonRelease-1>", self.on_bubble)
         frame.bind("<ButtonRelease-1>", self.on_bubble)
-        w.update_idletasks()
+        w.update_idletasks()  # maps it: Tk has made its NSWindow now
         self.place_bubble()
+        self.bubbles += 1
+        name = f"{BUBBLE_TITLE} {self.bubbles}"
+        w.title(name)
+        self.keep_in_front(w, name, macdraw.TOPMOST + 1)  # over her head, not under it
 
     def place_bubble(self):
+        """Above her head, on the screen she stands on."""
         w = self.bubble_win
         if not w:
             return
         bw, bh = w.winfo_reqwidth(), w.winfo_reqheight()
         cw, ch = self.sprites.cell
-        bx = max(0, min(self.pos[0] + cw // 2 - bw // 2, self.root.winfo_screenwidth() - bw))
-        by = max(0, self.pos[1] + int(ch * 0.12) - bh)
+        x, y = self.pos
+        bx, by = place.bubble_at(self.screens(), (x, y, x + cw, y + ch), (bw, bh),
+                                 x + cw // 2 - bw // 2, y + int(ch * 0.12) - bh)
         w.geometry(f"+{bx}+{by}")
+
+    def screens(self) -> list[place.Screen]:
+        """The screens there are now; should AppKit not say, the first one, the only one Tk knows."""
+        try:
+            found = macdraw.screens()
+        except Exception as e:  # noqa: BLE001  ctypes and AppKit fail in many ways; Tk's own size still holds
+            self.say_once("screens", e)
+            found = []
+        if found:
+            return [place.Screen(f"screen {i}", rect, work, primary=i == 0) for i, (rect, work) in enumerate(found)]
+        rect = (0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight())
+        return [place.Screen("screen 0", rect, rect, primary=True)]
+
+    def keep_in_front(self, win: tk.Wm, title: str, level: int):
+        """Tk's -topmost again, now that the window is mapped (it was cleared then), then the level and every Space
+        through AppKit; without AppKit she is at least over the other windows of this Space. A window mapped again
+        (wm deiconify) needs this again. With her this high, Tk 9 waits up to 20 ms for each new bubble to be its
+        frontmost window (XMapWindow), which it is not until here: a frame may be shown twice."""
+        win.wm_attributes("-topmost", False)
+        win.wm_attributes("-topmost", True)
+        try:
+            macdraw.keep_in_front(macdraw.find_window(title), level)
+        except Exception as e:  # noqa: BLE001  as in attach_layers: any failure means "Tk's -topmost only"
+            self.say_once("keep in front" if win is self.root else "keep the bubble in front", e)
+
+    def stay_accessory(self):
+        """An accessory app from before she shows on; pet.log says the first time Tk made it a regular app again."""
+        try:
+            changed = macdraw.without_dock_icon()
+        except Exception as e:  # noqa: BLE001  never in the way of the poll, which keeps her alive
+            self.say_once("dock icon", e)
+            return
+        if changed and self.accessory:
+            self.made_regular += 1
+            if self.made_regular == 1:
+                print("pet: Tk made this a regular app again, an accessory one once more", flush=True)
+        self.accessory = True
+
+    def say_once(self, what: str, e: Exception):
+        if what not in self.said:
+            self.said.add(what)
+            print(f"pet {what}:", repr(e), flush=True)
 
     # ---------------------------------------------------------------- what a click touched
 
@@ -263,6 +319,7 @@ class PetApp:
         if self.brain.quit_reason:
             self.root.after(2500 if self.brain.quit_reason == "hidden from the menu" else 0, self.root.destroy)
             return
+        self.stay_accessory()
         self.root.after(250, self.poll)
 
     def open(self, url: str | None):
@@ -339,9 +396,11 @@ class PetApp:
     def attach_layers(self) -> bool:
         """Map the window unseen (alpha 0: Tk 9 would flash a black box) and put the layers in it. Tk gives the
         NSWindow its title only once mapped, and the title is how macdraw finds it. False: no pet on this Mac."""
+        self.stay_accessory()  # before she shows: only then do full-screen Spaces take her
         self.root.wm_attributes("-alpha", 0.0)
         self.root.deiconify()
         self.root.update()
+        self.stay_accessory()  # Tk may have made it a regular app again meanwhile
         self.root.title(WINDOW_TITLE)
         try:
             self.layers = macdraw.Layers(WINDOW_TITLE, self.sprites.cell)
@@ -349,6 +408,7 @@ class PetApp:
             print("pet layers:", repr(e), "Tk", tk.TkVersion, flush=True)
             if tk.TkVersion >= 9:  # Tk 9 by itself shows a black box with trails: rather no pet at all
                 return False
+        self.keep_in_front(self.root, WINDOW_TITLE, macdraw.TOPMOST)
         return True
 
     def run(self) -> int:

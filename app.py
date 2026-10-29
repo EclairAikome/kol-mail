@@ -46,6 +46,7 @@ import config  # noqa: E402
 import autoreport  # noqa: E402
 import accounts  # noqa: E402
 import autoreply  # noqa: E402
+import awake  # noqa: E402
 import petfeed  # noqa: E402
 import skin  # noqa: E402
 import llm  # noqa: E402
@@ -721,7 +722,8 @@ job_event = asyncio.Event()
 state = {"last_scan": None, "scan_error": None, "translating": None, "claude_error": None, "prefetched": None,
          "autoreply_error": None, "telegram_error": None, "sheet_error": None, "notify_error": None,
          "unread_rev": 0,  # bumped whenever the unread state (or a shown date) changes, so the page knows to repaint
-         "autoreply_alert": None, "mobile_error": None}  # last off-hours failure; stays visible until the next successful auto-reply
+         "autoreply_alert": None, "mobile_error": None,  # last off-hours failure; stays visible until the next successful auto-reply
+         "awake_error": None, "kept_awake": None, "slept": None}  # awake_loop: on duty after work, and a sleep that cost it
 
 
 def telegram_session() -> str | None:
@@ -1389,11 +1391,15 @@ async def translator_loop():
             await asyncio.sleep(5)
 
 
+scan_now = asyncio.Event()  # set when the computer has just woken: what came meanwhile is looked at right away
+
+
 async def scan_loop():
     while True:
         if restart_pending:  # the primary mailbox changed: nothing may be logged or announced for the old one
             await asyncio.sleep(5)
             continue
+        scan_now.clear()  # before the scan: a wake-up during it scans again right after
         errors = []
         for account in list(ACCOUNTS):
             if account not in ACCOUNTS:  # logged out meanwhile
@@ -1408,7 +1414,9 @@ async def scan_loop():
                     log("scan failed", account.name, err_text(e))
         state["last_scan"] = time.strftime("%H:%M:%S")
         state["scan_error"] = "；".join(errors) or None
-        await asyncio.sleep(SCAN_INTERVAL)
+        # On a Mac the wait does not count the time asleep: without scan_now it would go on for minutes after waking
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(scan_now.wait(), SCAN_INTERVAL)
 
 
 async def scan_account():
@@ -2953,7 +2961,7 @@ async def api_feedback(request: Request):
 
 ERROR_FIELDS = {"claude_error": "AI", "scan_error": "收信检查", "notify_error": "桌面通知", "sheet_error": "KOL 总表",
                 "autoreply_error": "自动回复设置", "telegram_error": "Telegram", "mobile_error": "手机审稿",
-                "mail_error": "邮箱连接", "update_error": "自动更新"}
+                "mail_error": "邮箱连接", "update_error": "自动更新", "awake_error": "下班值守"}
 
 
 async def autoreport_loop():
@@ -2966,6 +2974,57 @@ async def autoreport_loop():
                            "update_error": UPDATE.status.get("error")})
         except Exception as e:  # noqa: BLE001  the watcher must never stop the app
             log("autoreport check failed:", err_text(e))
+
+
+# ---------------------------------------------------------------- awake after work (awake.py)
+
+AWAKE_BEAT = 20              # seconds between looks at the clocks and at the duty
+SLEPT_SHOWN = 12 * 3600      # how long the page keeps saying when a sleep kept KOL Mail from its duty
+
+
+async def awake_loop():
+    """From shortly before closing time and while on duty the computer does not sleep by itself; after a sleep the
+    mail is looked at at once, and a sleep that kept KOL Mail from its duty is told (after_sleep)."""
+    watch, awake_keeper, failed = awake.SleepWatch(beat=AWAKE_BEAT), awake.KeepAwake(), ""
+    while True:
+        await asyncio.sleep(AWAKE_BEAT)
+        try:
+            cfg, now = load_autoreply_config(), datetime.now(autoreply.TZ)
+            woke, stretch = watch.look(now)
+            if woke:
+                log("the computer woke from sleep")
+                scan_now.set()
+            if stretch:
+                after_sleep(cfg, *stretch)
+            state["awake_error"] = awake_keeper.hold(awake.keep_awake(cfg, now))
+            state["kept_awake"] = awake.duty_note() if awake_keeper.holding and awake.on_duty(cfg, now) else None
+            if state["slept"] and time.time() - state["slept"]["at"] > SLEPT_SHOWN:
+                state["slept"] = None
+            failed = ""
+        except Exception as e:  # noqa: BLE001  this loop must not stop: it is what keeps the computer awake
+            if err_text(e) != failed:  # once, not every 20 s
+                failed = err_text(e)
+                log("awake loop:", failed)
+
+
+slept_told: dict = {"period": None}  # the off period whose missed duty went to the phone already: once per period
+
+
+def after_sleep(cfg, start: datetime, end: datetime):
+    """The page says when a sleep kept KOL Mail from its duty; the phone hears it once per off period, and only for
+    a long sleep, with what to do instead. Whether messages came meanwhile is not known here: it says they may have."""
+    span = f"{start:%m-%d %H:%M} 到 {end:%m-%d %H:%M}"
+    log("the computer slept", span)
+    period = awake.missed_period(cfg, start, end)
+    if period is None:
+        return
+    state["slept"] = {"text": f"电脑 {span} 睡着了，这段时间没能值守", "at": time.time()}
+    if (end - start).total_seconds() < awake.TELL_LEAST or slept_told["period"] == period:
+        return
+    slept_told["period"] = period
+    then = "电脑醒着时接着值守。" if awake.on_duty(cfg, end) else "请看一下电脑上这段时间来的消息。"
+    spawn(tell_owner(f"电脑 {span} 睡着了，这段时间 KOL Mail 没法值守，期间来的 KOL 消息没有及时回复或推送。{then}"
+                     + awake.advice()), "tell the owner about a sleep")
 
 
 # ---------------------------------------------------------------- first use: signature and own negotiation style
@@ -6638,7 +6697,7 @@ async def lifespan(app):
     loops = [] if LOGGED_OUT else [mail.run(), bg.run(), finder.run(), translator_loop(), prefetch_loop()]
     if not DEV and not LOGGED_OUT:  # a dev copy next to the real service must never answer, notify, log or send anything
         loops += [scan_loop(), tg.run(), telegram_loop(), sheet_loop(), sheet_channels_loop(), mobile_loop(),
-                  case_worker()]
+                  case_worker(), awake_loop()]
     if not DEV or os.environ.get("KOL_PET") == "1":  # a dev copy shows its own pet only when asked
         loops.append(keeper.run())
     if autoreport.enabled():

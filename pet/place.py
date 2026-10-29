@@ -35,7 +35,7 @@ VERSION = 1
 @dataclass(frozen=True)
 class Screen:
     device: str
-    rect: tuple[int, int, int, int]  # left, top, right, bottom in physical pixels
+    rect: tuple[int, int, int, int]  # left, top, right, bottom in physical pixels (on a Mac: Tk's points)
     work: tuple[int, int, int, int]  # the same without the taskbar
     dpi: int = 96
     primary: bool = False
@@ -61,6 +61,15 @@ def nearest(screens: list[Screen], x: int, y: int) -> Screen:
 def clamp(x: int, y: int, w: int, h: int, work) -> tuple[int, int]:
     """Inside the work area, as far as she fits."""
     return max(work[0], min(x, work[2] - w)), max(work[1], min(y, work[3] - h))
+
+
+def bubble_at(screens: list[Screen], pet, size: tuple[int, int], x: int, y: int) -> tuple[int, int]:
+    """Where a bubble of `size` wanted at (x, y) goes for the pet at `pet` (left, top, right, bottom): inside the
+    work area of the screen her middle is on, or of the nearest one, so never on another screen than hers. Used by
+    the Mac pet, where Tk knows the size of the first screen only."""
+    cx, cy = (pet[0] + pet[2]) // 2, (pet[1] + pet[3]) // 2
+    work = (holder(screens, cx, cy) or nearest(screens, cx, cy)).work
+    return max(work[0], min(x, work[2] - size[0])), max(work[1], y)
 
 
 def signature(screens: list[Screen]) -> tuple:

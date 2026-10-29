@@ -747,12 +747,15 @@ async function loadStatus() {
     const a = s.autoreply;
     if (a && a.mode === "ai" && (a.email || a.telegram) && !a.phone_paired) parts.push("下班 AI 回复已开启，但手机审稿还没配对，点上方“手机审稿”设置");
     if (s.mobile_error) parts.push(s.mobile_error);
+    if (s.awake_error) parts.push(s.awake_error);
     const auto = !a ? "" : a.mode === "off" ? " · 下班自动回复关" : ` · 下班${a.mode === "ai" ? "AI起草手机审批" : "自动回复"} 邮件${a.email ? "开" : "关"} Telegram${a.telegram ? (a.telegram_login ? "开" : "开（未登录）") : "关"}`
       + (a.off_hours ? " · 现在是非工作时间" : "");
+    const duty = (s.kept_awake ? " · " + s.kept_awake : "") + (s.slept ? " · " + s.slept.text : "");
+    if (parts.length && s.slept) parts.push(s.slept.text);  // a passing error right after waking must not hide it
     el.className = parts.length ? "err" : "";
     el.title = parts.join("；");
     el.textContent = parts.length ? parts.join("；") :
-      `上次检查新邮件 ${s.last_scan || "--"} · 待翻译 ${s.queue}${s.translating ? " · 正在翻译" : ""}${auto}`;
+      `上次检查新邮件 ${s.last_scan || "--"} · 待翻译 ${s.queue}${s.translating ? " · 正在翻译" : ""}${auto}${duty}`;
   } catch (e) { $("#status").className = "err"; $("#status").textContent = "后端未连接：" + e.message; }
 }
 

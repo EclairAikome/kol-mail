@@ -371,6 +371,26 @@ def test_a_place_file_counts_only_while_pet_json_still_has_its_x_and_y(tmp_path)
     assert place.load(tmp_path) is None and place.load(None) is None
 
 
+# A Mac's screens in Tk's points: the built-in one with the menu bar and the Dock, a monitor to its right that sits a
+# little higher (its own menu bar), and one above the built-in one.
+BUILT_IN = place.Screen("screen 0", (0, 0, 1512, 982), (0, 33, 1512, 920), primary=True)
+RIGHT = place.Screen("screen 1", (1512, -200, 3432, 880), (1512, -175, 3432, 880))
+ABOVE = place.Screen("screen 2", (0, -900, 1440, 0), (0, -875, 1440, 0))
+
+
+def test_on_a_mac_her_bubble_stays_on_the_screen_she_stands_on():
+    """Tk knows the first screen only: the bubble was kept inside it, so it came up on screen 1 while she stood on
+    screen 2."""
+    mac_screens = [BUILT_IN, RIGHT, ABOVE]
+    assert place.bubble_at(mac_screens, (2000, 300, 2200, 500), (300, 80), 1950, 244) == (1950, 244)
+    assert place.bubble_at(mac_screens, (500, -600, 700, -400), (300, 80), 450, -656) == (450, -656)
+    assert place.bubble_at(mac_screens, (3300, 300, 3500, 500), (300, 80), 3250, 244) == (3132, 244)  # her right edge
+    assert place.bubble_at(mac_screens, (2000, -190, 2200, 10), (300, 80), 1950, -246) == (1950, -175)  # under its bar
+    assert place.bubble_at(mac_screens, (1450, 300, 1650, 500), (300, 80), 1400, 244) == (1512, 244)  # her middle's
+    assert place.bubble_at(mac_screens, (5000, 300, 5200, 500), (300, 80), 4950, 244) == (3132, 244)  # nearest one
+    assert place.bubble_at([BUILT_IN], (1300, 600, 1500, 800), (300, 80), 1250, 544) == (1212, 544)
+
+
 def placed_pet(monkeypatch, tmp_path, screens, settings):
     from pet import win
     w = win.PetWindow.__new__(win.PetWindow)
@@ -827,6 +847,103 @@ def test_on_a_mac_the_window_takes_clicks_only_where_she_is():
     held[0] = False
     p.update_click_through()  # the release never came, but no button is held: the air lets clicks through again
     assert calls == [False, True, False, True]
+
+
+def mac_pet(settings: dict):
+    import tkinter as tk
+    from pet import mac
+    try:
+        return mac.PetApp(sprites.load(PET_DIR), 9, "b", {"enabled": True, **settings})
+    except tk.TclError as e:
+        pytest.skip(f"no screen to open a window on: {e}")
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the Mac window code")
+def test_on_a_mac_the_screens_are_read_in_tk_s_coordinates():
+    from pet import macdraw
+    p = mac_pet({})
+    try:
+        (first, first_work), *others = macdraw.screens()
+        assert first == (0, 0, p.root.winfo_screenwidth(), p.root.winfo_screenheight())
+        assert first[0] <= first_work[0] < first_work[2] <= first[2] and first[1] < first_work[1] < first_work[3]
+        assert first_work[3] <= first[3]  # the menu bar at the top, the Dock (if at the bottom) under the work area
+        for rect, work in others:
+            assert rect[0] < rect[2] and rect[1] < rect[3] and rect[0] <= work[0] and work[2] <= rect[2]
+    finally:
+        p.root.destroy()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the Mac window code")
+def test_on_a_mac_she_starts_on_the_second_screen_where_she_was_left(monkeypatch):
+    """Her saved place counted only when it lay on the first screen: on the second one she was sent back to it."""
+    from pet import mac
+    monkeypatch.setattr(mac.macdraw, "screens", lambda: [(BUILT_IN.rect, BUILT_IN.work), (RIGHT.rect, RIGHT.work)])
+    for saved, kept in (((2000, 300), True), ((2000, -150), True), ((5000, 300), False), ((300, 400), True)):
+        p = mac_pet({"x": saved[0], "y": saved[1]})
+        try:
+            assert (p.pos == saved) is kept, saved
+        finally:
+            p.root.destroy()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the Mac window code")
+def test_on_a_mac_she_and_her_bubble_stay_over_every_window_on_every_space(monkeypatch):
+    """Tk clears -topmost as it makes the NSWindow of a window without a frame: she came out a normal window that
+    other windows covered, on one desktop only."""
+    from ctypes import c_long, c_ulong
+    from pet import mac, macdraw
+    p = mac_pet({})
+    send = macdraw.send
+    try:
+        assert p.attach_layers()
+        window = macdraw.find_window(mac.WINDOW_TITLE)
+        assert send(window, "level", restype=c_long) == macdraw.TOPMOST
+        assert send(window, "collectionBehavior", restype=c_ulong) & macdraw.EVERY_SPACE == macdraw.EVERY_SPACE
+        assert int(p.root.wm_attributes("-topmost")) == 1
+        app_ = send(macdraw.cls("NSApplication"), "sharedApplication")
+        assert send(app_, "activationPolicy", restype=c_long) == macdraw.ACCESSORY
+        send(app_, "setActivationPolicy:", 0, restype=ctypes.c_bool, argtypes=(c_long,))  # what Tk does once launched
+        p.stay_accessory()  # every poll
+        assert send(app_, "activationPolicy", restype=c_long) == macdraw.ACCESSORY and p.made_regular == 1
+        # AppKit's rectangles flipped into Tk's coordinates: her window is where Tk put her
+        cw, ch = p.sprites.cell
+        first_height = macdraw.screens()[0][0][3]
+        assert macdraw.tk_rect(macdraw._rect(window, b"frame"), first_height) == (*p.pos, p.pos[0] + cw, p.pos[1] + ch)
+        for n, text in enumerate(("新邮件 · Ana", "新邮件 · Bo"), 1):  # each bubble is a window of its own
+            monkeypatch.setattr(p.brain, "bubble", lambda text=text: brain.Bubble(text, "合作", "", ""))
+            p.update_bubble()
+            bubble = macdraw.find_window(f"{mac.BUBBLE_TITLE} {n}")
+            assert send(bubble, "level", restype=c_long) == macdraw.TOPMOST + 1  # over her head, not under it
+            assert send(bubble, "collectionBehavior", restype=c_ulong) & macdraw.EVERY_SPACE == macdraw.EVERY_SPACE
+        assert not p.said  # nothing went wrong on the way
+        p.root.wm_attributes("-topmost", False)
+        p.root.wm_attributes("-topmost", True)
+        assert send(window, "level", restype=c_long) == macdraw.TOPMOST  # the very level Tk's own -topmost sets
+    finally:
+        p.root.destroy()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the Mac window code")
+def test_on_a_mac_her_bubble_comes_up_on_the_screen_she_stands_on(monkeypatch):
+    import re
+    from pet import mac
+    monkeypatch.setattr(mac.macdraw, "screens", lambda: [(BUILT_IN.rect, BUILT_IN.work), (RIGHT.rect, RIGHT.work)])
+    placed, geometry = [], mac.tk.Toplevel.wm_geometry
+    monkeypatch.setattr(mac.tk.Toplevel, "geometry",
+                        lambda self, spec=None: (placed.append(spec), geometry(self, spec))[1])
+    p = mac_pet({"x": 3300, "y": 300})  # at the right edge of the screen on the right
+    try:
+        monkeypatch.setattr(p.brain, "bubble", lambda: brain.Bubble("新邮件 · Ana", "合作", "", ""))
+        p.update_bubble()
+        bx, by = map(int, re.fullmatch(r"\+(-?\d+)\+(-?\d+)", placed[-1]).groups())
+        bw = p.bubble_win.winfo_reqwidth()
+        assert RIGHT.work[0] <= bx and bx + bw <= RIGHT.work[2] and RIGHT.work[1] <= by < 300
+        monkeypatch.setattr(mac.macdraw, "screens", lambda: (_ for _ in ()).throw(OSError("no AppKit")))
+        first = (0, 0, p.root.winfo_screenwidth(), p.root.winfo_screenheight())
+        assert p.screens() == [place.Screen("screen 0", first, first, primary=True)]  # Tk's first screen
+        assert p.said == {"screens"}
+    finally:
+        p.root.destroy()
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="the Mac window code")
