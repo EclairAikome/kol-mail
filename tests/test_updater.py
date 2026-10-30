@@ -179,3 +179,83 @@ def test_rate_limited_api_says_so(base):
         return httpx.Response(403, headers={"x-ratelimit-remaining": "0"}, json={"message": "API rate limit exceeded"})
     with pytest.raises(updater.UpdateError, match="限制了这个网络的查询次数"):
         find_latest(base, github)
+
+
+# ---------------------------------------------------------------- a release bigger than this updater takes
+
+ZIP = "https://codeload.github.com/owner/kol-mail/zip/refs/tags/v0.2.0"
+REAL_CLIENT = httpx.AsyncClient
+
+
+def check_against(base, monkeypatch, download):
+    """Updater.check() against a stand-in GitHub whose newest release is v0.2.0, served by download(request)."""
+    real = REAL_CLIENT
+
+    def github(request):
+        if str(request.url) == f"{RELEASES}/latest":
+            return httpx.Response(302, headers={"location": f"{RELEASES}/tag/v0.2.0"})
+        if str(request.url) == ZIP:
+            return download(request)
+        raise AssertionError(f"unexpected request {request.url}")
+    monkeypatch.setattr(updater.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(github), **kw))
+    return asyncio.run(updater_for(base).check(force=True))
+
+
+SENT: list[int] = []
+
+
+def streamed(size: int):
+    """A body of `size` bytes without a Content-Length, as codeload sends a zip; SENT counts what was read."""
+    SENT.clear()
+
+    async def chunks():
+        for _ in range(size // 100):
+            SENT.append(100)
+            yield b"x" * 100
+    return httpx.Response(200, content=chunks())
+
+
+def test_a_release_too_big_is_given_up_on_as_it_arrives(base, monkeypatch):
+    monkeypatch.setattr(updater, "MAX_ZIP", 1000)
+    check_against(base, monkeypatch, lambda request: streamed(100_000))
+    assert sum(SENT) <= 1100  # not the whole 100 KB
+
+
+def test_a_release_known_to_be_too_big_is_not_fetched_again(base, monkeypatch):
+    monkeypatch.setattr(updater, "MAX_ZIP", 1000)
+    fetched = []
+
+    def download(request):
+        fetched.append(1)
+        return httpx.Response(200, content=b"x" * 2000)
+    check_against(base, monkeypatch, download)
+    status = check_against(base, monkeypatch, download)  # "运行后点一下这里再检查" before running it
+    assert fetched == [1] and status["state"] == "reinstall"
+    again = updater_for(base)  # the app restarted the same day: the label still says so
+    assert again.status["state"] == "reinstall" and again.status["latest"] == "0.2.0"
+
+
+@pytest.mark.parametrize("download", [
+    lambda request: httpx.Response(200, content=b"x" * 2000),   # its length is announced
+    lambda request: streamed(2000),                              # only the bytes say so
+])
+def test_a_release_too_big_for_this_updater_asks_for_the_installer_and_is_no_error(base, monkeypatch, download):
+    """2026-10-30: a 0.6.1 updater (20 MB) reported v0.8.0 (132 MB) to the feedback group every day as an error."""
+    monkeypatch.setattr(updater, "MAX_ZIP", 1000)
+    status = check_against(base, monkeypatch, download)
+    assert status["state"] == "reinstall" and status["error"] is None and "重新运行一次安装包" in status["notice"]
+    assert (base / "app.py").read_text(encoding="utf-8") == "old = 1\n"
+
+
+def test_a_release_too_big_unpacked_asks_for_the_installer_too(base, monkeypatch):
+    monkeypatch.setattr(updater, "MAX_UNPACKED", 10)
+    with pytest.raises(updater.NeedsInstaller):
+        updater_for(base).install(release({"static/index.html": "page"}), "0.2.0")
+    assert (base / "app.py").read_text(encoding="utf-8") == "old = 1\n"
+
+
+def test_a_release_this_updater_takes_still_installs(base, monkeypatch):
+    blob = release({"static/index.html": "page"})
+    status = check_against(base, monkeypatch, lambda request: httpx.Response(200, content=blob))
+    assert status["state"] == "restarting" and status["error"] is None and status.get("notice") is None
+    assert (base / "app.py").read_text(encoding="utf-8") == "x = 1\n"

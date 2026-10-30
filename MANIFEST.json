@@ -5,7 +5,7 @@
   ".github/workflows/test.yml": "146bbbdaecabe77f55f44db2e9e703b1d0efcefb28a2a529609b1f1ed214cb00",
   ".gitignore": "cafbacdb252557b2be5bb6e37a1039449a99d9ff73cfad9406a4289611a89301",
   "README.md": "f3834515fa9eeae8e9463035144a7c5859dcc7c8fafd757da38d788dbb086073",
-  "VERSION": "a66780da23103beaf12432b418508966b31a2a3a787f9468a5b6cdaa8667c1ef",
+  "VERSION": "aaf6721dc37c40b4233accfc081f25776ff3bd1d2a4b9d5cea760d1c2cf86665",
   "accounts.py": "c3cde40ec68bd7c650edb449f895d009206274032ee579b517fda5ea829700a1",
   "app.py": "d17b84dc4af4818af31fcc1586cbffd2039daaaed0b6a412f9469637890d60f2",
   "autoreply.example.json": "edb9dfc884b466773254b6dafc1618d0babd49ca4b7b052fe0879749b3e5e5d1",
@@ -31,7 +31,7 @@
   "extension/discord/test/fixture.html": "3732c6ed51b640f32d025ae6f7bbb37f59626f0ef7ef23a0fecdc7a69fa60c6b",
   "feedback.py": "e8f7995e323292f4d425f913beded70cf133453b2e1d6410e0819b30b189796c",
   "folders.py": "a0eedca64ae9d2c6afe444b5a3797adef76d305fc19b6715c46787ae1b652ac7",
-  "install.ps1": "b570682a97d702dadeb3e9533fe01242e6f4e5e7f74ee21dd78ac6ddd8ca631c",
+  "install.ps1": "f7479e32d544aa65082e454133a0cd6e52948d82564309732d3f83d972354cac",
   "install.sh": "278eb460e82927efa985445b84495139538714db0955ce2c0122bb464c480918",
   "llm.py": "cac72419b98ac626f988c9d3937062bb419802b6bd64773247818660982caa4d",
   "mailserver.py": "e9d10a30366bc45acc4c448d1f9c937826ffd292983a108fb5ed2acd68190ab3",
@@ -1015,7 +1015,7 @@
   "scripts/triage_report.py": "83881d761d031a0d347a5bbed8f07d93d7b025a2088139c065775acb1580102d",
   "service/open.sh": "9d75b9444340712e97c011326f2ec8e5992dc5fbe3f14f4f6d51aea569ccb6bf",
   "service/repair-catalog-sidecars.py": "35032f2154a873ff8256efb1471ae441ddd8116181c85c8397872f7cb253b697",
-  "service/run.ps1": "ae4d006525bce99b6be184b7147ce1d4a205bae9d5a59d06308c813aee9db49a",
+  "service/run.ps1": "9117347311d3a0fd4b1f5bcdd5b2b299813e8520cf805b6cd2bca78df99c0d3a",
   "service/run.sh": "5a4c4f48591b5123876216bb843553b4af830be3118fb5e045968b4ebdb95de2",
   "settings.example.json": "44a1a3781f29263c8d97e427e5d7947ed49ef53f31dbeae131d81d995f929dcb",
   "sheet/build.py": "b52dcaed3fda331572b745fcb27eefc174aea0c4c0e8e7a135f94b6e1638ac61",
@@ -1029,7 +1029,7 @@
   "skin.py": "5397f5bd0051f325847db6d35182d71c51eaa8cdfe370c666a564bf1b5332470",
   "start-kol-mail.cmd": "321d8ea7748791268ebc7c88febea80afbecb3225c352a1965edf3150d3c5f7c",
   "static/chats.js": "70ea210e18e1267f42a2f68df403ca9532cd320e5ac1e03045ebfb95d3ca34cd",
-  "static/index.html": "5e1d88aee45face368fad69134150e007ac1b58a64be799d2a4a2fbf57fad3da",
+  "static/index.html": "100c2a7658817acfb49da3c19a66fb875330062e450a68799766f8ae8e83fce3",
   "static/tgsetup.js": "a130b723f57a7a7b641df5c3937dd3b12b16596eee96e67136decf29c0cbf4c6",
   "templates/kolmail-inline-banner.png": "e5b708dabf11251988b5618281eddd824160423e1fb8b0b236b1519f7742e17c",
   "templates/谈判手册.example.md": "f9bcfd3bb78503f439bd94948f2025cfc355c7b4f89b303ca3e49662640f035b",
@@ -1041,6 +1041,7 @@
   "tests/regressions/test_install_old_codemaker.py": "32e95d5995a082c3fdfba29d86354c61cf115aad0154ca6452e11b83d0de7351",
   "tests/regressions/test_install_password_bom.py": "bf11e0eb506e88614e50df49574029c242e9eb7bbb3f384cf063c97c55982646",
   "tests/regressions/test_install_rate_limited_github.py": "fc48188538cc44e750e6fabc8db3f54587ebd505492a130cf972a770062f90b2",
+  "tests/regressions/test_install_reinstall_reported_exit.py": "5ab5ed0cb5fd0d366133b485b23105d4e3cf27aad707d4e2cf29f32224ee0c3f",
   "tests/smoke/mail_secret.py": "57b4ec2aef701527a99038a04e1e79b3c92ca15a415fb1a34bad3381b4266912",
   "tests/smoke/windows_fresh_install.ps1": "cfd6f730618f7788aa78b42027d65dc3cb474123e915f6c3db763a7ed18d1583",
   "tests/test_accounts.py": "bbacac9323ef48df0e25fd59e49a9394595433f74252745b6419017bf56c463a",
@@ -1086,7 +1087,7 @@
   "tests/test_tgsetup.py": "cae9b9889c52d73112342ae0422d340c3ed242efae946c3dbab8af6a2f909a13",
   "tests/test_triage_report.py": "49f481cb087d9eb350d3ebb044e91b24403477528c9e2c27f65c9d7bfd77da22",
   "tests/test_update_check.py": "e9c1f3e92a9a8757f33d4f58e7e2cabc37f6e020e96b57141ba59b67698040c1",
-  "tests/test_updater.py": "96db06a3325b00f74b48bf4b5c7c1e76a138bcc614755727710a1f5d54adf32f",
+  "tests/test_updater.py": "8b4dabf7a123717a040ad46c4f1d3bc256dd05ed429d16bd689012e4de7b4829",
   "tests/test_usersheet.py": "44ed9221f52d6e26cd02fa39a96330017982e8b079ab0cdd5c5dbb2eb46677b7",
   "tglogin.py": "a953362326974c693a6a039e8ac5f1edce8c31bc132c8a0ece6076d1d45df61e",
   "tgsetup.py": "53fb22f062f0b72fe7ad7aa39e81f4c5d8990ca5cf98ac6ad1ab98d520f4b153",
@@ -1095,7 +1096,7 @@
   "tools/make_pet.py": "c169ff08a60e9314039f0290552c7df55f30f860bf22044c1b37a79744126b81",
   "tools/merge_settings.py": "d5fb6a54b46cf185e61184833697c6cf137b47416f812606a936a6f434ae243e",
   "tools/publish.py": "11b3bb019c6bf10a208f5813a722f9a6ca2634ec4d84dfe8186743726953aedb",
-  "updater.py": "8fc6d138996e845933f762fdd17fea5f60e5e4102ac698db45025bcd7c178166"
+  "updater.py": "e7c4237d7387e3a6161312d6bd3ecd4707e969bf3e4bebf7df74a7fb830f08f3"
  },
- "version": "0.8.0"
+ "version": "0.8.1"
 }

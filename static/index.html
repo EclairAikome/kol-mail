@@ -2519,6 +2519,9 @@ async function checkUpdate(force = false) {
       if (Date.now() < until) setTimeout(wait, 3000); else el.textContent = "更新后没能自动重启，请双击 KOL Mail 图标";
     };
     setTimeout(wait, 8000);
+  } else if (u.state === "reinstall") {  // too big for this updater: said on the label itself, not only on hover
+    el.textContent = `v${u.current || "?"} · 有新版 v${u.latest}，请重新运行一次安装包`;
+    el.title = (u.notice || "") + "（运行后点一下这里再检查）";
   } else if (u.state === "error") {
     el.title = "检查更新失败：" + u.error + "（点一下再试）";
     if (force) el.textContent = `v${u.current || "?"} · 检查更新失败`;

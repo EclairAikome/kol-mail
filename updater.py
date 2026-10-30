@@ -44,6 +44,16 @@ class UpdateError(Exception):
     pass
 
 
+class NeedsInstaller(UpdateError):
+    """A release bigger than this updater takes (MAX_ZIP, MAX_UNPACKED). Nothing is wrong with it or with the
+    computer: the installer has no such limit, so the colleague runs it once more. The page says so; it is never
+    an error to report (a 0.6.1 updater reported v0.8.0 to the feedback group every day until the colleague
+    reinstalled)."""
+
+
+TOO_BIG = "新版本比自动更新能装的大，请重新运行一次安装包（设置和邮件都会保留）"
+
+
 def parse_version(text: str) -> tuple[int, int, int] | None:
     m = VERSION_RE.match((text or "").strip())
     return tuple(int(x) for x in m.groups()) if m else None
@@ -104,6 +114,9 @@ class Updater:
         self.state_file = data / "update.json"
         self.lock = asyncio.Lock()
         self.status = {"current": current, "latest": None, "state": "idle", "error": None, "checked": None}
+        too_big = str(self._load().get("needs_installer") or "")
+        if self.enabled and too_big and newer(too_big, current):  # still true after a restart the same day
+            self.status.update(state="reinstall", latest=too_big, notice=TOO_BIG)
 
     def _load(self) -> dict:
         try:
@@ -169,7 +182,7 @@ class Updater:
         if self.lock.locked() or (not force and not self.due_today()):
             return self.status
         async with self.lock:
-            self.status.update(state="checking", error=None)
+            self.status.update(state="checking", error=None, notice=None)
             try:
                 async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=15), follow_redirects=True) as client:
                     rel = await self.latest(client)
@@ -181,25 +194,37 @@ class Updater:
                     if not install:
                         self.status["state"] = "available"
                         return self.status
+                    if self._load().get("needs_installer") == rel["version"]:  # known too big: not fetched again
+                        raise NeedsInstaller(TOO_BIG)
                     self.status["state"] = "downloading"
                     blob = await self.download(client, rel["zip"])
                 self.status["state"] = "installing"
                 await asyncio.to_thread(self.install, blob, rel["version"])
                 self.status["state"] = "restarting"
                 self._save(installed=rel["version"], installed_at=time.time())
+            except NeedsInstaller as e:
+                self.status.update(state="reinstall", error=None, notice=str(e))
+                self._save(needs_installer=self.status.get("latest"))
             except UpdateError as e:
                 self.status.update(state="error", error=str(e))
             except Exception as e:  # noqa: BLE001  network, disk, pip: try again tomorrow, keep working today
                 self.status.update(state="error", error=f"{type(e).__name__}: {str(e)[:150]}")
         return self.status
 
-    async def download(self, client: httpx.AsyncClient, url: str) -> bytes:
-        r = await client.get(self._url(url))
-        if r.status_code != 200:
-            raise UpdateError(f"下载新版本失败：HTTP {r.status_code}")
-        if len(r.content) > MAX_ZIP:
-            raise UpdateError("新版本压缩包大得不正常，没有安装")
-        return r.content
+    async def download(self, client: httpx.AsyncClient, url: str) -> bytearray:
+        """The release zip, read as it arrives: one bigger than MAX_ZIP is given up on at once (its announced
+        length, or the bytes so far), never fetched whole every day just to be refused."""
+        async with client.stream("GET", self._url(url)) as r:
+            if r.status_code != 200:
+                raise UpdateError(f"下载新版本失败：HTTP {r.status_code}")
+            if int(r.headers.get("content-length") or 0) > MAX_ZIP:
+                raise NeedsInstaller(TOO_BIG)
+            blob = bytearray()
+            async for chunk in r.aiter_bytes():
+                blob += chunk
+                if len(blob) > MAX_ZIP:
+                    raise NeedsInstaller(TOO_BIG)
+        return blob  # no copy: zipfile reads a bytearray as it is
 
     def install(self, blob: bytes, version: str):
         staging = self.data / "update" / version
@@ -217,7 +242,7 @@ class Updater:
         with zipfile.ZipFile(io.BytesIO(blob)) as z:
             infos = [i for i in z.infolist() if not i.is_dir()]
             if sum(i.file_size for i in infos) > MAX_UNPACKED:
-                raise UpdateError("新版本解压后大得不正常，没有安装")
+                raise NeedsInstaller(TOO_BIG)
             tops = {i.filename.split("/", 1)[0] for i in z.infolist()}
             if len(tops) != 1:
                 raise UpdateError("压缩包结构不对")

@@ -263,14 +263,26 @@ $Data = Join-Path $App "data"
 New-Item -ItemType Directory -Force $Dir | Out-Null
 
 # 重复安装时先停掉正在运行的旧版本，不然 pip 换不了被占用的文件
-if (-not $NoService -and (Get-ScheduledTask -TaskName "kol-mail" -ErrorAction SilentlyContinue)) {
-    Stop-ScheduledTask -TaskName "kol-mail" -ErrorAction SilentlyContinue  # 只停任务本身，不会结束它启动的 python
+function Stop-KolMailService($App, $Venv, $Task = "kol-mail") {
+    # 只停任务本身：它结束的是 conhost，里面跑 service\run.ps1 的 powershell 还活着。那个循环看到 python 被结束，
+    # 会当成程序崩溃发到反馈群（2026-10-30 同事重装时报了“退出码 -1”），15 秒后还会把旧版本再启动起来，
+    # 所以先结束这份安装的循环，再停 python。只认这个目录下的 run.ps1 和 venv，别的副本一概不碰。
+    Stop-ScheduledTask -TaskName $Task -ErrorAction SilentlyContinue
+    $loop = "*" + [Management.Automation.WildcardPattern]::Escape((Join-Path $App "service\run.ps1")) + "*"
+    $loops = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -like $loop } |
+        ForEach-Object { $_.ProcessId })
+    $loops | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
     # venv 里的 python.exe 在 Windows 上只是个启动器，真正跑程序、占着端口的是它启动的基础 Python 子进程：两个都要停
     $running = @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object { $_.CommandLine -like "*app.py*" })
     $launchers = @($running | Where-Object { $_.ExecutablePath -like "$Venv*" } | ForEach-Object { $_.ProcessId })
-    $running | Where-Object { $launchers -contains $_.ProcessId -or $launchers -contains $_.ParentProcessId } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    $pythons = @($running | Where-Object { $launchers -contains $_.ProcessId -or $launchers -contains $_.ParentProcessId } |
+        ForEach-Object { $_.ProcessId })
+    $pythons | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+    # 结束是异步的：等它们真的退出、放开文件，后面 robocopy 和 pip 才换得动
+    if ($loops + $pythons) { Wait-Process -Id ($loops + $pythons) -Timeout 10 -ErrorAction SilentlyContinue }
 }
+# 不看计划任务在不在：任务删了、循环却还在跑时也要停（只认这个目录，别的副本不碰）
+if (-not $NoService) { Stop-KolMailService $App $Venv }
 
 # ---------------------------------------------------------------- 1. Python
 Say "[1/8] 检查 Python…"

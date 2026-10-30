@@ -39,7 +39,9 @@ while ($true) {
     cmd /c "`"$Python`" -I -X utf8 app.py >> `"$log`" 2>&1"
     $code = $LASTEXITCODE
     Add-Content -Encoding UTF8 $log "[$(Get-Date -Format s)] exited with code $code, restarting in 15 s"
-    # an error exit (a restart for an update exits with 0) goes to the maintainer's POPO group, with the log's end
-    if ($code -ne 0) { cmd /c "`"$Python`" -I -X utf8 autoreport.py exited $code `"$log`" >> `"$log`" 2>&1" }
+    # an error exit (a restart for an update exits with 0) goes to the maintainer's POPO group, with the log's end;
+    # not -1, a process killed from outside (Stop-Process, an installer replacing this copy): that is a stop, as run.sh
+    # treats SIGKILL
+    if ($code -ne 0 -and $code -ne -1) { cmd /c "`"$Python`" -I -X utf8 autoreport.py exited $code `"$log`" >> `"$log`" 2>&1" }
     Start-Sleep -Seconds 15
 }
