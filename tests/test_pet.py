@@ -18,9 +18,10 @@ from pet import brain, place, sprites  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
 PET_DIR = Path(__file__).resolve().parents[1] / "pet" / "whale-girl"
+OUTFIT_DIRS = sorted(p.parent for p in PET_DIR.parent.glob("*/pet.json"))
 KOL_STATES = ["idle", "mail", "notify", "waiting", "sleeping", "failed", "thinking", "sending", "drag-left",
-              "drag-right", "hop"]
-TOUCH_STATES = ["pat", "poke", "giggle", "spout"]
+              "drag-right", "hop", "pat", "poke"]
+TOUCH_STATES = ["giggle", "spout"]  # the whale girl's sweater: a tickle, her tail; other outfits have a "show"
 
 
 class Clock:
@@ -184,6 +185,74 @@ def test_muted_she_still_reacts_but_says_nothing():
     poll(b, wall, settings={"enabled": True, "muted": True})
     b.on_touch("tail")
     assert b.state() == "spout" and b.bubble() is None
+
+
+def test_an_outfit_with_a_move_of_its_own_shows_it_now_and_then_and_when_touched():
+    clock, wall = Clock(), Clock()
+    waits = iter([200.0, 300.0, 300.0, 300.0, 300.0])
+    b = brain.Brain(lambda s: 2000, "b1", now=clock, wall=wall, shows=True, wait=lambda lo, hi: next(waits))
+    poll(b, wall)
+    assert b.state() == "idle"
+    clock.t += 200  # 1200: her first move by herself
+    assert b.state() == "show" and b.last_activity == 1000.0  # not a touch: she still dozes off on time
+    clock.t += 2.5
+    assert b.state() == "idle"  # once; the next one 300 s after it ended
+    b.on_touch("body")  # 1202.5
+    assert b.state() == "show" and b.said and b.said.say  # her body: the move, and a line
+    clock.t += 2.5
+    poll(b, wall, unread=2)
+    clock.t = 1202.5 + 2 + 300  # 300 s after the touched one ended
+    assert b.state() == "show"  # over the unread letter too
+    clock.t += 2.5
+    assert b.state() == "waiting"
+    clock.t += 400
+    poll(b, wall, events=[mail(1, wall.t)], unread=3)
+    assert b.state() == "mail"  # a new mail comes first...
+    clock.t += 3
+    assert b.state() == "notify"  # ...and she holds up the envelope, no move in between
+    poll(b, wall, off_hours=True)
+    clock.t += 1000
+    assert b.state() == "sleeping"  # asleep: no moves either
+    poll(b, wall)
+    b.on_hover()  # woken up: she stands there a minute first, though her next move was due long ago
+    assert b.state() == "idle"
+    clock.t += brain.CALM_FIRST + 1
+    assert b.state() == "show"
+
+
+def test_a_touch_that_shows_her_move_puts_off_the_next_one_by_herself():
+    clock, wall = Clock(), Clock()
+    waits = iter([200.0, 300.0, 300.0])
+    b = brain.Brain(lambda s: 2000, "b1", now=clock, wall=wall, shows=True, wait=lambda lo, hi: next(waits))
+    poll(b, wall)
+    clock.t += 199  # a second before the first one by herself
+    b.on_touch("body")
+    assert b.state() == "show"
+    clock.t += 2.5
+    assert b.state() == "idle"  # not straight into another one
+    clock.t += 300
+    assert b.state() == "show"
+
+
+def test_a_pet_without_a_move_of_its_own_never_shows_one():
+    b, clock, wall = make_brain()
+    poll(b, wall)
+    clock.t += 3600
+    assert b.state() == "sleeping"
+    b.on_touch("body")
+    assert b.state() == "giggle"
+
+
+def test_choosing_another_outfit_makes_her_leave_for_the_app_to_start_her_in_it():
+    clock, wall = Clock(), Clock()
+    b = brain.Brain(lambda s: 1000, "b1", now=clock, wall=wall, outfit="whale-girl")
+    poll(b, wall, settings={"enabled": True, "pet": "whale-girl"})
+    assert b.quit_reason is None
+    poll(b, wall, settings={"enabled": True, "pet": "whale-girl-snow"})
+    assert "outfit" in b.quit_reason
+    old = brain.Brain(lambda s: 1000, "b1", now=clock, wall=wall)  # told no outfit: never leaves for one
+    poll(old, wall, settings={"enabled": True, "pet": "whale-girl-snow"})
+    assert old.quit_reason is None
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="the Windows window code")
@@ -479,10 +548,13 @@ def png_size(path: Path) -> tuple[int, int]:
     return struct.unpack(">II", raw[16:24])
 
 
-def test_whale_girl_has_every_state_at_60_frames_a_second_inside_her_pictures():
-    s = sprites.load(PET_DIR)
-    assert set(KOL_STATES + TOUCH_STATES) <= set(s.states)
+@pytest.mark.parametrize("folder", OUTFIT_DIRS, ids=lambda p: p.name)
+def test_every_outfit_has_every_state_at_60_frames_a_second_inside_her_pictures(folder):
+    s = sprites.load(folder)
+    assert set(KOL_STATES) <= set(s.states)
+    assert set(TOUCH_STATES) <= set(s.states) if folder == PET_DIR else "show" in s.states
     assert s.get("idle").durations[0] == pytest.approx(1000 / 60) and s.touchable
+    assert s.density == 2 and s.cell == sprites.load(PET_DIR).cell  # sharp on a Retina screen; one window size
     cw, ch = s.cell
     pw, ph = cw // s.part_scale, ch // s.part_scale
     assert ch % s.part_scale == 0  # no half rows in the part maps
@@ -501,11 +573,56 @@ def test_whale_girl_has_every_state_at_60_frames_a_second_inside_her_pictures():
         if st.overlay:
             x0, y0, x1, y1 = st.overlay.box
             assert 0 <= x0 < x1 <= cw and 0 <= y0 < y1 <= ch, name
-    pictures = list(PET_DIR.glob("*.png"))
+    pictures = list(folder.glob("*.png"))
     for p in pictures:
         w, h = png_size(p)
         assert h <= 5 * ch, p.name  # small enough for Tk to decode quickly
-    assert sum(p.stat().st_size for p in pictures) < 10 * 1024 * 1024
+    assert sum(p.stat().st_size for p in pictures) < 64 * 1024 * 1024  # the release carries every outfit
+
+
+def test_no_looping_state_plays_more_pictures_than_a_mac_keeps_decoded_cheaply(tmp_path):
+    """A Mac keeps every picture of a state that loops decoded, 7.9 MB each at two pixels a point: one that plays
+    more than about 20 of them would cost it a lot of memory. A one-off move plays them once, one after another."""
+    s = sprites.load(v2_pet(tmp_path))
+    assert s.pictures_at_once() == 3 and s.pictures_at_once(skip={"idle"}) == 0  # the clip's two and the props'
+    assert {"show", "mail", "hop", "pat", "poke", "giggle", "spout"} == brain.ONE_OFF
+    for folder in OUTFIT_DIRS:
+        assert sprites.load(folder).pictures_at_once(skip=brain.ONE_OFF) <= 21, folder.name
+
+
+def test_all_outfits_fit_in_what_the_updater_takes():
+    import updater
+    total = sum(p.stat().st_size for p in PET_DIR.parent.rglob("*") if p.is_file() and "__pycache__" not in p.parts)
+    assert total < 0.75 * updater.MAX_ZIP and total < 0.75 * updater.MAX_UNPACKED  # and room for one more
+
+
+def test_pictures_at_two_pixels_a_point_show_her_at_half_their_size(tmp_path):
+    folder = v2_pet(tmp_path)
+    meta = json.loads((folder / "pet.json").read_text(encoding="utf-8"))
+    meta["kolmail"]["density"] = 2
+    (folder / "pet.json").write_text(json.dumps(meta), encoding="utf-8")
+    s = sprites.load(folder)
+    assert (s.cell, s.size, s.density) == ((100, 200), (50, 100), 2)
+    for bad in (3, 5, 0, "2", True):  # 100 pixels are no whole number of 3-pixel points; the others: no density
+        meta["kolmail"]["density"] = bad
+        (folder / "pet.json").write_text(json.dumps(meta), encoding="utf-8")
+        with pytest.raises(ValueError):
+            sprites.load(folder)
+
+
+def test_her_outfits_are_the_pet_folders_the_default_first(tmp_path):
+    for name, meta in (("b-dress", {"outfit": "裙子"}), ("whale-girl", {"displayName": "鲸鱼娘"}),
+                       ("a-coat", {"displayName": "X", "outfit": "大衣"}), ("bad name!", {"outfit": "?"})):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "pet.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "broken").mkdir()
+    (tmp_path / "broken" / "pet.json").write_text("{", encoding="utf-8")
+    (tmp_path / "empty").mkdir()
+    expected = [("whale-girl", "鲸鱼娘"), ("a-coat", "大衣"), ("b-dress", "裙子")]
+    assert sprites.outfits(tmp_path, "whale-girl") == expected
+    assert sprites.outfits(tmp_path / "nowhere", "whale-girl") == []
+    shipped = sprites.outfits(PET_DIR.parent, "whale-girl")
+    assert shipped[0] == ("whale-girl", "毛衣") and {"whale-girl-snow", "whale-girl-maid"} <= {k for k, _ in shipped}
 
 
 def v2_pet(folder: Path, **state) -> Path:
@@ -593,7 +710,7 @@ def gdiplus():
 def stub_window(win, size=None):
     s = sprites.load(PET_DIR)
     w = win.PetWindow.__new__(win.PetWindow)
-    w.sprites, w.size, w.mix, w.scale, w.own_dpi = s, size or s.cell, None, 1.0, lambda: 1.0
+    w.sprites, w.size, w.mix, w.scale, w.own_dpi = s, size or s.size, None, 1.0, lambda: 1.0
     w.strips = win.Cache(lambda path: win.Strip(path, s.cell, w.size), budget=win.STRIP_BUDGET)
     w.part_maps = win.Cache(win.PartMap, budget=16 << 20)
     return w
@@ -611,7 +728,7 @@ def test_her_letter_her_head_her_tail_and_the_air_around_her(gdiplus):
         assert w.part_at(191, 220) == "mail"   # the letter in her right hand
         assert w.part_at(110, 115) == "head"   # her hat
         assert w.part_at(3, 3) == ""           # the air: nothing to touch
-        cw, ch = w.sprites.cell
+        cw, ch = w.sprites.size
         seen = {w.part_at(x, y) for x in range(0, cw, 4) for y in range(0, ch, 4)}
         assert {"head", "face", "body", "tail", "feet", "mail"} <= seen
         w.shown_state = "sleeping"  # facing front: the tail's fin to her left, below the skirt
@@ -624,13 +741,13 @@ def test_her_letter_her_head_her_tail_and_the_air_around_her(gdiplus):
 def test_the_letter_is_blended_over_her_turn(gdiplus):
     win = gdiplus
     w = stub_window(win)
-    cw, ch = w.sprites.cell
+    cw, ch = w.sprites.size  # the window's pixels: the pictures are shown at half their size
     st = w.sprites.get("idle")
     try:
         dc, x, y = w.picture(st, 0)
         assert (dc, x, y) == (w.mix.dc, 0, 0)
-        base = w.strips.get(st.layer.at(0, (cw, ch))[0])
-        over = w.strips.get(st.overlay.at(0, (cw, ch))[0])
+        base = w.strips.get(st.layer.at(0, w.sprites.cell)[0])
+        over = w.strips.get(st.overlay.at(0, w.sprites.cell)[0])
         assert pixel(w.mix.bits, cw, 191, 220) == pixel(over.bits, cw, 191, 220) != 0  # the letter, on top
         assert pixel(w.mix.bits, cw, 110, 115) == pixel(base.bits, cw, 110, 115) != 0  # her hat, from the clip
         assert pixel(w.mix.bits, cw, 3, 3) == 0  # still see-through
@@ -644,8 +761,8 @@ def test_the_letter_is_blended_over_her_turn(gdiplus):
 def test_at_the_small_and_big_sizes_each_frame_is_scaled_once_and_alone(gdiplus):
     win = gdiplus
     s = sprites.load(PET_DIR)
-    cw, ch = s.cell
-    for size in ((165, 268), (275, 448)):
+    cw, ch = s.size
+    for size in ((165, 268), (220, 358), (275, 448)):
         strip = win.Strip(s.get("pat").layer.bands[0], s.cell, size)
         try:
             assert (strip.w, strip.h) == (size[0], 5 * size[1])
@@ -770,7 +887,7 @@ def test_a_mac_strip_keeps_her_alpha_row_for_row_and_cuts_whole_cells():
     try:
         assert strip.size == png_size(band) == (cw, 5 * ch)
         assert strip.alpha_rows == png_alpha(band)  # top row first, nothing lost to premultiplying
-        assert strip.alpha(cw // 2, 115) >= 250 and strip.alpha(3, 3) == 0  # her hat; the air
+        assert strip.alpha(cw // 2, 115 * s.density) >= 250 and strip.alpha(3, 3) == 0  # her hat; the air
         assert strip.alpha(-1, 0) == strip.alpha(cw, 0) == strip.alpha(0, 5 * ch) == 0  # off the picture
         cg = macdraw.rt().cg
         img = strip.frame(0, 2 * ch)
@@ -790,19 +907,19 @@ def test_on_a_mac_tk_s_own_picture_is_hidden_and_the_layers_show_her():
     except tk.TclError as e:
         pytest.skip(f"no screen to open a window on: {e}")
     s = sprites.load(PET_DIR)
-    cw, ch = s.cell
+    ch = s.cell[1]
     strip = None
     try:
         root.withdraw()
         root.overrideredirect(True)
         root.wm_attributes("-transparent", True)
         root.config(bg="systemTransparent")
-        root.geometry(f"{cw}x{ch}+40+40")
+        root.geometry(f"{s.size[0]}x{s.size[1]}+40+40")
         root.wm_attributes("-alpha", 0.0)
         root.deiconify()
         root.update()
         root.title("KOL Mail pet test")
-        layers = macdraw.Layers("KOL Mail pet test", s.cell)
+        layers = macdraw.Layers("KOL Mail pet test", s.size, s.density)
         send = macdraw.send
         content = send(layers.window, "contentView")
         assert send(send(content, "layer"), "opacity", restype=c_float) == 0.0  # Tk's black box: out of sight
@@ -814,6 +931,7 @@ def test_on_a_mac_tk_s_own_picture_is_hidden_and_the_layers_show_her():
         layers.show(strip.frame(0, 0), strip.frame(0, ch))
         layers.show(strip.frame(0, ch), None)  # the next frame replaces the last whole, props gone
         assert send(layers.base, "contents") == strip.frame(0, ch) and send(layers.over, "contents") is None
+        assert send(layers.base, "contentsScale", restype=ctypes.c_double) == 2.0  # two pixels a point
         for ignore in (True, False, True):
             layers.click_through(ignore)
             assert send(layers.window, "ignoresMouseEvents", restype=c_bool) is ignore
@@ -828,7 +946,7 @@ def test_on_a_mac_the_window_takes_clicks_only_where_she_is():
     from pet import mac, macdraw
     s = sprites.load(PET_DIR)
     p = mac.PetApp.__new__(mac.PetApp)
-    p.sprites, p.pos, p.press, p.frame, p.shown_strips = s, (100, 200), None, -1, ()
+    p.sprites, p.pos, p.press, p.frame, p.shown_strips, p.scale = s, (100, 200), None, -1, (), 1.0
     calls, pointer, held = [], [(0, 0)], [True]
     p.layers = type("Layers", (), {"show": lambda self, base, over: None, "button_down": lambda self: held[0],
                                    "click_through": lambda self, ignore: calls.append(ignore)})()
@@ -849,11 +967,22 @@ def test_on_a_mac_the_window_takes_clicks_only_where_she_is():
     assert calls == [False, True, False, True]
 
 
-def mac_pet(settings: dict):
+@pytest.mark.skipif(sys.platform != "darwin", reason="the Mac window code")
+def test_on_a_mac_every_picture_of_a_state_stays_decoded_while_it_plays():
+    """At two pixels a point a decoded picture is four times bigger: a fixed budget held fewer of them than a state
+    plays in a loop, and each one was decoded again every round."""
+    from pet import mac
+    for folder in OUTFIT_DIRS:
+        s = sprites.load(folder)
+        band = s.cell[0] * s.cell[1] * 5 * 5
+        assert (s.pictures_at_once(skip=brain.ONE_OFF) + 2) * band <= mac.picture_budget(s) <= 200 << 20, folder.name
+
+
+def mac_pet(settings: dict, outfits=()):
     import tkinter as tk
     from pet import mac
     try:
-        return mac.PetApp(sprites.load(PET_DIR), 9, "b", {"enabled": True, **settings})
+        return mac.PetApp(sprites.load(PET_DIR), 9, "b", {"enabled": True, **settings}, outfits)
     except tk.TclError as e:
         pytest.skip(f"no screen to open a window on: {e}")
 
@@ -906,7 +1035,7 @@ def test_on_a_mac_she_and_her_bubble_stay_over_every_window_on_every_space(monke
         p.stay_accessory()  # every poll
         assert send(app_, "activationPolicy", restype=c_long) == macdraw.ACCESSORY and p.made_regular == 1
         # AppKit's rectangles flipped into Tk's coordinates: her window is where Tk put her
-        cw, ch = p.sprites.cell
+        cw, ch = p.shown_size()
         first_height = macdraw.screens()[0][0][3]
         assert macdraw.tk_rect(macdraw._rect(window, b"frame"), first_height) == (*p.pos, p.pos[0] + cw, p.pos[1] + ch)
         for n, text in enumerate(("新邮件 · Ana", "新邮件 · Bo"), 1):  # each bubble is a window of its own
@@ -947,10 +1076,55 @@ def test_on_a_mac_her_bubble_comes_up_on_the_screen_she_stands_on(monkeypatch):
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="the Mac window code")
+def test_on_a_mac_her_size_comes_from_her_menu_or_the_page_and_her_feet_stay(monkeypatch):
+    """On a Mac she always had her normal size, and her menu had no 大小."""
+    from pet import mac, macdraw
+    p = mac_pet({"x": 300, "y": 200, "pet": "whale-girl"}, outfits=[("whale-girl", "毛衣"), ("whale-girl-snow", "雪地斗篷")])
+    saved = []
+    monkeypatch.setattr(p.client, "save", lambda **kw: saved.append(kw))
+    try:
+        p.resize(1.25)
+        assert p.scale == 1.0  # Tk alone (no layers yet) draws her at 中 only
+        assert p.attach_layers()
+        w, h = p.sprites.size
+        feet = (p.pos[0] + w // 2, p.pos[1] + h)
+        p.choose_size(1.25)
+        p.root.update()
+        big = p.shown_size()
+        assert big == (round(w * 1.25), round(h * 1.25)) and saved == [{"scale": 1.25, "x": p.pos[0], "y": p.pos[1]}]
+        assert abs(p.pos[0] + big[0] // 2 - feet[0]) <= 1 and p.pos[1] + big[1] == feet[1]  # her feet stay
+        window = macdraw.find_window(mac.WINDOW_TITLE)
+        first_height = macdraw.screens()[0][0][3]
+        assert macdraw.tk_rect(macdraw._rect(window, b"frame"), first_height) == (*p.pos, p.pos[0] + big[0],
+                                                                                  p.pos[1] + big[1])
+        layer = macdraw._rect(p.layers.base, b"frame")
+        assert (layer.w, layer.h) == big  # her frame fills the bigger window
+        assert macdraw.send(window, "level", restype=ctypes.c_long) == macdraw.TOPMOST  # still over every window
+        p.show_on_layers(p.sprites.get("idle"), 0)
+        assert p.solid_at(137, 144) and not p.solid_at(3, 3)  # her hat, a quarter further in; the air
+        p.follow_size(0.75)  # an answer that left the app before her own choice reached it
+        assert p.scale == 1.25
+        p.own_choice_at -= mac.OWN_CHOICE_HOLDS
+        p.follow_size(0.75)  # the settings page
+        assert p.shown_size() == (round(w * 0.75), round(h * 0.75))
+        assert saved[-1] == {"x": p.pos[0], "y": p.pos[1]}  # where she now is, for the next start
+        menu = p.build_menu()
+        labels = [menu.entrycget(i, "label") for i in range(menu.index("end") + 1) if menu.type(i) != "separator"]
+        assert "大小" in labels and "换装" in labels
+        before = len(saved)
+        p.choose_outfit("whale-girl")  # the one she wears: nothing to do
+        assert len(saved) == before
+        p.choose_outfit("whale-girl-snow")
+        assert saved[-1] == {"pet": "whale-girl-snow"}
+    finally:
+        p.root.destroy()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the Mac window code")
 def test_on_a_mac_with_tk_9_and_no_layers_there_is_no_pet(monkeypatch):
     import tkinter as tk
     from pet import mac
-    monkeypatch.setattr(mac.macdraw, "Layers", lambda title, cell: (_ for _ in ()).throw(OSError("no layers")))
+    monkeypatch.setattr(mac.macdraw, "Layers", lambda *a: (_ for _ in ()).throw(OSError("no layers")))
     monkeypatch.setattr(mac.tk, "TkVersion", 9.0)
     try:
         p = mac.PetApp(sprites.load(PET_DIR), 9, "b", {"enabled": True})
@@ -990,6 +1164,44 @@ def test_feed_keeps_recent_events_and_counts_busy_work(monkeypatch):
     assert not f.alive()
     f.polled()
     assert f.alive()
+
+
+def test_after_another_outfit_is_chosen_the_keeper_starts_her_again_at_once(tmp_path):
+    """The pet leaves (exit code 0) once it sees the new outfit in a poll; the save had woken the Keeper already,
+    so it does not wait its usual 30 seconds before starting her in it."""
+    import time
+    starts = []
+    k = petfeed.Keeper(tmp_path, tmp_path, 9, tmp_path / "pet.json", lambda *a: None)
+
+    async def once():
+        starts.append(time.monotonic())
+        if len(starts) == 1:
+            k.changed()  # POST /api/pet/settings while she runs
+            return 0     # she left for the new outfit
+        raise RuntimeError("started again")
+
+    k._run_once = once
+    with pytest.raises(RuntimeError, match="started again"):
+        asyncio.run(asyncio.wait_for(k.run(), 10))
+    assert len(starts) == 2 and starts[1] - starts[0] < 1
+
+
+def test_an_outfit_that_cannot_be_read_gives_way_to_the_default_one(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pet_main", PET_DIR.parent / "main.py")
+    main = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(main)
+    default = tmp_path / "whale-girl"
+    default.mkdir()
+    (default / "spritesheet.png").write_bytes(b"")
+    (default / "pet.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "broken").mkdir()
+    (tmp_path / "broken" / "pet.json").write_text('{"kolmail": {"version": 2}}', encoding="utf-8")
+    for outfit in ("broken", "gone"):
+        assert main.dressed(tmp_path, outfit).name == "whale-girl"
+    (default / "pet.json").write_text('{"kolmail": {"version": 9}}', encoding="utf-8")
+    with pytest.raises(ValueError):  # the default one itself: nothing to fall back on, the crash is in pet.log
+        main.dressed(tmp_path, "whale-girl")
 
 
 def test_keeper_starts_the_pet_with_this_app_s_boot_id(tmp_path):
@@ -1044,6 +1256,11 @@ def test_a_mac_without_a_running_pet_still_gets_notification_center(monkeypatch)
 def test_pet_settings_from_the_page_and_the_demo(client):
     d = client.post("/api/pet/settings", json={"scale": 0.75, "muted": True, "unknown": 1}).json()
     assert d["scale"] == 0.75 and d["muted"] is True and "unknown" not in d and d["running"] is False
+    assert d["outfits"][0] == {"id": "whale-girl", "name": "毛衣"} and d["pet"] == "whale-girl"
+    assert {"whale-girl-snow", "whale-girl-maid"} <= {o["id"] for o in d["outfits"]}
+    for nowhere in ("nobody", "../data", "", 3, ["whale-girl"], {"a": 1}, None):
+        assert client.post("/api/pet/settings", json={"pet": nowhere}).status_code == 400
+    assert client.post("/api/pet/settings", json={"pet": "whale-girl-maid"}).json()["pet"] == "whale-girl-maid"
     assert client.get("/api/pet/settings").json()["scale"] == 0.75
     assert client.post("/api/pet/settings", json=["no"]).status_code == 400
     assert client.post("/api/pet/demo", json={}).json()["ok"] is True
@@ -1073,5 +1290,6 @@ def test_publish_lets_only_bare_pictures_through():
     broken[-1] ^= 1
     assert "校验" in publish.png_problem(bytes(broken))
     assert publish.png_problem(b"GIF89a") == "不是 PNG"
-    for picture in PET_DIR.glob("*.png"):
+    for picture in PET_DIR.parent.glob("*/*.png"):  # every outfit's
         assert publish.png_problem(picture.read_bytes()) is None, picture.name
+        assert picture.stat().st_size <= publish.MAX_PNG, picture.name

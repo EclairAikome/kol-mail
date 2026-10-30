@@ -7,7 +7,11 @@ Order of precedence: being dragged > a one-off move (the mail hop, a reaction to
 
 A click on the little letter she holds (or on a new-mail bubble) opens KOL Mail; a click anywhere else on her is a
 touch, and she reacts to it depending on where (REACTIONS), with a line in a small speech bubble. A pet without a
-part map has no letter to aim at: a click anywhere opens KOL Mail, as before."""
+part map has no letter to aim at: a click anywhere opens KOL Mail, as before.
+
+An outfit with a move of its own ("show": throwing a snowball, a dance) plays it when her body is touched, and now
+and then by herself while nothing else is going on (SHOW_EVERY). Choosing another outfit makes the pet leave: the app
+starts it again in the new one."""
 
 from __future__ import annotations
 
@@ -31,6 +35,11 @@ REACTIONS = {
     "tail": ("spout", ["噗——尾巴不可以随便摸！", "喷你一脸水花！", "呜哇，尾巴好敏感"]),
     "feet": ("hop", ["嘿咻！", "跳一下～", "脚丫子痒痒"]),
 }
+SHOW = ("show", ["看我的！", "给你表演一个～", "看好啦！"])  # the body, in an outfit with a move of its own
+ONE_OFF = {state for state, _ in REACTIONS.values()} | {SHOW[0], "mail", "hop"}  # play once and end
+SHOW_EVERY = (180.0, 480.0)  # seconds between two moves she shows by herself, picked at random in between
+CALM_FIRST = 60.0            # seconds she just stands there after anything else before she shows off by herself
+CALM = ("idle", "waiting", "show")
 
 
 @dataclass
@@ -46,8 +55,12 @@ class Bubble:
 
 class Brain:
     def __init__(self, loop_ms: Callable[[str], float], boot: str, now: Callable[[], float] = time.monotonic,
-                 wall: Callable[[], float] = time.time, pick: Callable[[list], str] = random.choice):
+                 wall: Callable[[], float] = time.time, pick: Callable[[list], str] = random.choice,
+                 outfit: str = "", shows: bool = False, wait: Callable[[float, float], float] = random.uniform):
+        """outfit: the one the pet was started in (settings' "pet"); shows: it has a move of its own."""
         self.loop_ms, self.boot, self.now, self.wall, self.pick = loop_ms, boot, now, wall, pick
+        self.outfit, self.shows, self.wait = outfit, shows, wait
+        self.next_show = now() + wait(*SHOW_EVERY)
         self.unread = 0
         self.busy: str | None = None
         self.error: str | None = None
@@ -75,6 +88,9 @@ class Brain:
         self.settings = data.get("settings") or {}
         if self.settings.get("enabled") is False:
             self.quit_reason = "switched off"
+            return
+        if self.outfit and self.settings.get("pet", self.outfit) != self.outfit:
+            self.quit_reason = "another outfit was chosen: the app starts her again in it"
             return
         self.url = data.get("url") or self.url
         self.unread = int(data.get("unread") or 0)
@@ -131,13 +147,15 @@ class Brain:
         """A click on her. The letter opens KOL Mail (returned); any other part makes her react and say something."""
         if part == "mail":
             return self.open_link()
-        reaction = REACTIONS.get(part)
+        reaction = SHOW if part == "body" and self.shows else REACTIONS.get(part)
         if not reaction:
             return None
         t = self.now()
         self.last_activity = t
         state, lines = reaction
         self.oneshot = (state, t + self.loop_ms(state) / 1000)
+        if state == "show":  # she just showed it: the next one by herself is a while away again
+            self.next_show = self.oneshot[1] + self.wait(*SHOW_EVERY)
         if not (self.bubble_ and self.bubble_.until > t) and not self.settings.get("muted"):
             self.said = Bubble(self.pick(lines), "", "", "", until=t + SAY_FOR, say=True)
         return None
@@ -175,6 +193,12 @@ class Brain:
 
     def state(self) -> str:
         t = self.now()
+        name = self._state(t)
+        if self.shows and name not in CALM:  # back from a nap, a reaction, mail or work: not at once
+            self.next_show = max(self.next_show, t + CALM_FIRST)
+        return name
+
+    def _state(self, t: float) -> str:
         if self.drag_dir:
             return self.drag_dir
         if self.oneshot:
@@ -189,10 +213,18 @@ class Brain:
         if t < self.notify_until:
             return "notify"
         if self.unread > 0:
-            return "waiting"
+            return self.show_now(t) or "waiting"
         if self.off_hours or t - self.last_activity > DOZE_AFTER:
             return "sleeping"
-        return "idle"
+        return self.show_now(t) or "idle"
+
+    def show_now(self, t: float) -> str | None:
+        """Now and then, while she only stands there, the outfit's own move. Not a touch: she still dozes off."""
+        if not self.shows or t < self.next_show:
+            return None
+        self.oneshot = ("show", t + self.loop_ms("show") / 1000)
+        self.next_show = t + self.loop_ms("show") / 1000 + self.wait(*SHOW_EVERY)
+        return "show"
 
     def bubble(self) -> Bubble | None:
         t = self.now()

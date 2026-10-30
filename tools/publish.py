@@ -57,7 +57,7 @@ ALLOWED_EMAIL = re.compile(
     r"|@users\.noreply\.github\.com$|^noreply@anthropic\.com$", re.IGNORECASE)
 TEXT_SUFFIXES = {".py", ".md", ".txt", ".json", ".html", ".js", ".css", ".ps1", ".cmd", ".toml", ".cfg", ".ini", ".sh",
                  ".yml", ".yaml", ""}
-MAX_PNG = 3 * 1024 * 1024  # the desktop pet's pictures: five frames each, under 0.1 MB
+MAX_PNG = 3 * 1024 * 1024  # the desktop pet's pictures: five frames each, under 0.5 MB
 SKIP_SELF = {"tools/publish.py"}  # its own patterns would match themselves
 
 

@@ -36,8 +36,8 @@ MANIFEST, SIGNATURE = "MANIFEST.json", "MANIFEST.sig"
 KEEP = {"data", ".git", "__pycache__", ".venv", "venv"}  # never replaced or removed (compared case-insensitively)
 VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 LATEST_TAG = re.compile(r"/releases/tag/(v\d+\.\d+\.\d+)/?$")  # where github.com/<repo>/releases/latest redirects
-MAX_ZIP = 20 * 1024 * 1024
-MAX_UNPACKED = 60 * 1024 * 1024
+MAX_ZIP = 256 * 1024 * 1024        # the pet's three outfits (pet/*/) alone are about 140 MB
+MAX_UNPACKED = 384 * 1024 * 1024   # pictures hardly shrink in a zip
 
 
 class UpdateError(Exception):

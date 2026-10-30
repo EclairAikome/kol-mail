@@ -5,8 +5,11 @@ Two layouts are read from pet/<name>/pet.json:
   stacked top to bottom. A state either has its own frames, or plays frames of a shared clip ("clips": the turn, the
   hop; "pick" says which frame when) with a layer of props on top ("overlay": the letter in her hand, a thought
   bubble...; "box" is where in the cell they can be), so the turn is stored once and not once per state. Beside each
-  picture is its part map (half size, the part number times 40 in the red channel), which says what a click touched.
+  picture is its part map ("scale" times smaller, the part number times 40 in the red channel), which says what a
+  click touched.
   Small pictures because Tk (the Mac) takes seconds to decode a tall one, and only a fraction of that for its parts.
+  "density" pixels of the pictures make one point on the screen (2: sharp on a Mac's Retina screen, where one point
+  is two pixels); the cell, the boxes and the part maps' scale are in the pictures' pixels.
 - A plain Codex pet: one sprite sheet, 192x208 cells, rows idle / running-right / running-left / waving / jumping /
   failed / waiting / running / review. No part map: a click anywhere opens KOL Mail.
 KOL Mail's state names are mapped onto whatever the pet has (FALLBACK). A pet.json that does not add up is refused
@@ -105,11 +108,17 @@ class State:
 
 @dataclass(frozen=True)
 class Sprites:
-    cell: tuple[int, int]
+    cell: tuple[int, int]                     # a frame in the pictures, in pixels
     states: dict[str, State]
     name: str
     part_names: tuple[str, ...] = ()
     part_scale: int = 1
+    density: int = 1                          # pixels of the pictures a point on the screen
+
+    @property
+    def size(self) -> tuple[int, int]:
+        """Her size on the screen at the normal size, in points (96-DPI pixels on Windows)."""
+        return self.cell[0] // self.density, self.cell[1] // self.density
 
     def resolve(self, state: str) -> str:
         """The state name this pet actually has for `state` (idle as the last resort)."""
@@ -126,6 +135,19 @@ class Sprites:
     @property
     def touchable(self) -> bool:
         return bool(self.part_names)
+
+    def pictures_at_once(self, skip=()) -> int:
+        """The most pictures one state plays, its clip's and its props' (the states in `skip` left out): a cache
+        that holds that many keeps any of them decoded while it plays round and round."""
+        most = 0
+        for name, st in self.states.items():
+            if name in skip:
+                continue
+            used = {st.layer.at(st.base_frame(i), self.cell)[0] for i in range(st.frames)}
+            if st.overlay:
+                used |= {st.overlay.at(st.over_frame(i), self.cell)[0] for i in range(st.frames)}
+            most = max(most, len(used))
+        return most
 
     def part_lookups(self, state: str, step: int, x: float, y: float) -> list[tuple[Path, int, int]]:
         """Where to read the part at (x, y) of a state's step (cell coordinates): the props on top first, then the
@@ -202,6 +224,9 @@ def _picks(spec: dict, steps: int, limit: int) -> tuple[int, ...] | None:
 
 def _kolmail(folder: Path, km: dict, name: str) -> Sprites:
     cell = (_count(km["cell"][0], 8, 2048, "cell width"), _count(km["cell"][1], 8, 2048, "cell height"))
+    density = _count(km.get("density", 1), 1, 4, "density")
+    if cell[0] % density or cell[1] % density:
+        raise ValueError("the cell is not a whole number of points")
     clips = {key: _layer(folder, spec) for key, spec in (km.get("clips") or {}).items()}
     states = {}
     for key, s in km["states"].items():
@@ -223,7 +248,7 @@ def _kolmail(folder: Path, km: dict, name: str) -> Sprites:
         states[key] = State(layer, durations, _picks(s, steps, limit), overlay, over_pick)
     parts = km.get("parts") or {}
     names = tuple(str(n) for n in parts.get("names") or ())
-    return Sprites(cell, states, name, names, _count(parts.get("scale", 1), 1, 8, "part scale"))
+    return Sprites(cell, states, name, names, _count(parts.get("scale", 1), 1, 8, "part scale"), density)
 
 
 def _codex(folder: Path, meta: dict, name: str) -> Sprites:
@@ -232,6 +257,20 @@ def _codex(folder: Path, meta: dict, name: str) -> Sprites:
     states = {key: State(Layer((sheet,), origin=(0, row * cell[1]), across=True), tuple(d))
               for row, (key, _, d) in enumerate(CODEX_ROWS)}
     return Sprites(cell, states, name)
+
+
+def outfits(root: Path, first: str) -> list[tuple[str, str]]:
+    """The pets in root (pet/) as (folder name, the outfit's name), `first` first: what her menu and the settings page
+    offer. Only pet.json's names are read; a folder without a readable one is left out."""
+    found = []
+    for folder in sorted(root.iterdir()) if root.is_dir() else ():
+        try:
+            meta = json.loads((folder / "pet.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(meta, dict) and folder.name.replace("-", "").isalnum():
+            found.append((folder.name, str(meta.get("outfit") or meta.get("displayName") or folder.name)))
+    return sorted(found, key=lambda o: o[0] != first)
 
 
 def load(folder: Path) -> Sprites:

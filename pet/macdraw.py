@@ -7,7 +7,9 @@ leaves trails when she sways. Tk 8.6 had no such bitmap. So the Tk window keeps 
 the menu, the bubble), its own picture is hidden (its content view's layer at opacity 0; views take the mouse by
 where they are, not by what they show), and the frames go to two layers in a view of ours right under it: the
 clip's frame and the props on top. The window server blends them with their alpha, as UpdateLayeredWindow does on
-Windows, and each frame replaces the last one whole.
+Windows, and each frame replaces the last one whole. The whale girl's pictures hold two pixels a point (pet.json's
+density): on a Retina screen each of her pixels is one of the screen's, not one stretched over four; on a plain screen
+and at 小 or 大 Core Animation scales them on the graphics card.
 
 Everything goes through the Objective-C runtime and Core Graphics with ctypes, as win.py does with GDI+: nothing to
 install. No call here returns a struct (objc_msgSend would need its _stret twin on Intel Macs for that): a screen's
@@ -257,9 +259,8 @@ class Layers:
     """Tk's own picture of the window hidden, and in its place a view of ours with two layers: the frame of the
     clip (base) and the props over it (over)."""
 
-    def __init__(self, title: str, cell: tuple[int, int]):
-        cw, ch = cell
-        rect = CGRect(0, 0, cw, ch)
+    def __init__(self, title: str, size: tuple[int, int], density: int = 1):
+        rect = CGRect(0, 0, *size)
         with Pool():
             self.window = find_window(title)
             content = send(self.window, "contentView")
@@ -276,6 +277,7 @@ class Layers:
             self.over = send(send(cls("CALayer"), "alloc"), "init")
             for layer in (self.base, self.over):  # the props last: on top
                 send(layer, "setFrame:", rect, restype=None, argtypes=(CGRect,))
+                send(layer, "setContentsScale:", float(density), restype=None, argtypes=(c_double,))
                 send(self.host, "addSublayer:", layer, restype=None, argtypes=(c_void_p,))
             self.view = send(send(cls("NSView"), "alloc"), "initWithFrame:", rect, argtypes=(CGRect,))
             send(self.view, "setLayer:", self.host, restype=None, argtypes=(c_void_p,))  # layer first: we own its tree
@@ -303,6 +305,18 @@ class Layers:
             send(transaction, "setDisableActions:", True, restype=None, argtypes=(c_bool,))
             send(self.base, "setContents:", base, restype=None, argtypes=(c_void_p,))
             send(self.over, "setContents:", over, restype=None, argtypes=(c_void_p,))
+            send(transaction, "commit", restype=None)
+
+    def resize(self, size: tuple[int, int]):
+        """小 中 大. The view follows the window by itself, by its autoresizing mask (were its frame set here too, it
+        would grow twice over should Tk resize the window later); the layers are told, and a frame fills its layer."""
+        transaction = cls("CATransaction")
+        rect = CGRect(0, 0, *size)
+        with Pool():
+            send(transaction, "begin", restype=None)
+            send(transaction, "setDisableActions:", True, restype=None, argtypes=(c_bool,))
+            for layer in (self.base, self.over):
+                send(layer, "setFrame:", rect, restype=None, argtypes=(CGRect,))
             send(transaction, "commit", restype=None)
 
     def click_through(self, ignore: bool):

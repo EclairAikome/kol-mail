@@ -6,7 +6,7 @@ app is busy drafting or sending, and its own settings. Events are kept for ten m
 late still shows the mail that just arrived; older ones are never replayed.
 
 Settings live in data/pet.json and only the app writes them (the page's settings dialog, the pet's own menu and its
-new position after a drag all go through POST /api/pet/settings)."""
+new position after a drag all go through POST /api/pet/settings). "pet" is the outfit, a folder of pet/ (outfits())."""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ import sys
 import time
 import uuid
 from pathlib import Path
+
+from pet import sprites as pet_sprites
 
 EVENT_TTL = 600           # seconds an event stays available to a pet that has not fetched it yet
 ALIVE_WITHIN = 15         # a pet that asked this recently is running
@@ -93,6 +95,11 @@ def clean(s: dict) -> dict:
         v = s.get(key)
         out[key] = int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and abs(v) < 100000 else None
     return out
+
+
+def outfits(base: Path) -> list[dict]:
+    """The outfits she can wear: the folders of pet/ with a pet.json, the default first."""
+    return [{"id": key, "name": name} for key, name in pet_sprites.outfits(base / "pet", DEFAULTS["pet"])]
 
 
 def save_settings(path: Path, changes: dict) -> dict:

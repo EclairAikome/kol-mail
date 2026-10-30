@@ -104,6 +104,7 @@
   .badge.failed { color: var(--bad); background: transparent; border: 1px solid var(--bad); }
   #more { margin: 10px auto; display: block; }
   #more[hidden] { display: none; }
+  #petOutfitRow[hidden] { display: none; }  /* .row2 is a flex box, which beats the browser's own [hidden] */
   #reader { padding: 16px 20px 40px; }
   .empty { color: var(--muted); margin-top: 40px; text-align: center; }
   .meta { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
@@ -475,6 +476,7 @@ try {
       <select id="petScale"><option value="0.75">小</option><option value="1">中</option><option value="1.25">大</option></select>
       <label><input type="checkbox" id="petMuted"> 静音（只换动作，不弹气泡）</label>
     </div>
+    <div class="row2" id="petOutfitRow" hidden><span>衣服</span><select id="petOutfit"></select></div>
     <div class="row2"><button class="act" id="petDemo" type="button">让她演示一下来信</button><span class="note" id="petNote"></span></div>
     <p class="note" style="margin:0">拖动可以挪位置；单击打开 KOL Mail（有气泡时打开那封信）；右键有更多选项。</p>
   </section>
@@ -2791,7 +2793,11 @@ $("#mailBannerReset").onclick = safe(async () => {
 function showPet(d) {
   $("#petOn").checked = d.enabled; $("#petMuted").checked = d.muted;
   $("#petScale").value = String(d.scale);
-  $("#petScale").disabled = $("#petMuted").disabled = $("#petDemo").disabled = !d.enabled;
+  const outfits = d.outfits || [];
+  $("#petOutfitRow").hidden = outfits.length < 2;
+  $("#petOutfit").replaceChildren(...outfits.map(o => new Option(o.name, o.id)));
+  $("#petOutfit").value = d.pet;
+  $("#petScale").disabled = $("#petMuted").disabled = $("#petDemo").disabled = $("#petOutfit").disabled = !d.enabled;
   const note = $("#petNote"); note.className = d.error ? "note err" : "note";
   note.textContent = d.error || (!d.enabled ? "已关闭，来信只在这个页面上显示" : d.running ? "桌宠在桌面上" : "正在叫她出来…");
 }
@@ -2927,6 +2933,7 @@ $("#lookClose").onclick = () => $("#lookDlg").close();
 $("#petOn").onchange = safe(() => savePet({ enabled: $("#petOn").checked }));
 $("#petMuted").onchange = safe(() => savePet({ muted: $("#petMuted").checked }));
 $("#petScale").onchange = safe(() => savePet({ scale: Number($("#petScale").value) }));
+$("#petOutfit").onchange = safe(() => savePet({ pet: $("#petOutfit").value }));
 $("#petDemo").onclick = safe(async () => {
   const d = await post("/api/pet/demo", {});
   $("#petNote").className = "note";

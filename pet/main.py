@@ -19,6 +19,18 @@ from pet import sprites as sprites_mod  # noqa: E402
 ANOTHER, UNSUPPORTED = 3, 4
 
 
+def dressed(root: Path, outfit: str) -> sprites_mod.Sprites:
+    """Her pictures in that outfit; the default one should that one be gone or not add up (a later version took it
+    away, a picture is missing). The pet still knows which one was chosen, so it does not leave for it in a loop."""
+    try:
+        return sprites_mod.load(root / outfit)
+    except (OSError, ValueError) as e:
+        if outfit == petfeed.DEFAULTS["pet"]:
+            raise
+        print(f"pet outfit {outfit} could not be read ({e!r}): the default one instead", flush=True)
+        return sprites_mod.load(root / petfeed.DEFAULTS["pet"])
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, required=True)
@@ -26,15 +38,14 @@ def main() -> int:
     p.add_argument("--boot", default="")
     args = p.parse_args()
     settings = petfeed.load_settings(args.data / "pet.json")
-    folder = Path(__file__).resolve().parent / settings["pet"]
-    if not (folder / "pet.json").exists():
-        folder = Path(__file__).resolve().parent / petfeed.DEFAULTS["pet"]
-    sprites = sprites_mod.load(folder)
+    root = Path(__file__).resolve().parent
+    sprites = dressed(root, settings["pet"])
+    outfits = sprites_mod.outfits(root, petfeed.DEFAULTS["pet"])
     if sys.platform == "win32":
         from pet import win
         if not win.single_instance(args.port):
             return ANOTHER
-        return win.run(args.port, args.boot, settings, sprites, args.data)
+        return win.run(args.port, args.boot, settings, sprites, args.data, outfits)
     if sys.platform == "darwin":
         try:
             from pet import mac
@@ -43,7 +54,7 @@ def main() -> int:
             return UNSUPPORTED
         if not mac.single_instance(args.data, args.port):
             return ANOTHER
-        return mac.run(args.port, args.boot, settings, sprites)
+        return mac.run(args.port, args.boot, settings, sprites, outfits)
     print("no desktop pet on", sys.platform)
     return UNSUPPORTED
 

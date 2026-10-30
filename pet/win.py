@@ -54,6 +54,7 @@ MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL = 2, 0
 MONITORINFOF_PRIMARY, MDT_EFFECTIVE_DPI = 1, 0
 ERROR_ALREADY_EXISTS = 183
 TIMER_CHECK, TIMER_QUIT = 2, 3
+OUTFIT_CMD = 21  # her menu's command for the first outfit, the next ones after it
 WM_TICK = 0x8001  # WM_APP + 1: the animation beat
 DRAG_THRESHOLD = 4
 
@@ -411,12 +412,17 @@ class Strip:
             GdipBitmapUnlockBits(bitmap, ctypes.byref(data))
 
     def _scale(self, bitmap, cell, size, cols: int, rows: int):
-        """Each frame on its own, so no colour of the neighbouring frame bleeds in at the edges."""
+        """Each frame on its own, so no colour of the neighbouring frame bleeds in at the edges. The picture is
+        turned into premultiplied pixels once first: cutting each frame out of the paletted PNG took twice as long
+        (the whale girl's pictures hold two pixels a point, so on Windows every frame is scaled)."""
         (cw, ch), (sw, sh) = cell, size
-        dst, g, attrs = VP(), VP(), VP()
-        check(GdipCreateBitmapFromScan0(self.w, self.h, self.w * 4, PixelFormat32bppPARGB, self.bits,
-                                        ctypes.byref(dst)), "wrap strip")
+        dst, g, attrs, whole = VP(), VP(), VP(), VP()
+        check(GdipCloneBitmapAreaI(0, 0, cols * cw, rows * ch, PixelFormat32bppPARGB, bitmap, ctypes.byref(whole)),
+              "convert the picture")
+        bitmap = whole
         try:
+            check(GdipCreateBitmapFromScan0(self.w, self.h, self.w * 4, PixelFormat32bppPARGB, self.bits,
+                                            ctypes.byref(dst)), "wrap strip")
             check(GdipGetImageGraphicsContext(dst, ctypes.byref(g)), "GetImageGraphicsContext")
             GdipSetInterpolationMode(g, 7)  # high quality bicubic
             GdipSetPixelOffsetMode(g, 4)    # half pixel: no drift
@@ -439,7 +445,9 @@ class Strip:
                 GdipDisposeImageAttributes(attrs)
             if g:
                 GdipDeleteGraphics(g)
-            GdipDisposeImage(dst)
+            if dst:
+                GdipDisposeImage(dst)
+            GdipDisposeImage(whole)
 
     def close(self):
         """Also after a failed __init__: whatever was made by then."""
@@ -511,11 +519,14 @@ class Cache:
 
 
 class PetWindow:
-    def __init__(self, sprites: Sprites, port: int, boot: str, settings_hint: dict, data=None):
+    def __init__(self, sprites: Sprites, port: int, boot: str, settings_hint: dict, data=None,
+                 outfits: list[tuple[str, str]] = ()):
         self.sprites = sprites
         self.data = data  # the app's data folder, for pet-place.json
+        self.outfits = list(outfits)  # (folder, name) of each outfit in her menu
         self.client = Client(port, wake=lambda: PostMessageW(self.hwnd, WM_APP, 0, 0))
-        self.brain = brain_mod.Brain(lambda s: sprites.get(s).loop_ms, boot)
+        self.brain = brain_mod.Brain(lambda s: sprites.get(s).loop_ms, boot, outfit=settings_hint.get("pet") or "",
+                                     shows="show" in sprites.states)
         self.settings = dict(settings_hint)
         self.hwnd = None
         self.bubble_hwnd = None
@@ -605,7 +616,7 @@ class PetWindow:
             ReleaseDC(None, dc)
 
     def resize(self, scale: float, keep_feet: bool = True):
-        cw, ch = self.sprites.cell
+        cw, ch = self.sprites.size
         k = scale * self.own_dpi()
         size = w, h = max(16, round(cw * k)), max(16, round(ch * k))
         old = self.window_rect() if keep_feet and self.size != (1, 1) else None
@@ -881,7 +892,7 @@ class PetWindow:
 
     def part_at(self, x: int, y: int) -> str:
         """The body part under (x, y) in window coordinates, "" for none."""
-        k = self.scale * self.own_dpi()
+        k = self.scale * self.own_dpi() / self.sprites.density  # window pixels per pixel of the pictures
         try:
             for path, px, py in self.sprites.part_lookups(self.shown_state, max(0, self.frame), x / k, y / k):
                 red = self.part_maps.get(path).red(px, py)
@@ -947,13 +958,18 @@ class PetWindow:
         AppendMenuW(m, MF_SEPARATOR, 0, None)
         AppendMenuW(m, MF_STRING | (MF_CHECKED if self.settings.get("muted") else 0), 2, "静音（来信只换动作，不弹气泡）")
         AppendMenuW(m, MF_POPUP, sizes, "大小")
+        if len(self.outfits) > 1:
+            dress = CreatePopupMenu()
+            for i, (key, name) in enumerate(self.outfits):
+                AppendMenuW(dress, MF_STRING | (MF_CHECKED if key == self.brain.outfit else 0), OUTFIT_CMD + i, name)
+            AppendMenuW(m, MF_POPUP, dress, "换装")
         AppendMenuW(m, MF_SEPARATOR, 0, None)
         AppendMenuW(m, MF_STRING, 3, "隐藏桌宠（在 KOL Mail 的设置里可以再打开）")
         pt = W.POINT()
         GetCursorPos(ctypes.byref(pt))
         SetForegroundWindow(self.hwnd)  # without it the menu does not close when clicking elsewhere
         cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, self.hwnd, None)
-        DestroyMenu(m)  # also destroys the submenu
+        DestroyMenu(m)  # also destroys the submenus
         if cmd == 1:
             self.open(self.brain.url)
         elif cmd == 2:
@@ -967,6 +983,10 @@ class PetWindow:
             self.resize(scale)
             self.client.save(scale=scale, x=self.pos[0], y=self.pos[1])
             self.remember()
+        elif OUTFIT_CMD <= cmd < OUTFIT_CMD + len(self.outfits):
+            key = self.outfits[cmd - OUTFIT_CMD][0]
+            if key != self.brain.outfit:  # the app starts her again in it once it has saved the choice
+                self.client.save(pet=key)
         elif cmd == 3:
             self.client.save(enabled=False)
             self.brain.quit_reason = "hidden from the menu"
@@ -1147,9 +1167,9 @@ def dpi_aware():
         user32.SetProcessDPIAware()
 
 
-def run(port: int, boot: str, settings: dict, sprites: Sprites, data=None) -> int:
+def run(port: int, boot: str, settings: dict, sprites: Sprites, data=None, outfits: list[tuple[str, str]] = ()) -> int:
     dpi_aware()
-    w = PetWindow(sprites, port, boot, settings, data)
+    w = PetWindow(sprites, port, boot, settings, data, outfits)
     w.create()
     w.loop()
     print("pet stopped:", w.brain.quit_reason, flush=True)

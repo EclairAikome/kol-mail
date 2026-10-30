@@ -397,6 +397,50 @@ def test_a_chat_whose_account_the_sheet_lists_links_itself_without_replaying_his
     assert chats.token_row({"key": "tg:1", "peer_id": "1"}, app.chat_rows_cache["rows"]) is None
 
 
+@pytest.mark.parametrize("work_time, ran_min_ago, runs", [(True, None, 1), (True, 150, 1), (True, 30, 0), (False, None, 0)])
+def test_the_popo_loop_runs_popo_sync_in_working_hours_every_two_hours(store, tmp_path, monkeypatch, work_time,
+                                                                       ran_min_ago, runs):
+    marker = tmp_path / "ran.txt"
+    script = tmp_path / "popo_sync.py"  # stands in for kol-sheet\popo_sync.py: records the call, answers like it
+    script.write_text("import json, sys\nopen(sys.argv[0] + '.ran', 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+                      "print(json.dumps({'status': 'ok', 'added': [{'kol': 'x'}], 'proposals': []}))\n",
+                      encoding="utf-8")
+    state_file = tmp_path / "popo_sync_state.json"
+    if ran_min_ago is not None:
+        state_file.write_text("{}", encoding="utf-8")
+        t = (datetime.now(timezone.utc) - timedelta(minutes=ran_min_ago)).timestamp()
+        import os
+        os.utime(state_file, (t, t))
+    monkeypatch.setattr(app, "POPO_SYNC", script)
+    monkeypatch.setattr(app, "POPO_SYNC_STATE", state_file)
+    monkeypatch.setattr(app, "SHEET_PYTHON", sys.executable)
+    monkeypatch.setattr(app, "SHEET_MODE", "legacy")
+    monkeypatch.setattr(app, "SHEET_ENV", None)
+
+    class Schedule:
+        def is_work_time(self, moment):
+            return work_time
+
+    class Config:
+        schedule = Schedule()
+    monkeypatch.setattr(app, "load_autoreply_config", lambda: Config())
+    ticks = []
+    real_sleep = asyncio.sleep
+
+    async def tick(seconds, *a, **k):  # the loop's 10-minute wait: once through, then stop
+        ticks.append(seconds)
+        if len(ticks) > 1:
+            raise asyncio.CancelledError
+        await real_sleep(0)
+    monkeypatch.setattr(app.asyncio, "sleep", tick)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(app.popo_sync_loop())
+    ran = Path(str(script) + ".ran")
+    assert (ran.read_text(encoding="utf-8").split("\n").count("run") if ran.exists() else 0) == runs
+    assert bool(store.get_kv("popo_tried_at")) == bool(runs)
+    assert app.state.get("popo_error") is None
+
+
 def test_popo_sync_counts_any_recent_run_and_its_own_tries(store, tmp_path, monkeypatch):
     state_file = tmp_path / "popo_sync_state.json"
     monkeypatch.setattr(app, "POPO_SYNC_STATE", state_file)

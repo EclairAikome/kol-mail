@@ -3655,10 +3655,14 @@ async def api_pet_settings(request: Request):
         body = await request.json()
         if not isinstance(body, dict):
             return bad("格式不对")
+        chosen = body.get("pet")
+        if "pet" in body and not (isinstance(chosen, str) and chosen in {o["id"] for o in petfeed.outfits(BASE)}):
+            return bad("没有这套衣服")
         petfeed.save_settings(PET_SETTINGS, body)
         keeper.changed()
     alive = feed.alive()
-    return JSONResponse({**petfeed.load_settings(PET_SETTINGS), "running": alive, "error": None if alive else keeper.error})
+    return JSONResponse({**petfeed.load_settings(PET_SETTINGS), "running": alive, "error": None if alive else keeper.error,
+                         "outfits": petfeed.outfits(BASE)})
 
 
 looks = skin.Skin(DATA)

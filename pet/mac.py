@@ -6,8 +6,9 @@ last frame stays behind the new one. uv's and Homebrew's Pythons come with Tk 9,
 layers not come up, Tk 8.6 still draws her itself (below); Tk 9 gives up (exit code 4) and the app keeps using
 Notification Center, as when Tk is missing altogether and main.py's import fails.
 
-On a Mac the pet always has its normal size. Which frame shows follows the clock, as on Windows, about 60 times a
-second. Pictures hold five frames each: a tall one takes long to decode.
+Her size is 小, 中 or 大 (her menu, or the settings page), as on Windows: the window and the layers change size and
+Core Animation scales the frames; Tk alone (no layers) shows her at 中 only. Which frame shows follows the clock, as
+on Windows, about 60 times a second. Pictures hold five frames each: a tall one takes long to decode.
 
 She and her bubble stay over every app's windows and on every Space, full-screen apps' included: macdraw.keep_in_front
 once Tk has mapped each window (Tk's own -topmost does not last on a window without a frame), and the app an
@@ -25,7 +26,7 @@ import webbrowser
 from pathlib import Path
 
 from . import macdraw, place
-from .brain import Brain
+from .brain import ONE_OFF, Brain
 from .client import Client, own_page
 from .sprites import Sprites
 
@@ -37,11 +38,14 @@ BUBBLE_TITLE = f"KOL Mail pet bubble {os.getpid()}"  # and each bubble's, number
 
 
 RETRY_AFTER = 30.0  # seconds before a picture that could not be read is tried again
+SIZES = (("小", 0.75), ("中", 1.0), ("大", 1.25))  # as petfeed.SCALES and the Windows menu
+STRIP_BUDGET = 64 << 20  # bytes of decoded pictures kept at the least (see picture_budget)
+OWN_CHOICE_HOLDS = 6.0  # seconds a size picked in her menu wins over the app's answers (one may have left before it)
 
 
 class Pictures:
     """The pictures used last, up to `budget` bytes in memory (Tk keeps 4 bytes a pixel; five frames of her are
-    1.6 MB). The two newest always stay, as a frame may need a clip and the props on top of it. A picture that cannot
+    6.3 MB at two pixels a point). The two newest always stay, as a frame may need a clip and the props on top of it. A picture that cannot
     be read is said once and tried again RETRY_AFTER later; until then asking for it fails at once (OSError).
     Tk photo images by default; macdraw strips with their own loader, size and release."""
 
@@ -71,6 +75,16 @@ class Pictures:
         return img
 
 
+def picture_budget(sprites: Sprites) -> int:
+    """Room for every picture of the state that plays the most of them round and round, and two more (a state's
+    pictures stay while the next one's come in), at least STRIP_BUDGET: no picture is decoded again while a state
+    loops. A one-off move (a dance of 50 pictures) plays its pictures one after the other once: it needs only the
+    one it is at. Decoded, a picture of five frames at two pixels a point is 7.9 MB (4 bytes a pixel and its alpha)."""
+    cw, ch = sprites.cell
+    band = max(cw * ch * min(st.layer.per, st.frames) * 5 for st in sprites.states.values())
+    return max(STRIP_BUDGET, (sprites.pictures_at_once(skip=ONE_OFF) + 2) * band)
+
+
 def single_instance(data: Path, port: int) -> bool:
     handle = open(data / f"pet-{port}.lock", "w")  # kept open (and locked) for the life of the process
     try:
@@ -83,9 +97,11 @@ def single_instance(data: Path, port: int) -> bool:
 
 
 class PetApp:
-    def __init__(self, sprites: Sprites, port: int, boot: str, settings: dict):
+    def __init__(self, sprites: Sprites, port: int, boot: str, settings: dict, outfits: list[tuple[str, str]] = ()):
         self.sprites, self.settings = sprites, dict(settings)
-        self.brain = Brain(lambda s: sprites.get(s).loop_ms, boot)
+        self.outfits = list(outfits)  # (folder, name) of each outfit in her menu
+        self.brain = Brain(lambda s: sprites.get(s).loop_ms, boot, outfit=self.settings.get("pet") or "",
+                           shows="show" in sprites.states)
         self.client = Client(port)
         root = self.root = tk.Tk()
         root.withdraw()
@@ -94,17 +110,20 @@ class PetApp:
         root.wm_attributes("-transparent", True)
         root.config(bg="systemTransparent")
         self.layers: macdraw.Layers | None = None  # set in run(); None: Tk draws her (Tk 8.6 only)
-        self.strips = Pictures(64 << 20, load=lambda path: macdraw.Strip(path, sprites.cell),
+        budget = picture_budget(sprites)
+        self.strips = Pictures(budget, load=lambda path: macdraw.Strip(path, sprites.cell),
                                weight=lambda strip: strip.nbytes, drop=lambda strip: strip.close())
         self.shown_strips = ()  # (strip, x, y) of the frame and the props on screen: which pixels are see-through
-        self.pictures = Pictures(64 << 20)
+        self.pictures = Pictures(budget)  # Tk's own, should the layers not come up
         self.part_maps = Pictures(16 << 20)
-        cw, ch = sprites.cell
-        self.image = tk.PhotoImage(width=cw, height=ch)
+        self.image = tk.PhotoImage(width=sprites.size[0], height=sprites.size[1])  # Tk's own drawing, at 中
         self.label = tk.Label(root, image=self.image, bg="systemTransparent", bd=0, highlightthickness=0)
-        self.label.pack()
+        self.label.pack(fill="both", expand=True)  # the whole window takes the mouse, at any size
         self.said: set[str] = set()  # what went wrong already, printed once each
         self.accessory, self.made_regular = False, 0  # see stay_accessory
+        self.scale = float(self.settings.get("scale") or 1.0)  # back to 1.0 should the layers not come up
+        self.own_choice_at = -OWN_CHOICE_HOLDS
+        cw, ch = self.shown_size()
         x, y = self.settings.get("x"), self.settings.get("y")
         if x is None or y is None or not place.holder(self.screens(), int(x) + cw // 2, int(y) + ch // 2):
             x, y = root.winfo_screenwidth() - cw - 40, root.winfo_screenheight() - ch - 90  # above the Dock
@@ -142,6 +161,7 @@ class PetApp:
                 self.show_on_layers(st, step)
                 return min(st.durations)
             cell = cw, ch = self.sprites.cell
+            d = self.sprites.density  # Tk keeps every d-th pixel: her at 中, roughly
             try:
                 path, x, y = st.layer.at(st.base_frame(step), cell)
                 base = self.pictures.get(path)
@@ -154,12 +174,13 @@ class PetApp:
             self.frame = step
             # "set": the clip's frame replaces everything, transparency included; then the props go over it
             self.image.tk.call(self.image, "copy", base, "-from", x, y, x + cw, y + ch, "-to", 0, 0,
-                               "-compositingrule", "set")
+                               "-subsample", d, d, "-compositingrule", "set")
             if over is not None:
                 x0, y0, x1, y1 = st.overlay.box or (0, 0, cw, ch)
+                x0, y0 = x0 - x0 % d, y0 - y0 % d  # on a whole point, as the frame under them
                 if x1 > x0 and y1 > y0:
                     self.image.tk.call(self.image, "copy", over, "-from", ox + x0, oy + y0, ox + x1, oy + y1,
-                                       "-to", x0, y0, "-compositingrule", "overlay")
+                                       "-to", x0 // d, y0 // d, "-subsample", d, d, "-compositingrule", "overlay")
         return min(st.durations)
 
     def show_on_layers(self, st, step: int):
@@ -178,9 +199,19 @@ class PetApp:
         self.layers.show(images[0], images[1] if len(images) > 1 else None)
         self.frame, self.shown_strips = step, tuple(shown)
 
+    def shown_size(self) -> tuple[int, int]:
+        """Her window's size in points, at her size (小 中 大)."""
+        return round(self.sprites.size[0] * self.scale), round(self.sprites.size[1] * self.scale)
+
+    def to_picture(self, x: float, y: float) -> tuple[int, int]:
+        """A point of her window as a pixel of her pictures."""
+        k = self.sprites.density / self.scale
+        return int(x * k), int(y * k)
+
     def solid_at(self, x: int, y: int) -> bool:
-        """Whether the pixel (x, y) of the window shows any of her or her props right now."""
-        return any(strip.alpha(sx + x, sy + y) for strip, sx, sy in self.shown_strips)
+        """Whether the point (x, y) of the window shows any of her or her props right now."""
+        px, py = self.to_picture(x, y)
+        return any(strip.alpha(sx + px, sy + py) for strip, sx, sy in self.shown_strips)
 
     def update_click_through(self):
         """With the layers, the window takes clicks only where she is: from the pixel under the pointer. Never in
@@ -190,7 +221,7 @@ class PetApp:
             return
         px, py = self.root.winfo_pointerxy()
         x, y = px - self.pos[0], py - self.pos[1]
-        cw, ch = self.sprites.cell
+        cw, ch = self.shown_size()
         if 0 <= x < cw and 0 <= y < ch:
             self.layers.click_through(not self.solid_at(x, y))
 
@@ -244,7 +275,7 @@ class PetApp:
         if not w:
             return
         bw, bh = w.winfo_reqwidth(), w.winfo_reqheight()
-        cw, ch = self.sprites.cell
+        cw, ch = self.shown_size()
         x, y = self.pos
         bx, by = place.bubble_at(self.screens(), (x, y, x + cw, y + ch), (bw, bh),
                                  x + cw // 2 - bw // 2, y + int(ch * 0.12) - bh)
@@ -295,7 +326,7 @@ class PetApp:
     # ---------------------------------------------------------------- what a click touched
 
     def part_at(self, x: int, y: int) -> str:
-        for path, px, py in self.sprites.part_lookups(self.shown, max(0, self.frame), x, y):
+        for path, px, py in self.sprites.part_lookups(self.shown, max(0, self.frame), *self.to_picture(x, y)):
             try:
                 red = int(self.part_maps.get(path).get(px, py)[0])
             except (tk.TclError, OSError, IndexError, ValueError, TypeError):
@@ -314,6 +345,7 @@ class PetApp:
             else:
                 self.brain.on_poll(answer)
                 self.settings = self.brain.settings or self.settings
+                self.follow_size(self.settings.get("scale"))
         if not self.client.is_alive() and not self.brain.quit_reason:  # it would never hear "leave" again
             self.brain.quit_reason = "the polling thread died"
         if self.brain.quit_reason:
@@ -368,15 +400,32 @@ class PetApp:
         self.update_bubble()
 
     def on_menu(self, e):
+        self.build_menu().tk_popup(e.x_root, e.y_root)
+
+    def build_menu(self) -> tk.Menu:
         if getattr(self, "menu", None):
             self.menu.destroy()
         m = self.menu = tk.Menu(self.root, tearoff=0)
         m.add_command(label="打开 KOL Mail", command=lambda: self.open(self.brain.url))
         muted = tk.BooleanVar(value=bool(self.settings.get("muted")))
         m.add_checkbutton(label="静音（来信只换动作，不弹气泡）", variable=muted, command=lambda: self.set_muted(muted.get()))
+        size, outfit = tk.DoubleVar(value=self.scale), tk.StringVar(value=self.brain.outfit)
+        self.menu_vars = (muted, size, outfit)  # Tk forgets a variable Python no longer holds
+        if self.layers:  # Tk alone draws her at 中 only
+            sizes = tk.Menu(m, tearoff=0)
+            for label, value in SIZES:
+                sizes.add_radiobutton(label=label, variable=size, value=value,
+                                      command=lambda value=value: self.choose_size(value))
+            m.add_cascade(label="大小", menu=sizes)
+        if len(self.outfits) > 1:
+            dress = tk.Menu(m, tearoff=0)
+            for key, name in self.outfits:
+                dress.add_radiobutton(label=name, variable=outfit, value=key,
+                                      command=lambda key=key: self.choose_outfit(key))
+            m.add_cascade(label="换装", menu=dress)
         m.add_separator()
         m.add_command(label="隐藏桌宠（在 KOL Mail 的设置里可以再打开）", command=self.hide)
-        m.tk_popup(e.x_root, e.y_root)
+        return m
 
     def set_muted(self, value: bool):
         self.settings["muted"] = value
@@ -384,6 +433,37 @@ class PetApp:
         if value:
             self.brain.dismiss_bubble()
             self.update_bubble()
+
+    def choose_size(self, scale: float):
+        self.own_choice_at = time.monotonic()
+        self.resize(scale)
+        self.client.save(scale=scale, x=self.pos[0], y=self.pos[1])
+
+    def choose_outfit(self, key: str):
+        if key != self.brain.outfit:  # the app starts her again in it once it has saved the choice
+            self.client.save(pet=key)
+
+    def follow_size(self, scale):
+        """A size chosen on the settings page. Not in the middle of a drag, and not right after one picked in her
+        menu: an answer that left the app before that save would undo it for two seconds."""
+        if (self.layers and isinstance(scale, (int, float)) and scale > 0 and scale != self.scale
+                and not self.dragging and time.monotonic() - self.own_choice_at > OWN_CHOICE_HOLDS):
+            self.resize(float(scale))
+            self.client.save(x=self.pos[0], y=self.pos[1])  # her feet stayed: her corner moved
+
+    def resize(self, scale: float, keep_feet: bool = True):
+        """小 中 大: the window and the layers at the new size, her feet where they were."""
+        old_w, old_h = self.shown_size()
+        self.scale = scale if self.layers else 1.0
+        w, h = self.shown_size()
+        if keep_feet:
+            self.pos = (self.pos[0] + old_w // 2 - w // 2, self.pos[1] + old_h - h)
+        self.root.geometry(f"{w}x{h}+{self.pos[0]}+{self.pos[1]}")
+        if self.layers:
+            self.root.update_idletasks()  # Tk resizes the NSWindow now, the layers follow
+            self.layers.resize((w, h))
+        self.place_bubble()
+        self.draw(force=True)
 
     def hide(self):
         self.client.save(enabled=False)
@@ -403,11 +483,13 @@ class PetApp:
         self.stay_accessory()  # Tk may have made it a regular app again meanwhile
         self.root.title(WINDOW_TITLE)
         try:
-            self.layers = macdraw.Layers(WINDOW_TITLE, self.sprites.cell)
+            self.layers = macdraw.Layers(WINDOW_TITLE, self.shown_size(), self.sprites.density)
         except Exception as e:  # noqa: BLE001  ctypes and AppKit fail in many ways; each one means "no layers"
             print("pet layers:", repr(e), "Tk", tk.TkVersion, flush=True)
             if tk.TkVersion >= 9:  # Tk 9 by itself shows a black box with trails: rather no pet at all
                 return False
+            if self.scale != 1.0:
+                self.resize(1.0)  # Tk draws her at 中 only
         self.keep_in_front(self.root, WINDOW_TITLE, macdraw.TOPMOST)
         return True
 
@@ -425,8 +507,8 @@ class PetApp:
         return 0
 
 
-def run(port: int, boot: str, settings: dict, sprites: Sprites) -> int:
-    app = PetApp(sprites, port, boot, settings)
+def run(port: int, boot: str, settings: dict, sprites: Sprites, outfits: list[tuple[str, str]] = ()) -> int:
+    app = PetApp(sprites, port, boot, settings, outfits)
     code = app.run()
     print("pet stopped:", app.brain.quit_reason if code == 0 else "this Mac cannot show it", flush=True)
     return code

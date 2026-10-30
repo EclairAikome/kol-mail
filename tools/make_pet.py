@@ -1,6 +1,6 @@
 """Build the whale-girl desktop pet from one GIF (developer tool, never run on users' machines).
 
-    uv run --no-project --with pillow --with numpy --with scipy python -I tools/make_pet.py \
+    uv run --no-project --with pillow --with numpy --with scipy --with imagequant python -I tools/make_pet.py \
         鲸鱼娘.gif pet/whale-girl [path/to/rife-ncnn-vulkan.exe] [previews]
 
 The GIF is a chibi girl turning on a light grey studio backdrop, 15 frames. RIFE (github.com/nihui/rife-ncnn-vulkan,
@@ -12,8 +12,10 @@ the face, a tickle, the tail). She holds a little letter in most of them; clicki
 
 Out come the shared clips (the turn, the hop), the states' own frames and the props some states draw over a clip,
 each as pictures of five frames stacked top to bottom (<name>.<k>.png), each with its part map (<name>.<k>.parts.png:
-half size, the part number in the red channel), and pet.json, which pet/sprites.py reads. With a fourth argument, a
-preview GIF per state is written there as well."""
+a quarter of the size, the part number in the red channel), and pet.json, which pet/sprites.py reads. The frames
+keep the GIF's own size and are shown at half of it (density 2: sharp on a Retina screen); libimagequant puts them in
+256 colours with dithering, which keeps the soft shadow soft. With a fourth argument, a preview GIF per state is
+written there as well. tools/make_outfit.py dresses her in other outfits with the same states (Plan, everyday)."""
 
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ import json
 import math
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -220,23 +223,35 @@ def droplet(d, cx, cy, r, s, alpha):
 
 # ---------------------------------------------------------------- the character
 
-EYES = ((139, 185, 176, 232), (212, 182, 263, 227))  # the open eyes in frame 0
+@dataclass(frozen=True)
+class Face:
+    """Where a character's face is in her front figure: the open eyes (boxes painted over), bare skin between them
+    for the colour, the lashes drawn instead ((x0, x1, y) for each eye) and the blush under them."""
+    eyes: tuple[tuple[int, int, int, int], ...]
+    skin: tuple[int, int, int, int]
+    lashes: tuple[tuple[int, int, int], ...]
+    blush: tuple[tuple[int, int, int, int], ...]
+
+
+WHALE_FACE = Face(eyes=((139, 185, 176, 232), (212, 182, 263, 227)), skin=(180, 205, 210, 228),
+                  lashes=((142, 175, 212), (218, 257, 208)), blush=((134, 226, 166, 240), (226, 224, 258, 238)))
 LASH = (43, 36, 80, 255)
 
 
-def painted_eyes(frame: np.ndarray, style: str) -> Image.Image:
-    """Frame 0 with the eyes painted over: each eye is covered with the skin colour found between the eyes (a touch
-    darker at the top, like a lid), then drawn again as `style`: "closed" (asleep, ∪), "happy" (^ ^) or "squint"
-    (> <)."""
+def painted_eyes(frame: np.ndarray, style: str, face_at: Face = WHALE_FACE) -> Image.Image:
+    """The front figure with the eyes painted over: each eye is covered with the skin colour found between the eyes
+    (a touch darker at the top, like a lid), then drawn again as `style`: "closed" (asleep, ∪), "happy" (^ ^) or
+    "squint" (> <)."""
     im = Image.fromarray(frame, "RGBA")
-    face = frame[205:228, 180:210, :3].reshape(-1, 3).astype(int)  # bare skin between the eyes
-    face = face[(face[:, 0] > 235) & (face[:, 0] - face[:, 2] > 12)]
-    base = np.median(face, 0)
+    sx0, sy0, sx1, sy1 = face_at.skin
+    face = frame[sy0:sy1, sx0:sx1, :3].reshape(-1, 3).astype(int)  # bare skin between the eyes
+    bare = face[(face[:, 0] > 235) & (face[:, 0] - face[:, 2] > 12)]
+    base = np.median(bare if len(bare) else face, 0)
     skin = frame.copy()
     keep = np.zeros(frame.shape[:2], bool)
     rgb = frame[..., :3].astype(int)
     hairlike = (rgb[..., 2] - rgb[..., 0] > 50) & (rgb.mean(2) < 150)
-    for x0, y0, x1, y1 in EYES:
+    for x0, y0, x1, y1 in face_at.eyes:
         for y in range(y0, y1 + 1):
             shade = 0.965 + 0.035 * (y - y0) / (y1 - y0)
             skin[y, x0:x1 + 1, :3] = np.clip(base * shade, 0, 255).astype(np.uint8)
@@ -249,14 +264,20 @@ def painted_eyes(frame: np.ndarray, style: str) -> Image.Image:
         strands = np.isin(lab, outside[outside > 0])
         keep[y0:top, x0:x1 + 1] = strands[6:, 6:-6]
     mask = prop_layer(im.size, lambda d, s: [d.rounded_rectangle((x0 * s, y0 * s, x1 * s, y1 * s), radius=9 * s,
-                                                                 fill=(255, 255, 255, 255)) for x0, y0, x1, y1 in EYES])
+                                                                 fill=(255, 255, 255, 255))
+                                                for x0, y0, x1, y1 in face_at.eyes])
     m = np.asarray(mask.filter(ImageFilter.GaussianBlur(1.0)).getchannel("A")).copy()
     m[ndimage.binary_dilation(keep, iterations=1)] = 0
     im = Image.composite(Image.fromarray(skin, "RGBA"), im, Image.fromarray(m, "L").filter(ImageFilter.GaussianBlur(0.6)))
+    return drawn_eyes(im, style, face_at)
 
+
+def drawn_eyes(im: Image.Image, style: str, face_at: Face) -> Image.Image:
+    """Eyes drawn as `style` on a face whose own eyes are gone (painted_eyes; make_outfit.py has its own way), with
+    a blush under them."""
     def lashes(d, s):
         lw = 4 * s
-        for side, (x0, x1, y) in enumerate(((142, 175, 212), (218, 257, 208))):
+        for side, (x0, x1, y) in enumerate(face_at.lashes):
             if style == "closed":
                 d.arc((x0 * s, (y - 14) * s, x1 * s, (y + 9) * s), 20, 160, fill=LASH, width=lw)
                 d.line([(x1 * s - 2 * s, y * s - 1 * s), (x1 * s + 5 * s, y * s - 6 * s)], fill=LASH, width=3 * s)
@@ -270,7 +291,7 @@ def painted_eyes(frame: np.ndarray, style: str) -> Image.Image:
     im.alpha_composite(prop_layer(im.size, lashes))
     strength = 70 if style == "closed" else 120
     blush = prop_layer(im.size, lambda d, s: [d.ellipse((x0 * s, y0 * s, x1 * s, y1 * s), fill=(244, 140, 150, strength))
-                                              for x0, y0, x1, y1 in ((134, 226, 166, 240), (226, 224, 258, 238))])
+                                              for x0, y0, x1, y1 in face_at.blush])
     im.alpha_composite(blush.filter(ImageFilter.GaussianBlur(2)))
     return im
 
@@ -324,13 +345,15 @@ def parts_of(f: np.ndarray) -> np.ndarray:
 
 FW, FH = 402, 570           # GIF frame
 CW, CH = 440, 716           # a cell at full scale: room above the head for the hop and the props, below the feet
-                            # for the soft shadow; even at half scale, as the part maps are half again
+                            # for the soft shadow; even at a quarter, as the part maps are
 BASE_X, BASE_Y = 19, 140    # where an unmoved frame sits in the cell
 FEET_Y = BASE_Y + 551
-SCALE = 0.5                 # stored at half the GIF's size
+SCALE = 1.0                 # stored at the GIF's own size...
+DENSITY = 2                 # ...and shown at half of it: two pixels a point, one a pixel on a Retina screen
 FPS = 60
 LOOP = 75                   # frames in one turn of the character (the 15 GIF frames, four more after each)
 HAND = (BASE_X + 363, BASE_Y + 300)  # where she holds her little letter
+HAT_TOP = 14                # the top of her hat in the GIF frame: another outfit's head hangs there when dragged
 
 
 class Figure:
@@ -350,18 +373,29 @@ class Figure:
     def with_img(self, img: Image.Image):
         return Figure(img, self.parts)
 
+    @property
+    def top(self) -> int:
+        """The first row with anything of her: the top of her head."""
+        rows = np.nonzero((np.asarray(self.img.getchannel("A")) > 40).any(1))[0]
+        return int(rows[0]) if len(rows) else 0
+
 
 class Cell:
     """One frame of a state at full scale, with its body-part map (0 where nothing can be clicked)."""
+
+    hand = HAND  # where she holds her little letter (another outfit holds it elsewhere)
+    feet_x = CW / 2  # the middle between her feet, where her shadow goes
+    head_x: float | None = None  # the middle of the top of her head in her figure, if not its middle
 
     def __init__(self):
         self.img = Image.new("RGBA", (CW, CH), (0, 0, 0, 0))
         self.parts = Image.new("L", (CW, CH), 0)
 
-    def shadow(self, lift: float = 0.0, squash: float = 1.0):
+    def shadow(self, lift: float = 0.0, squash: float = 1.0, x: float | None = None):
+        x = self.feet_x if x is None else x
         k = max(0.45, 1 - lift / 160)
         rx, ry = 118 * k * squash, 17 * k
-        layer = prop_layer((CW, CH), lambda d, s: d.ellipse(((CW / 2 - rx) * s, (FEET_Y - ry) * s, (CW / 2 + rx) * s,
+        layer = prop_layer((CW, CH), lambda d, s: d.ellipse(((x - rx) * s, (FEET_Y - ry) * s, (x + rx) * s,
                                                               (FEET_Y + ry) * s), fill=(28, 34, 80, int(70 * k))))
         self.img.alpha_composite(layer.filter(ImageFilter.GaussianBlur(5)))
 
@@ -381,18 +415,20 @@ class Cell:
         self.parts.paste(fig.parts.crop(box), (max(0, x), max(0, y)), mask)
 
     def put_swung(self, fig: Figure, angle: float):
-        """Smaller (picked up) and rotated about the top of the hat, as when it hangs from the mouse."""
+        """Smaller (picked up) and rotated about the top of the head, as when it hangs from the mouse."""
         small = fig.resized(0.85, 0.85)
-        top = BASE_Y + 40
-        x = round(CW / 2 - small.img.width / 2)
+        ox, oy = BASE_X + FW / 2 - fig.img.width / 2, BASE_Y + FH - fig.img.height  # where it stands unmoved
+        top = round(BASE_Y + 40 + 0.85 * (HAT_TOP - fig.top))  # any outfit's head where the whale girl's hat hangs
+        head_x = small.img.width / 2 if self.head_x is None else 0.85 * self.head_x
+        x = round(CW / 2 - head_x)  # the top of her head under the pointer
         big = Cell()
         big._paste(small, x, top)
-        centre = (CW / 2, top + 15)
+        centre = (CW / 2, BASE_Y + 55)
         self.img.alpha_composite(big.img.rotate(angle, resample=Image.BICUBIC, center=centre))
         rotated = big.parts.rotate(angle, resample=Image.NEAREST, center=centre)
         self.parts.paste(rotated, (0, 0), rotated.point(lambda v: 255 if v else 0))
         # her hand, carried through the same shrinking and turning, keeps the letter
-        hx, hy = x + (HAND[0] - BASE_X) * 0.85 - centre[0], top + (HAND[1] - BASE_Y) * 0.85 - centre[1]
+        hx, hy = x + (self.hand[0] - ox) * 0.85 - centre[0], top + (self.hand[1] - oy) * 0.85 - centre[1]
         a = math.radians(angle)  # counter-clockwise on screen, as Image.rotate
         self.letter(at=(centre[0] + hx * math.cos(a) + hy * math.sin(a),
                         centre[1] - hx * math.sin(a) + hy * math.cos(a)), size=54 * 0.85)
@@ -408,7 +444,7 @@ class Cell:
                sy: float = 1.0, at: tuple[float, float] | None = None):
         """The little letter in her hand; dx, bob, sx, sy as given to put(), so it moves with her (or `at`)."""
         bottom = BASE_Y + FH
-        x, y = at or (CW / 2 + (HAND[0] - CW / 2) * sx + dx, bottom + (HAND[1] - bottom) * sy)
+        x, y = at or (CW / 2 + (self.hand[0] - CW / 2) * sx + dx, bottom + (self.hand[1] - bottom) * sy)
         y += bob
         self.prop(lambda d, s: envelope(d, x, y, size, s), MAIL)
         if dot:  # unread mail
@@ -448,77 +484,85 @@ class Built:
         self.frames, self.fps, self.own, self.clip, self.pick, self.overlay = frames, fps, own, clip, pick, overlay
 
 
-def build_states(base: list[Figure], eyes: dict[str, Figure]) -> tuple[dict[str, Draw], dict[str, Built]]:
-    """The shared clips (the turn, the hop: character and shadow only) and every state, each to be drawn when saved.
-    base: the 75 frames of one turn; eyes: frame 0 with painted eyes (closed, happy, squint) and frame 0 itself
-    (front). The states that only add props to a clip store just the props: the turn is not stored five times over."""
-    front = eyes["front"]
-    clips: dict[str, Draw] = {}
-    clip_frames: dict[str, int] = {}
-    states: dict[str, Built] = {}
+class Plan:
+    """A pet's shared clips and states, each drawn only when saved: one state at a time is held in memory."""
 
-    def make(seconds, fps, fn) -> list[Cell]:
-        cells = []
-        for t in frames_for(seconds, fps):
-            c = Cell()
-            fn(c, t)
-            cells.append(c)
-        return cells
+    def __init__(self):
+        self.clips: dict[str, Draw] = {}
+        self.clip_frames: dict[str, int] = {}
+        self.states: dict[str, Built] = {}
 
-    def own(name, seconds, fps=FPS):
+    def add_clip(self, name, seconds, fn, fps=FPS):
+        self.clips[name] = lambda: make(seconds, fps, fn)
+        self.clip_frames[name] = len(frames_for(seconds, fps))
+
+    def own(self, name, seconds, fps=FPS):
+        """A state with frames of its own; fn(c, t) draws the frame at t in [0, 1)."""
         def wrap(fn):
-            states[name] = Built(len(frames_for(seconds, fps)), fps, own=lambda: make(seconds, fps, fn))
+            self.states[name] = Built(len(frames_for(seconds, fps)), fps, own=lambda: make(seconds, fps, fn))
         return wrap
 
-    def on_clip(name, clip, pick=None):
+    def on_clip(self, name, clip, pick=None):
         """Props drawn over a clip; fn(c, t) draws them (t in [0, 1))."""
-        n = len(pick) if pick else clip_frames[clip]
+        n = len(pick) if pick else self.clip_frames[clip]
 
         def wrap(fn):
-            states[name] = Built(n, clip=clip, pick=pick, overlay=lambda: make(n / FPS, FPS, fn))
+            self.states[name] = Built(n, clip=clip, pick=pick, overlay=lambda: make(n / FPS, FPS, fn))
         return wrap
 
-    def add_clip(name, seconds, fn):
-        clips[name] = lambda: make(seconds, FPS, fn)
-        clip_frames[name] = len(frames_for(seconds, FPS))
 
-    def sway_clip(c, t):
-        c.shadow(); c.put(base[round(t * LOOP) % LOOP])  # round: int(55 / 75 * 75) is 54
+def make(seconds, fps, fn) -> list[Cell]:
+    cells = []
+    for t in frames_for(seconds, fps):
+        c = Cell()
+        fn(c, t)
+        cells.append(c)
+    return cells
+
+
+def everyday(plan: Plan, eyes: dict[str, Figure], stand: list[int] | None, rock: list[int], beats: int = 1):
+    """What every outfit does: the states over her "sway" clip (`stand` picks its frames for 60 a second, None: all
+    of them; `rock` is a gentler choice of them for holding up the envelope), the hop, sleeping, failing, being
+    dragged, and the reactions to a pat on the head and a poke in the face. eyes: her front figure ("front") and
+    the same with painted eyes (closed, happy, squint). beats: how many times the props over the sway go round
+    while it does (a sway twice as long as the whale girl's turn: 2, so that they keep her pace)."""
+    front = eyes["front"]
 
     def hop_clip(c, t):
         lift, sx, sy = hop_curve(t)
         c.shadow(lift, sx); c.put(front, 0, -lift, sx, sy)
 
-    add_clip("sway", LOOP / FPS, sway_clip)
-    add_clip("hop", 0.9, hop_clip)
-    rock = [round(12 * math.sin(2 * math.pi * i / LOOP)) % LOOP for i in range(LOOP)]  # a gentle rock about the front
+    plan.add_clip("hop", 0.9, hop_clip)
 
-    @on_clip("idle", "sway")
+    @plan.on_clip("idle", "sway", stand)
     def _(c, t):
         c.letter()
 
-    @on_clip("waiting", "sway")
+    @plan.on_clip("waiting", "sway", stand)
     def _(c, t):
-        c.letter(bob=round(7 * math.sin(2 * math.pi * t)), dot=True)
+        c.letter(bob=round(7 * math.sin(2 * math.pi * beats * t)), dot=True)
 
-    @on_clip("thinking", "sway")
+    @plan.on_clip("thinking", "sway", stand)
     def _(c, t):
         c.letter()
-        dots = int(t * 4) % 4
+        dots = int(t * 4 * beats) % 4
         c.prop(lambda d, s: cloud(d, CW / 2 + 120, BASE_Y - 40, 110, s, dots))
 
-    @on_clip("notify", "sway", pick=rock)
+    @plan.on_clip("notify", "sway", pick=rock)
     def _(c, t):
-        bob = round(6 * math.sin(2 * math.pi * t))
+        bob = round(6 * math.sin(2 * math.pi * beats * t))
         c.prop(lambda d, s: envelope(d, CW / 2 + 6, BASE_Y - 30 + bob, 64, s), MAIL)
         c.prop(lambda d, s: alert_badge(d, CW / 2 + 48, BASE_Y - 58 + bob, 17, s), MAIL)
 
     def flight(t):  # from beside the right hand up past the head, off the top right
         return CW / 2 + 150 + 45 * t + 18 * math.sin(math.pi * t), BASE_Y + 330 - 440 * t
 
-    @on_clip("sending", "sway", pick=[rock[round(i * LOOP / 60) % LOOP] for i in range(60)])
+    steps = 60 * beats  # one reply a second
+
+    @plan.on_clip("sending", "sway", pick=[rock[round(i * len(rock) / steps) % len(rock)] for i in range(steps)])
     def _(c, t):
         c.letter()  # hers stays in her hand; the reply flies off
+        t = t * beats % 1.0
         x, y = flight(t)
 
         def fly(d, s):
@@ -530,12 +574,12 @@ def build_states(base: list[Figure], eyes: dict[str, Figure]) -> tuple[dict[str,
                 plane(d, x, y, 66, s, -70 + 15 * t)
         c.prop(fly)
 
-    @on_clip("hop", "hop")  # the letter goes up and down with her
+    @plan.on_clip("hop", "hop")  # the letter goes up and down with her
     def _(c, t):
         lift, sx, sy = hop_curve(t)
         c.letter(-lift, sx=sx, sy=sy)
 
-    @on_clip("mail", "hop")
+    @plan.on_clip("mail", "hop")
     def _(c, t):
         if t > 0.15:
             lift = hop_curve(t)[0]
@@ -543,7 +587,7 @@ def build_states(base: list[Figure], eyes: dict[str, Figure]) -> tuple[dict[str,
             top = BASE_Y + 8 - lift
             c.prop(lambda d, s: envelope(d, CW / 2 + 6, top - 36 * k, 64 * (0.6 + 0.4 * k), s), MAIL)
 
-    @own("sleeping", 1.92, fps=30)  # slow breathing: 30 frames a second look the same and cost half
+    @plan.own("sleeping", 1.92, fps=30)  # slow breathing: 30 frames a second look the same and cost half
     def _(c, t):
         c.shadow()
         breath = math.sin(2 * math.pi * t)
@@ -559,7 +603,7 @@ def build_states(base: list[Figure], eyes: dict[str, Figure]) -> tuple[dict[str,
 
     grey = front.with_img(tinted(front.img, 0.45))
 
-    @own("failed", 1.0)
+    @plan.own("failed", 1.0)
     def _(c, t):
         c.shadow()
         shake = 6 * math.sin(2 * math.pi * 3 * t) * max(0.0, 1 - t * 1.6)
@@ -567,11 +611,11 @@ def build_states(base: list[Figure], eyes: dict[str, Figure]) -> tuple[dict[str,
         c.prop(lambda d, s: sweat(d, CW / 2 + 110 + shake, BASE_Y + 150 + 4 * math.sin(2 * math.pi * t), 13, s))
 
     for name, lean in (("drag-left", 7.0), ("drag-right", -7.0)):
-        own(name, 0.6)(lambda c, t, lean=lean: c.put_swung(front, lean + 3 * math.sin(2 * math.pi * t)))
+        plan.own(name, 0.6)(lambda c, t, lean=lean: c.put_swung(front, lean + 3 * math.sin(2 * math.pi * t)))
 
     # ---------------------------------------------------------------- reactions to a touch
 
-    @own("pat", 1.2)  # the head: eyes ^ ^, two little bobs, hearts rising
+    @plan.own("pat", 1.2)  # the head: eyes ^ ^, two little bobs, hearts rising
     def _(c, t):
         bob = abs(math.sin(2 * math.pi * t)) * 0.035
         c.shadow(); c.put(eyes["happy"], 0, 0, 1 + bob * 0.4, 1 - bob)
@@ -586,13 +630,27 @@ def build_states(base: list[Figure], eyes: dict[str, Figure]) -> tuple[dict[str,
                     heart(d, x * s, y * s, r * s, (240, 92, 104, int(255 * math.sin(math.pi * p))))
         c.prop(hearts)
 
-    @own("poke", 0.9)  # the face: eyes > <, a squish, a little "!"
+    @plan.own("poke", 0.9)  # the face: eyes > <, a squish, a little "!"
     def _(c, t):
         k = math.sin(math.pi * min(1.0, t / 0.35)) if t < 0.35 else 0.0
         c.shadow(); c.put(eyes["squint"], 0, 0, 1 + 0.05 * k, 1 - 0.05 * k)
         c.letter(sx=1 + 0.05 * k, sy=1 - 0.05 * k)
         if t < 0.75:
             c.prop(lambda d, s: alert_badge(d, CW / 2 + 95, BASE_Y + 120 - 10 * min(1.0, t * 4), 14, s))
+
+
+def build_states(base: list[Figure], eyes: dict[str, Figure]) -> Plan:
+    """The whale girl's clips (the turn, the hop: character and shadow only) and states. base: the 75 frames of one
+    turn. The states that only add props to a clip store just the props: the turn is not stored five times over."""
+    plan = Plan()
+    own = plan.own
+
+    def sway_clip(c, t):
+        c.shadow(); c.put(base[round(t * LOOP) % LOOP])  # round: int(55 / 75 * 75) is 54
+
+    plan.add_clip("sway", LOOP / FPS, sway_clip)
+    rock = [round(12 * math.sin(2 * math.pi * i / LOOP)) % LOOP for i in range(LOOP)]  # a gentle rock about the front
+    everyday(plan, eyes, None, rock)
 
     @own("giggle", 1.0)  # the body: eyes ^ ^, wiggling, notes
     def _(c, t):
@@ -630,7 +688,7 @@ def build_states(base: list[Figure], eyes: dict[str, Figure]) -> tuple[dict[str,
                     droplet(d, x, y, 7, s, fade)
         c.prop(spout)
 
-    return clips, states
+    return plan
 
 
 # ---------------------------------------------------------------- the GIF in, RIFE in between
@@ -663,20 +721,21 @@ def interpolate(frames: list[np.ndarray], rife: str | None, work: Path) -> list[
 
 # ---------------------------------------------------------------- output
 
-PARTS_SCALE = 2   # the part maps are stored at half the frames' size
+PARTS_SCALE = 4   # the part maps are a quarter of the pictures' size: half of hers on the screen
 BAND = 5          # frames per picture: Tk takes ~10 ms to decode one frame, but seconds for 75 at once (it slows
                   # down with the picture's size); GDI+ does not mind either way
 
 
 def save_frames(out: Path, name: str, cells: list[Cell]) -> dict:
     """The frames in bands of BAND, top to bottom: <name>.<k>.png, and beside each its part map <name>.<k>.parts.png
-    (half size, the part number times 40 in the red channel). One palette for all bands of a run, so the colours do
-    not jump between them."""
+    (PARTS_SCALE times smaller, the part number times 40 in the red channel). One palette for all bands of a run, so
+    the colours do not jump between them."""
+    import imagequant
     cw, ch = round(CW * SCALE), round(CH * SCALE)
     strip = Image.new("RGBA", (cw, ch * len(cells)), (0, 0, 0, 0))
     for i, c in enumerate(cells):
-        strip.alpha_composite(c.img.resize((cw, ch), Image.LANCZOS), (0, i * ch))
-    strip = strip.quantize(colors=256, method=Image.Quantize.FASTOCTREE, dither=Image.Dither.NONE)
+        strip.alpha_composite(c.img if c.img.size == (cw, ch) else c.img.resize((cw, ch), Image.LANCZOS), (0, i * ch))
+    strip = imagequant.quantize_pil_image(strip, dithering_level=1.0, max_colors=256)
     pw, ph = cw // PARTS_SCALE, ch // PARTS_SCALE
     bands = []
     for k, first in enumerate(range(0, len(cells), BAND)):
@@ -723,14 +782,12 @@ def box_of(cells: list[Cell]) -> list[int]:
 CODEX = {"idle": "idle", "mail": "jumping", "notify": "waving", "waiting": "waiting", "sleeping": "idle",
          "failed": "failed", "thinking": "review", "sending": "running", "drag-left": "running-left",
          "drag-right": "running-right", "hop": "jumping", "pat": "waving", "poke": "waving", "giggle": "jumping",
-         "spout": "jumping"}
+         "spout": "jumping", "show": "jumping"}
 
 
 def main(gif: str, out_dir: str, rife: str | None = None, preview_dir: str | None = None):
     out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
     raw = gif_frames(gif)
-    import shutil
     import tempfile
     with tempfile.TemporaryDirectory(prefix="kolmail-rife-") as work:
         turn = interpolate(raw, rife, Path(work))
@@ -739,7 +796,16 @@ def main(gif: str, out_dir: str, rife: str | None = None, preview_dir: str | Non
     eyes = {"front": base[0]}
     for style in ("closed", "happy", "squint"):
         eyes[style] = Figure(painted_eyes(cut[0], style), base[0].parts)
-    clips, states = build_states(base, eyes)
+    plan = build_states(base, eyes)
+    write_pet(out, plan, {"id": "whale-girl", "displayName": "鲸鱼娘", "outfit": "毛衣",
+                          "description": "蓝发鲸鱼娘，奶白毛衣、格子裙和鲸鱼尾巴。"}, preview_dir)
+
+
+def write_pet(out: Path, plan: Plan, about: dict, preview_dir: str | None = None):
+    """Draw every clip and state and save their pictures and pet.json into `out`."""
+    import shutil
+    out.mkdir(parents=True, exist_ok=True)
+    clips, states = plan.clips, plan.states
     new = out.parent / f".{out.name}.building"  # the old pictures stay until the new ones are all there
     shutil.rmtree(new, ignore_errors=True)
     new.mkdir()
@@ -757,14 +823,11 @@ def main(gif: str, out_dir: str, rife: str | None = None, preview_dir: str | Non
                 m["overlay"] = {**save_frames(new, f"{name}.overlay", kept), "pick": index, "box": box_of(kept)}
         meta[name] = {**m, "codex": CODEX[name]}
     cw, ch = round(CW * SCALE), round(CH * SCALE)
-    pet = {
-        "id": "whale-girl",
-        "displayName": "鲸鱼娘",
-        "description": "蓝发鲸鱼娘，奶白毛衣、格子裙和鲸鱼尾巴。",
-        "kolmail": {"version": 2, "cell": [cw, ch], "feet": [cw // 2, round(FEET_Y * SCALE)], "clips": meta_clips,
-                    "states": meta, "parts": {"scale": PARTS_SCALE, "names": PARTS}},
-    }
-    (new / "pet.json").write_text(json.dumps(pet, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    pet = {**about,
+           "kolmail": {"version": 2, "cell": [cw, ch], "density": DENSITY, "feet": [cw // 2, round(FEET_Y * SCALE)],
+                       "clips": meta_clips, "states": meta, "parts": {"scale": PARTS_SCALE, "names": PARTS}}}
+    # bytes: write_text would end it with CRLF on Windows, and the repository is all LF
+    (new / "pet.json").write_bytes((json.dumps(pet, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
     for old in [*out.glob("*.png"), out / "pet.json"]:
         old.unlink(missing_ok=True)
     for f in new.iterdir():
