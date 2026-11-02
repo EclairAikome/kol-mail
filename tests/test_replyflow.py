@@ -48,6 +48,16 @@ def test_signature_links_and_chinese_need_no_translation():
     assert rf.needs_translation("Hola Ana,", SIG)
 
 
+def test_short_chinese_lines_need_no_translation():
+    # A Traditional Chinese reply opened with "Eva 您好：": the translator copied it back, the copy failed
+    # translation_ok, and the reply could not be sent.
+    for line in ("Eva 您好：", "祝好！", "Hi Eva，您好", "感謝您的回覆！"):
+        assert not rf.needs_translation(line, SIG), line
+    assert rf.needs_translation("Thanks a lot, Eva 谢谢", SIG)
+    assert rf.needs_translation("よろしくお願いします。", SIG)
+    assert rf.needs_translation("ご連絡いただき誠に有難う御座います、宜しく御願い致します。", SIG)
+
+
 def test_pair_up_marks_failures_and_length_mismatch():
     paras = ["Hola Ana,", "Gracias por tu correo.", SIG]
     rows, bad = rf.pair_up(paras, [0, 1], ["你好 Ana，", "Gracias por tu correo."])

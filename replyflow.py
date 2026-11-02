@@ -550,7 +550,19 @@ def needs_translation(paragraph: str, signature: str) -> bool:
         return False
     if re.fullmatch(r"(\s*(https?://\S+|\S+@\S+\.\S+)\s*)+", p):
         return False
-    return not llm.looks_chinese(p)
+    return not already_chinese(p)
+
+
+KANA = re.compile(r"[぀-ヿ]")
+
+
+def already_chinese(paragraph: str) -> bool:
+    """Chinese as written, short lines too ("Eva 您好：", "祝好！"): more Chinese characters than Latin words and no
+    Japanese kana. Such a line comes back from the translator unchanged, translation_ok rejects that copy, and the
+    side-by-side of a Chinese reply could never be verified (llm.looks_chinese wants at least four characters)."""
+    plain = re.sub(r"https?://\S+|\S+@\S+", " ", paragraph or "")
+    han = len(llm.CJK.findall(plain))
+    return han >= 1 and han >= len(llm.LATIN_WORD.findall(plain)) and not KANA.search(plain)
 
 
 def translation_ok(original: str, zh: str) -> bool:
