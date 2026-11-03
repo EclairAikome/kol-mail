@@ -199,6 +199,11 @@ class Cli:
         args += ["--smtp-ssl", "--no-smtp-starttls"] if servers["smtp_security"] == "ssl" else ["--no-smtp-ssl", "--smtp-starttls"]
         await self.json(*args, secrets=(password, password))
 
+    async def set_password(self, name: str, password: str):
+        """A new password for an existing account, the same for receiving and sending (as account add stores it)."""
+        for role in ("incoming", "outgoing"):
+            await self.json("account", "set-secret", name, role, "--password-stdin", secrets=(password,))
+
     async def test(self, name: str, role: str) -> str | None:
         """None when the connection works, else the component's one-line reason."""
         code, out = await self.run("account", "test", name, role, timeout=150)

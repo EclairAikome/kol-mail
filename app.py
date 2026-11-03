@@ -475,6 +475,8 @@ class MailBridge:
         # Several mcp-email-server processes share one settings catalog; while one of them is opening it, the
         # others briefly see its journal files before they are locked down and refuse with this message. It
         # passes within a second, so retry it (never for send_email, where a retry must stay a human decision).
+        if self.base_args is None and (args.get("account_name") or current_account.get()) in password_rejected:
+            raise NotReady(PASSWORD_REJECTED)
         for attempt in range(3):
             try:
                 return await self._call_once(tool, timeout, raw, **args)
@@ -1458,6 +1460,9 @@ async def scan_loop():
                 except Exception as e:
                     errors.append(err_text(e) if account.primary else f"{account.short}：{err_text(e)}")
                     log("scan failed", account.name, err_text(e))
+                    # maybe the password: tested (at most every PASSWORD_CHECK_GAP), also while taken for refused
+                    if isinstance(e, MailError) and (not isinstance(e, NotReady) or account.name in password_rejected):
+                        spawn(check_password(account.name), "password check")
         state["last_scan"] = time.strftime("%H:%M:%S")
         state["scan_error"] = "；".join(errors) or None
         # On a Mac the wait does not count the time asleep: without scan_now it would go on for minutes after waking
@@ -3626,7 +3631,8 @@ async def api_status(request: Request):
                          "telegram_error": tg_error,
                          "mail_error": mail.error or bg.error, "autoreply": autoreply_info,
                          "unread_counts": unread_counts(), "flagged_count": flagged_count(),
-                         "account": current_account.get(), "accounts": accounts_summary()})
+                         "account": current_account.get(), "accounts": accounts_summary(),
+                         "password_needed": password_needed()})
 
 
 async def api_autoreplies(request: Request):
@@ -3830,6 +3836,8 @@ def forget_account(name: str):
                 index_resynced, flagged, flag_tried, flag_marks, box_gen):
         per.forget(name)
     notify_seen.pop(name, None)
+    password_rejected.pop(name, None)
+    password_checked.pop(name, None)
     with contextlib.suppress(OSError):
         notify_seen_file(name).unlink()
     shutil.rmtree(index_dir(name), ignore_errors=True)
@@ -3900,6 +3908,86 @@ async def remember_company_servers():
     if servers:
         with contextlib.suppress(OSError):
             config.update(["mail", "company_servers"], servers)
+
+
+# ---------------------------------------------------------------- a password the mail server stopped taking
+# The company reset every mailbox password on 2026-11-02: from then on each call failed with mcp-email-server's
+# generic "provider_failure", and colleagues had to re-run the installer to store the new one. Now a mailbox whose
+# scan fails gets one login test; when the server refuses the password, nothing logs in with it any more (a run
+# of failed logins can get a mailbox locked) and the page asks for the new one.
+
+PASSWORD_CHECK_GAP = 600  # seconds between two login tests of one mailbox
+PASSWORD_REJECTED = "邮箱密码被服务器拒绝了（多半是密码改过或被重置了），在 KOL Mail 页面上输入新密码后才能收发信"
+password_rejected: dict[str, str] = {}  # mailbox -> the server's reason, until a new password works
+password_checked: dict[str, float] = {}  # mailbox -> when its login was last tested
+
+
+async def check_password(name: str):
+    """After a failed scan: a login test tells a refused password from a passing outage (which needs nothing). A
+    mailbox already taken for refused is tested again now and then too: the component reports a provider's refusal
+    the same way as a wrong password, and such a refusal passes."""
+    if time.time() - password_checked.get(name, 0) < PASSWORD_CHECK_GAP:
+        return
+    password_checked[name] = time.time()
+    failed = await mail_cli.test(name, "incoming")
+    if failed and accounts.password_problem(failed):
+        if name not in password_rejected:
+            log("the mail server refuses the stored password", name, failed[:200])
+        password_rejected[name] = failed[:200]
+    elif name in password_rejected and not failed:
+        password_rejected.pop(name, None)
+        log("the stored password works again", name)
+        spawn(reconnect_and_scan(), "reconnect a mailbox whose password works again")
+
+
+def password_needed() -> list[dict]:
+    return [] if LOGGED_OUT else [{"name": a.name, "address": a.address, "label": a.label, "primary": a.primary,
+                                   "reason": password_rejected[a.name]} for a in ACCOUNTS if a.name in password_rejected]
+
+
+async def reconnect_and_scan():
+    """A new password is stored: new sessions (the old ones may hold the old password), then a look for mail."""
+    await reload_mail_sessions()
+    scan_now.set()
+
+
+async def api_accounts_password(request: Request):
+    """A mailbox's new password (receiving and sending), kept only in the system's credential store, as when the
+    mailbox was added; kept only when receiving works with it."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        return bad("格式不对")
+    name = str(body.get("name") or "")
+    password = str(body.get("password") or "")
+    body["password"] = None
+    if bad_password(password):
+        return bad("请填写密码")
+    async with accounts_lock:
+        if why := accounts_frozen():
+            return bad(why)
+        if LOGGED_OUT or not any(a.name == name for a in ACCOUNTS):
+            return bad("没有这个邮箱", 404)
+        try:
+            await mail_cli.set_password(name, password)
+        except accounts.AccountError as e:
+            log("new password not stored", name, err_text(e))
+            return bad(f"密码没存进去：{e}")
+        finally:
+            password = None
+        receiving = await mail_cli.test(name, "incoming")
+        if receiving:
+            log("new password: receiving failed", name, receiving[:200])
+            if accounts.password_problem(receiving):
+                return bad(f"邮箱服务器还是没接受这个密码，请再输一次。{PASSWORD_HINT}（{receiving}）")
+            return bad(f"连不上收信服务器，检查一下网络：{receiving}")
+        sending = await mail_cli.test(name, "outgoing")
+        if sending:
+            log("new password: sending failed", name, sending[:200])
+        password_rejected.pop(name, None)
+        password_checked.pop(name, None)
+    spawn(reconnect_and_scan(), "reconnect after a new password")
+    log("mailbox password changed", name)
+    return JSONResponse({"ok": True, "warning": f"收信正常，但发信测试没通过，回信可能发不出去：{sending}" if sending else None})
 
 
 def hand_over_primary(new: accounts.Account | None, keep_old: bool):
@@ -7931,6 +8019,7 @@ routes = [
     Route("/api/accounts/remove", api_accounts_remove, methods=["POST"]),
     Route("/api/accounts/label", api_accounts_label, methods=["POST"]),
     Route("/api/accounts/primary", api_accounts_primary, methods=["POST"]),
+    Route("/api/accounts/password", api_accounts_password, methods=["POST"]),
     Route("/api/skin", api_skin, methods=["GET", "POST"]),
     Route("/api/skin/wallpaper", api_skin_wallpaper, methods=["POST"]),
     Route("/api/signature", api_signature, methods=["GET", "POST"]),

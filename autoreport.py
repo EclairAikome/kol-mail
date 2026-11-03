@@ -52,6 +52,8 @@ HINTS = [
      "popo-cli 没装好、没登录或 POPO 授权过期：让同事在终端运行 popo-cli auth login，并在 POPO 里确认授权卡片", None),
     (r"not logged in|API Error: 401|/login\b|oauth (access )?token|auth login|没登录|登录已过期",
      "AI 没登录或登录过期：让同事运行 codemaker auth login（或 claude 里 /login）", "ai"),
+    (r"邮箱密码被服务器拒绝",
+     "邮箱密码被服务器拒绝（多半是公司重置了密码）：同事在 KOL Mail 页面弹出的窗口里输入新密码就好", None),
     (r"provider policy rejected|LOGIN failed|Authentication failed|AUTHENTICATIONFAILED|Credential is unavailable",
      "邮箱服务器不接受密码：密码或授权码不对，或者邮箱没开 IMAP/SMTP；让同事在登录页重新登录", "mail"),
     (r"spend limit|用量到上限", "AI 账号的用量到上限了（比如 Claude 的月度花费上限）：账号主人调高上限，或者等它重置", "ai"),
