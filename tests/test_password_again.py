@@ -61,7 +61,7 @@ def test_a_refusal_that_passes_clears_itself(mailboxes):
     cli.receiving = None  # the provider took it after all (the component reports both the same way)
     app.password_checked["me"] -= app.PASSWORD_CHECK_GAP
     asyncio.run(app.check_password("me"))
-    assert app.password_needed() == [] and "reconnect a mailbox whose password works again" in spawned
+    assert app.password_needed() == [] and "reconnect a mailbox whose login works again" in spawned
 
 
 def test_an_outage_is_not_a_password(mailboxes):
@@ -141,7 +141,7 @@ def test_the_new_password_is_tested_and_kept_out_of_settings(mailboxes, monkeypa
     cli.receiving, cli.sending = None, "smtp refused"
     d = c.post("/api/accounts/password", json={"name": "me", "password": "right"}).json()
     assert d["ok"] and "发信" in d["warning"] and app.password_needed() == []
-    assert ("password", "me", "right") in cli.calls and not saved and "reconnect after a new password" in spawned
+    assert ("password", "me", "right") in cli.calls and not saved and "reconnect after a new login" in spawned
     assert c.post("/api/accounts/password", json={"name": "nobody", "password": "x"}).status_code == 404
     assert c.post("/api/accounts/password", json={"name": "me", "password": ""}).status_code == 400
     monkeypatch.setattr(app, "DEV", True)
@@ -160,6 +160,46 @@ def test_logging_out_forgets_a_refused_password(mailboxes, monkeypatch, tmp_path
 
 def test_the_maintainer_s_report_says_what_to_do():
     assert "新密码" in autoreport.diagnose(app.PASSWORD_REJECTED, "收信检查")
+
+
+def test_the_log_lines_stay_readable_in_a_report():
+    for line in ("lynn works again with its stored login", "lynn new login stored",
+                 "lynn receiving failed with the new login: Error: Authentication or provider policy rejected"):
+        assert autoreport.mask(line) == line
+
+
+class Session:
+    def __init__(self, delay=0.0):
+        self.delay = delay
+
+    async def call_tool(self, tool, args):
+        await asyncio.sleep(self.delay)
+        import types
+        return types.SimpleNamespace(content=[types.SimpleNamespace(text='{"ok": true}')], isError=False,
+                                     structuredContent={"ok": True})
+
+
+def test_a_replaced_session_s_late_timeout_never_sticks_in_the_status_bar():
+    async def run():
+        bridge = app.MailBridge("t", base_args={})
+        old, new = Session(delay=1), Session()
+        bridge.session = old
+        bridge.ready.set()
+        call = asyncio.create_task(bridge.call("list_emails_metadata", timeout=0.05))
+        await asyncio.sleep(0.01)
+        bridge.session = new  # a new password reconnected everything meanwhile
+        with pytest.raises(app.MailError, match="没有响应"):
+            await call
+        assert bridge.error is None and not bridge.broken.is_set()
+        bridge.session = Session(delay=1)  # the live one hanging is shown and reconnected
+        with pytest.raises(app.MailError):
+            await bridge.call("list_emails_metadata", timeout=0.05)
+        assert "没有响应" in bridge.error and bridge.broken.is_set()
+        bridge.broken.clear()
+        bridge.session = new
+        assert await bridge.call("list_emails_metadata") == {"ok": True}
+        assert bridge.error is None  # working again: the old failure goes
+    asyncio.run(run())
 
 
 def test_the_command_line_takes_the_password_on_stdin_only(monkeypatch):

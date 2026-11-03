@@ -424,6 +424,15 @@ class MailBridge:
         if session is not None and self.session is session:
             self.broken.set()
 
+    def _failed(self, session, message: str) -> str:
+        """The live session failed: show it and reconnect. A call still running on a session that was replaced
+        meanwhile (a new password reconnects them all) times out later, and says nothing about the new one: its
+        failure once stayed in the status bar for half an hour while mail worked (a colleague's Mac, 2026-11-03)."""
+        if session is not None and self.session is session:
+            self.error = message
+            self.broken.set()
+        return message
+
     async def run(self):
         delay = 3
         while True:
@@ -506,23 +515,19 @@ class MailBridge:
                 self.timeouts += 1
                 if self.drop_after and self.timeouts >= self.drop_after:
                     self.timeouts = 0
-                    self.error = f"{self.label}连续没有响应，正在重连"
-                    self._drop(session)
+                    self._failed(session, f"{self.label}连续没有响应，正在重连")
                 raise MailError(f"{self.label}{timeout:.0f} 秒没有响应") from e
             # A hung child would otherwise block every later call behind the lock: drop it and reconnect.
-            self.error = f"{self.label}{timeout:.0f} 秒没有响应，正在重连"
-            self._drop(session)
-            raise MailError(self.error) from e
+            raise MailError(self._failed(session, f"{self.label}{timeout:.0f} 秒没有响应，正在重连")) from e
         except (anyio.ClosedResourceError, anyio.BrokenResourceError) as e:
-            self.error = f"{self.label}连接中断，正在重连"
-            self._drop(session)
-            raise MailError(self.error) from e
+            raise MailError(self._failed(session, f"{self.label}连接中断，正在重连")) from e
         except McpError as e:
             if "closed" in str(e).lower():
-                self.error = f"{self.label}连接中断，正在重连"
-                self._drop(session)
+                self._failed(session, f"{self.label}连接中断，正在重连")
             raise MailError(err_text(e)) from e
         self.timeouts = 0  # the child answered
+        if session is self.session:  # the live session works: an older failure no longer holds
+            self.error = None
         text = "\n".join(getattr(c, "text", "") for c in result.content)
         if result.isError:
             raise MailError(text[:500] or f"{tool} failed")
@@ -3932,12 +3937,12 @@ async def check_password(name: str):
     failed = await mail_cli.test(name, "incoming")
     if failed and accounts.password_problem(failed):
         if name not in password_rejected:
-            log("the mail server refuses the stored password", name, failed[:200])
+            log(name, "refused by the mail server, stored login:", failed[:200])
         password_rejected[name] = failed[:200]
     elif name in password_rejected and not failed:
         password_rejected.pop(name, None)
-        log("the stored password works again", name)
-        spawn(reconnect_and_scan(), "reconnect a mailbox whose password works again")
+        log(name, "works again with its stored login")
+        spawn(reconnect_and_scan(), "reconnect a mailbox whose login works again")
 
 
 def password_needed() -> list[dict]:
@@ -3970,23 +3975,23 @@ async def api_accounts_password(request: Request):
         try:
             await mail_cli.set_password(name, password)
         except accounts.AccountError as e:
-            log("new password not stored", name, err_text(e))
+            log(name, "new login not stored:", err_text(e))
             return bad(f"密码没存进去：{e}")
         finally:
             password = None
         receiving = await mail_cli.test(name, "incoming")
         if receiving:
-            log("new password: receiving failed", name, receiving[:200])
+            log(name, "receiving failed with the new login:", receiving[:200])
             if accounts.password_problem(receiving):
                 return bad(f"邮箱服务器还是没接受这个密码，请再输一次。{PASSWORD_HINT}（{receiving}）")
             return bad(f"连不上收信服务器，检查一下网络：{receiving}")
         sending = await mail_cli.test(name, "outgoing")
         if sending:
-            log("new password: sending failed", name, sending[:200])
+            log(name, "sending failed with the new login:", sending[:200])
         password_rejected.pop(name, None)
         password_checked.pop(name, None)
-    spawn(reconnect_and_scan(), "reconnect after a new password")
-    log("mailbox password changed", name)
+    spawn(reconnect_and_scan(), "reconnect after a new login")
+    log(name, "new login stored")
     return JSONResponse({"ok": True, "warning": f"收信正常，但发信测试没通过，回信可能发不出去：{sending}" if sending else None})
 
 

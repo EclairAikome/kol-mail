@@ -5,9 +5,9 @@
   ".github/workflows/test.yml": "146bbbdaecabe77f55f44db2e9e703b1d0efcefb28a2a529609b1f1ed214cb00",
   ".gitignore": "cafbacdb252557b2be5bb6e37a1039449a99d9ff73cfad9406a4289611a89301",
   "README.md": "f3834515fa9eeae8e9463035144a7c5859dcc7c8fafd757da38d788dbb086073",
-  "VERSION": "780363b8ef02ff7e83eb72709f6396b09dec21a26403bb44f58ea8d6757fe33d",
+  "VERSION": "cf6a05db55c83ecdf0b3323be40d441e20f4bbd3860a3f4104a9dab70fbae161",
   "accounts.py": "d4b89fe1aea94548f8bc36720618236ca5533d6a51a60d0bcf754203411e4bc3",
-  "app.py": "13551f867048d05fd036426401af8a0c9e60632f13a55289270e557489deb663",
+  "app.py": "f803aebe5a5f1eabd505789e27444cb93fa8e8176c9a35c2a20513fe56addaff",
   "autoreply.example.json": "edb9dfc884b466773254b6dafc1618d0babd49ca4b7b052fe0879749b3e5e5d1",
   "autoreply.py": "8381ad12338f4251c6e067435b0501f14ca9c5ee42e9821991b28e69ad3928b1",
   "autoreport.py": "991ffdcc6fead3e6c573f348fb77517e8ba07e9baa635005c6767172ca8be53a",
@@ -1070,7 +1070,7 @@
   "tests/test_offhours_switch.py": "67f627c96f724dc65ef380591ffb88fa42687cf3f52528cb339469ee5b425245",
   "tests/test_onboarding.py": "dc616bd4104cb9cfe1b2885813d7e48e6127c10eabb3e137b35468b73dd0e06d",
   "tests/test_outgoing.py": "bc06d4b3d07acd62b7e3cd40e424116fa9a7504949c916b9eac15ad0bd4e8825",
-  "tests/test_password_again.py": "05d6be0843fe138ff623a83b6754de22a076ad511e252d29b6ab62c4d6ccc509",
+  "tests/test_password_again.py": "bb37e877fb1be421d08411da781ac587661b3f25b7d6569ccfdc19e9633db88e",
   "tests/test_pet.py": "4729991f5e8a8d836af1f586c3ca3bf681b21d8ca95df59950da5f6ac06e5efd",
   "tests/test_popogrid.py": "ea7789606eadd392ded182e495b48ae40a29f96326b3c11f2bb62f723429aa62",
   "tests/test_received.py": "1e3f700736b17fa541ba07bfd79e912148a52bfdaae04211bb19bd95438e288e",
@@ -1099,5 +1099,5 @@
   "tools/publish.py": "11b3bb019c6bf10a208f5813a722f9a6ca2634ec4d84dfe8186743726953aedb",
   "updater.py": "e7c4237d7387e3a6161312d6bd3ecd4707e969bf3e4bebf7df74a7fb830f08f3"
  },
- "version": "0.8.3"
+ "version": "0.8.4"
 }
