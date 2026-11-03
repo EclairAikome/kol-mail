@@ -56,6 +56,13 @@ MAX_ENTRIES = 2000  # 129 entries
 PINS = ("telethon==1.45.0", "mcp==1.30.0", "pillow==12.3.0", "pypdf==6.19.0", "python-dotenv==1.2.2", "dotenv==0.9.9",
         "httpx==0.28.1", "python-json-logger==4.1.0", "qrcode==8.2")
 PIP_TIMEOUT = 20 * 60
+# Telethon's AES in C. Without it every packet is en- and decrypted in pure Python (1 MB takes 3 s), and that freezes
+# the whole backend: a burst of channel updates once held wait_for_settled_message past telegram-mcp's 55 s limit
+# (GEN-TIMEOUT). Wheels only and never required: there is none for Intel Macs, and a source build needs Rust.
+SPEEDUP = "cryptg==0.6.0"
+SPEEDUP_MARK = ".kol-mail-speedup"  # in the component folder: when pip last found no wheel for this machine
+SPEEDUP_RETRY = 7 * 24 * 3600  # a machine without a wheel tries again after a week, not at every start
+NO_WHEEL = re.compile(r"No matching distribution|Could not find a version")  # any other failure (offline): next start
 LOGIN_IDLE = 10 * 60  # a login helper nobody talked to for this long is stopped
 HELPER_GRACE = 5  # seconds a helper gets to disconnect from Telegram on its own before it is ended
 ME_RETRY = 10 * 60  # how often a missing name is looked up again
@@ -505,6 +512,46 @@ class Setup:
                                     120)
         if code != 0:
             raise InstallError("依赖装完了，但是导入失败：" + out[-300:])
+        await self._speedup(py, staging / SPEEDUP_MARK)
+
+    async def _speedup(self, py: Path, mark: Path) -> bool:
+        """SPEEDUP into py's venv; True when it imports afterwards. A failure is only logged, and noted in mark when
+        pip has no wheel for this machine."""
+        index = self._pip_index()
+        args = [str(py), "-I", "-X", "utf8", "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
+                "--progress-bar", "off", "--only-binary", ":all:", SPEEDUP]
+        code, out = await self._run(args + (["-i", index] if index else []), PIP_TIMEOUT)
+        no_wheel = code != 0 and bool(NO_WHEEL.search(out))
+        if code == 0:
+            code, out = await self._run([str(py), "-I", "-X", "utf8", "-c", "import cryptg"], 120)
+        if code == 0:
+            mark.unlink(missing_ok=True)
+            return True
+        self.log("telegram speedup not installed:", (out.splitlines() or [f"exit code {code}"])[-1][:200])
+        if no_wheel:
+            with contextlib.suppress(OSError):
+                mark.write_text(str(int(time.time())), encoding="utf-8")
+        return False
+
+    async def add_speedup(self) -> bool:
+        """A component installed here before SPEEDUP existed gets it now (a hand-made checkout is left alone). True
+        when it was added, so the caller reconnects the backend to load it."""
+        repo = self.repo_path()
+        if repo != self.home or (self.job_task is not None and not self.job_task.done()):
+            return False
+        py, mark = venv_python(repo), repo / SPEEDUP_MARK
+        code, _ = await self._run([str(py), "-I", "-X", "utf8", "-c", "import cryptg"], 120)
+        if code == 0:
+            return False
+        try:
+            if time.time() - int(mark.read_text(encoding="utf-8").strip()) < SPEEDUP_RETRY:
+                return False
+        except (OSError, ValueError):
+            pass
+        if not await self._speedup(py, mark):
+            return False
+        self.log("telegram speedup added to", repo)
+        return True
 
     async def _run(self, args: list[str], timeout: float) -> tuple[int, str]:
         """Exit code and the last lines of a command's output; each line shows on the page as it comes."""
@@ -844,6 +891,10 @@ def status() -> dict:
 
 async def logout() -> dict:
     return await default().logout()
+
+
+async def add_speedup() -> bool:
+    return await default().add_speedup()
 
 
 def routes(on_change=None, get_me=None, log=None) -> list[Route]:

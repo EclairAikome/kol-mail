@@ -263,7 +263,7 @@ def test_install_uses_the_configured_index_and_only_https(world):
         c.post("/api/telegram/install", json={})
         assert wait_install(c)["component"] == "ok"
     pips = [a for a in calls if "pip" in a]
-    assert len(pips) == 1 and pips[0][pips[0].index("-i") + 1] == "https://pypi.example.org/simple"
+    assert len(pips) == 2 and all(p[p.index("-i") + 1] == "https://pypi.example.org/simple" for p in pips)
     world.settings.write_text(json.dumps({"update": {"pip_index": "http://pypi.example.org/simple"}}), encoding="utf-8")
     assert world.setup._pip_index() == ""
 
@@ -279,6 +279,86 @@ def test_failed_pip_leaves_nothing_behind(world):
     assert not (world.data / "telegram-mcp").exists() and not list(world.data.glob(".tg*-*"))
     assert "paths" not in json.loads(world.settings.read_text(encoding="utf-8"))
     assert world.events == []  # nothing to restart
+
+
+def test_install_adds_the_speedup_from_wheels_only(world):
+    calls = fake_install(world)
+    with world.client() as c:
+        c.post("/api/telegram/install", json={})
+        assert wait_install(c)["component"] == "ok"
+    pips = [a for a in calls if "pip" in a]
+    assert len(pips) == 2 and pips[1][-3:] == ["--only-binary", ":all:", tgsetup.SPEEDUP]
+    assert any(a[-2:] == ["-c", "import cryptg"] for a in calls)
+    assert not (world.data / "telegram-mcp" / tgsetup.SPEEDUP_MARK).exists()
+
+
+def test_an_install_without_the_speedup_still_works(world):
+    fake_install(world, pip_codes=(0, 1))  # offline for the second pip: tried again at the next start, no mark
+    with world.client() as c:
+        c.post("/api/telegram/install", json={})
+        s = wait_install(c)
+    assert s["component"] == "ok" and s["install"]["stage"] == "done", s
+    assert not (world.data / "telegram-mcp" / tgsetup.SPEEDUP_MARK).exists()
+    assert any("speedup not installed" in line and "no network" in line for line in world.logs)
+    assert world.events == ["changed"]
+
+
+NO_WHEEL_OUT = "ERROR: No matching distribution found for cryptg==0.6.0"
+
+
+def speedup_world(world, has_it=False, pip_code=0, pip_out=NO_WHEEL_OUT):
+    """An installed component whose venv imports cryptg (has_it) or not until pip ran with pip_code."""
+    repo = world.install_component()
+    calls, state = [], {"has": has_it}
+
+    async def run(args, timeout):
+        calls.append(list(args))
+        if "pip" in args:
+            state["has"] = state["has"] or pip_code == 0
+            return pip_code, "Successfully installed cryptg-0.6.0" if pip_code == 0 else pip_out
+        if args[-1] == "import cryptg":
+            return (0, "") if state["has"] else (1, "ModuleNotFoundError: No module named 'cryptg'")
+        return 0, ""
+
+    world.monkeypatch.setattr(world.setup, "_run", run)
+    world.monkeypatch.setattr(world.setup, "log", lambda *a: world.logs.append(" ".join(map(str, a))))
+    return repo, calls
+
+
+def test_an_older_install_gets_the_speedup_once(world):
+    repo, calls = speedup_world(world)
+    (repo / tgsetup.SPEEDUP_MARK).write_text(str(int(time.time()) - tgsetup.SPEEDUP_RETRY - 1), encoding="utf-8")
+    assert asyncio.run(world.setup.add_speedup()) is True
+    assert [a for a in calls if "pip" in a][0][-1] == tgsetup.SPEEDUP
+    assert not (repo / tgsetup.SPEEDUP_MARK).exists()
+    calls.clear()
+    assert asyncio.run(world.setup.add_speedup()) is False  # already there: only the import check
+    assert len(calls) == 1 and calls[0][-1] == "import cryptg"
+
+
+def test_a_machine_without_a_wheel_tries_again_only_after_a_week(world):
+    repo, calls = speedup_world(world, pip_code=1)
+    assert asyncio.run(world.setup.add_speedup()) is False
+    assert len([a for a in calls if "pip" in a]) == 1 and (repo / tgsetup.SPEEDUP_MARK).is_file()
+    calls.clear()
+    assert asyncio.run(world.setup.add_speedup()) is False
+    assert not [a for a in calls if "pip" in a]
+
+
+def test_an_offline_start_tries_the_speedup_again_next_time(world):
+    repo, calls = speedup_world(world, pip_code=1, pip_out="WARNING: Retrying ... ConnectTimeoutError\nERROR: offline")
+    assert asyncio.run(world.setup.add_speedup()) is False
+    assert not (repo / tgsetup.SPEEDUP_MARK).exists()
+    assert asyncio.run(world.setup.add_speedup()) is False
+    assert len([a for a in calls if "pip" in a]) == 2
+
+
+def test_the_speedup_leaves_a_hand_made_checkout_alone(world):
+    _, calls = speedup_world(world)
+    elsewhere = world.install_component(world.tmp / "own-checkout")
+    world.settings.write_text(json.dumps({"paths": {"telegram_mcp": str(elsewhere)}}), encoding="utf-8")
+    assert asyncio.run(world.setup.add_speedup()) is False
+    assert calls == [] and not (elsewhere / tgsetup.SPEEDUP_MARK).exists()
 
 
 def test_the_mirror_is_tried_when_github_fails_or_serves_junk(world):

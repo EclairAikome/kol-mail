@@ -67,6 +67,46 @@ def test_a_mail_send_under_way_counts_as_busy(monkeypatch):
     assert seen == [True] and not app.busy_sending()
 
 
+def test_a_telegram_send_under_way_counts_as_busy(monkeypatch):
+    seen = []
+
+    async def call_once(self, tool, timeout, raw=False, **kw):
+        seen.append((tool, app.busy_sending()))
+        return {"result": "ok"}
+    monkeypatch.setattr(app.MailBridge, "_call_once", call_once)
+    monkeypatch.setattr(app.cases, "recent", lambda n: [])
+    asyncio.run(app.tg.call("send_message", chat_id=1, message="hi"))
+    asyncio.run(app.tg.call("get_history", chat_id=1, limit=5))
+    assert seen == [("send_message", True), ("get_history", False)] and not app.busy_sending()
+
+
+def test_the_telegram_speedup_reconnects_only_after_sends(monkeypatch):
+    busy, slept, events = [True, False], [], []
+
+    async def add_speedup():
+        events.append("added")
+        return True
+
+    async def changed():
+        events.append("reconnected")
+
+    async def sleep(s):
+        slept.append(s)
+    monkeypatch.setattr(app.tgsetup, "add_speedup", add_speedup)
+    monkeypatch.setattr(app, "telegram_changed", changed)
+    monkeypatch.setattr(app, "busy_sending", lambda: busy.pop(0))
+    monkeypatch.setattr(app.asyncio, "sleep", sleep)
+    asyncio.run(app.telegram_speedup())
+    assert events == ["added", "reconnected"] and slept == [5] and busy == []
+
+    async def broken():
+        raise OSError("disk full")
+    events.clear()
+    monkeypatch.setattr(app.tgsetup, "add_speedup", broken)
+    asyncio.run(app.telegram_speedup())  # never raises: Telegram works without it
+    assert events == []
+
+
 def test_restart_waits_for_the_send_then_exits(monkeypatch):
     busy = [True, True, False]
     slept, exited = [], []

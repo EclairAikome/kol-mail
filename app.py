@@ -486,6 +486,12 @@ class MailBridge:
         # passes within a second, so retry it (never for send_email, where a retry must stay a human decision).
         if self.base_args is None and (args.get("account_name") or current_account.get()) in password_rejected:
             raise NotReady(PASSWORD_REJECTED)
+        if tool == "send_message":  # telegram-mcp's send, which no restart may cut short either (busy_sending)
+            MailBridge.in_flight += 1
+            try:
+                return await self._call_once(tool, timeout, raw, **args)
+            finally:
+                MailBridge.in_flight -= 1
         for attempt in range(3):
             try:
                 return await self._call_once(tool, timeout, raw, **args)
@@ -803,6 +809,22 @@ async def telegram_changed():
         if tg.session is None:
             return
         await asyncio.sleep(0.1)
+
+
+async def telegram_speedup():
+    """A Telegram component installed before 0.8.5 lacks tgsetup.SPEEDUP: add it, then reconnect once nothing is
+    being sent, so the backend loads it."""
+    try:
+        if not await tgsetup.add_speedup():
+            return
+    except Exception as e:  # noqa: BLE001  only speed: Telegram works without it
+        log("telegram speedup failed:", err_text(e))
+        return
+    for _ in range(120):
+        if not busy_sending():
+            break
+        await asyncio.sleep(5)
+    await telegram_changed()
 
 
 # ---------------------------------------------------------------- read caches
@@ -7995,7 +8017,7 @@ async def lifespan(app):
     loops = [] if LOGGED_OUT else [mail.run(), bg.run(), finder.run(), translator_loop(), prefetch_loop()]
     if not DEV and not LOGGED_OUT:  # a dev copy next to the real service must never answer, notify, log or send anything
         loops += [scan_loop(), tg.run(), telegram_loop(), sheet_loop(), sheet_channels_loop(), mobile_loop(),
-                  case_worker(), awake_loop(), tg_sync_loop(), popo_sync_loop()]
+                  case_worker(), awake_loop(), tg_sync_loop(), popo_sync_loop(), telegram_speedup()]
     if not DEV or os.environ.get("KOL_PET") == "1":  # a dev copy shows its own pet only when asked
         loops.append(keeper.run())
     if autoreport.enabled():
