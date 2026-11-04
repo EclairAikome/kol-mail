@@ -590,6 +590,20 @@ def test_no_looping_state_plays_more_pictures_than_a_mac_keeps_decoded_cheaply(t
         assert sprites.load(folder).pictures_at_once(skip=brain.ONE_OFF) <= 21, folder.name
 
 
+def test_the_whale_girls_turn_never_stands_still():
+    """Her idle turn loops: no frame of it is the next one again, the last and the first included. RIFE's -n put the
+    last three on the first GIF frame, so she stood still for four frames each turn (tools/make_pet.py rife_asks)."""
+    meta = json.loads((PET_DIR / "pet.json").read_text(encoding="utf-8"))["kolmail"]
+    cw, ch = meta["cell"]
+    clip = meta["clips"]["sway"]
+    frames = []
+    for picture, _ in clip["bands"]:
+        alpha = png_alpha(PET_DIR / picture)
+        frames += [alpha[i * cw * ch:(i + 1) * cw * ch] for i in range(len(alpha) // (cw * ch))]
+    assert len(frames) == clip["frames"]
+    assert [i for i in range(len(frames)) if frames[i] == frames[(i + 1) % len(frames)]] == []
+
+
 def test_all_outfits_fit_in_what_the_updater_takes():
     import updater
     total = sum(p.stat().st_size for p in PET_DIR.parent.rglob("*") if p.is_file() and "__pycache__" not in p.parts)

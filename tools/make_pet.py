@@ -697,6 +697,13 @@ def gif_frames(gif: str) -> list[np.ndarray]:
     return [np.asarray(f.convert("RGB")) for f in ImageSequence.Iterator(Image.open(gif))]
 
 
+def rife_asks(frames: int, keys: int) -> int:
+    """How many frames to ask rife-ncnn-vulkan's -n for, for its first `frames` to go evenly from the first of `keys`
+    pictures to the last (which they leave out). It puts frame j at j * keys / n, counted in keys: asked for
+    frames + 1, it reached the last picture early and gave it again and again (a turn stood still for four frames)."""
+    return round(frames * keys / (keys - 1))
+
+
 def interpolate(frames: list[np.ndarray], rife: str | None, work: Path) -> list[np.ndarray]:
     """One turn as LOOP frames: RIFE (rife-ncnn-vulkan with its v4.6 model) puts four frames between each two of
     the GIF's, the last one back to the first, so the loop has no seam. Without RIFE every frame is repeated."""
@@ -708,15 +715,18 @@ def interpolate(frames: list[np.ndarray], rife: str | None, work: Path) -> list[
         d.mkdir(parents=True, exist_ok=True)
         for old in d.glob("*.png"):
             old.unlink()
-    for i, f in enumerate(frames + frames[:1]):
+    keys = frames + frames[:1]
+    for i, f in enumerate(keys):
         Image.fromarray(f).save(src / f"{i:04d}.png")
     exe = Path(rife)
-    cmd = [str(exe), "-i", str(src), "-o", str(dst), "-n", str(LOOP + 1), "-m", str(exe.parent / "rife-v4.6"), "-x"]
+    n = rife_asks(LOOP, len(keys))
+    cmd = [str(exe), "-i", str(src), "-o", str(dst), "-n", str(n), "-m", str(exe.parent / "rife-v4.6"), "-x"]
     import subprocess
     subprocess.run(cmd, check=True, capture_output=True)
     out = sorted(dst.glob("*.png"))
-    assert len(out) == LOOP + 1, len(out)
-    return [np.asarray(Image.open(p).convert("RGB")) for p in out[:-1]]
+    if len(out) != n:
+        raise RuntimeError(f"RIFE made {len(out)} frames, not {n}")
+    return [np.asarray(Image.open(p).convert("RGB")) for p in out[:LOOP]]
 
 
 # ---------------------------------------------------------------- output
