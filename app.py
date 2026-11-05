@@ -64,6 +64,7 @@ import compliance  # noqa: E402
 import onboarding  # noqa: E402
 import tgsetup  # noqa: E402
 import mailserver  # noqa: E402
+import mailmove  # noqa: E402
 import signature  # noqa: E402
 import folders  # noqa: E402
 from sheet import popogrid  # noqa: E402  (a POPO 在线表格 as the KOL sheet)
@@ -566,12 +567,14 @@ class MailBridge:
                 delimiters[str(m["delimiter"])] += 1
             if "\\noselect" in flags:
                 continue
-            names.append(m["name"])
+            # INBOX is the one name IMAP compares without case; Alibaba Mail lists it as "Inbox"
+            name = "INBOX" if str(m["name"]).casefold() == "inbox" else m["name"]
+            names.append(name)
             if flags & SPECIAL_USE:
-                special.append(m["name"])
+                special.append(name)
             for flag, role in (("\\sent", "sent"), ("\\junk", "junk"), ("\\drafts", "drafts"), ("\\trash", "trash")):
                 if flag in flags:
-                    roles.setdefault(role, m["name"])
+                    roles.setdefault(role, name)
         delimiter = delimiters.most_common(1)[0][0] if delimiters else ""
         return {"names": names, "roles": roles, "special": special, "delimiter": delimiter}
 
@@ -885,9 +888,10 @@ inflight = PerAccount(dict)       # coalesced fetches in progress
 marked_read = PerAccount(dict)    # (mailbox, uid) opened here -> when the server confirmed (None: in flight)
 background: set[asyncio.Task] = set()
 
-# The company mailbox (Amazon WorkMail) has these, and files deals into three folders of its own. Another mailbox
-# (163, QQ, Gmail...) names its special folders differently: they are recognised from the server's flags, else by
-# the usual names; the deal folders are only used where they exist.
+# The company mailbox had these on Amazon WorkMail, and files deals into three folders of its own. Every other mailbox
+# (Alibaba Mail, where the company mailbox is since 2026-11-04, 163, QQ, Gmail...) names its special folders its own
+# way: they are recognised from the server's flags, else by the usual names; the deal folders are only used where
+# they exist.
 DEAL_BOXES = ("纯固薪", "CPS+固薪", "纯CPS")
 WORKMAIL = {"sent": "Sent Items", "junk": "Junk E-mail", "drafts": "Drafts", "trash": "Deleted Items"}
 ROLE_NAMES = {
@@ -902,8 +906,8 @@ ROLE_NAMES = {
 def folder_role(role: str) -> str:
     """The folder that has this role, or "" when the mailbox has none (then nothing ever asks the server for it)."""
     names = folder_info.get("names")
-    if not names:  # until the folder list is in: the company mailbox's names, nothing for another one
-        return WORKMAIL[role] if is_primary() else ""
+    if not names:  # until the folder list is in: WorkMail's names for a company mailbox still there, else nothing
+        return WORKMAIL[role] if is_primary() and not moved_at(current_account.get()) else ""
     flagged = folder_info.get("roles", {}).get(role)
     if flagged:
         return flagged
@@ -1065,9 +1069,13 @@ async def fetch_folders(bridge: MailBridge) -> list[str]:
             listing = await bridge.folder_listing()
             if folder_info.get("generation", 0) == generation:
                 break
-        folder_info["names"], folder_info["roles"] = listing["names"], listing["roles"]
+        names = listing["names"]
+        if moved_at(current_account.get()):  # the tree 邮箱搬家 left: its mails are brought up (fold_moved_mail)
+            root = mailmove.moved_tree(names, this_account().address, listing["delimiter"])
+            names = [n for n in names if not root or not folders.inside(n, root, listing["delimiter"])]
+        folder_info["names"], folder_info["roles"] = names, listing["roles"]
         folder_info["special"], folder_info["delimiter"] = listing["special"], listing["delimiter"]
-        return listing["names"]
+        return names
     return await coalesced(("folders", bridge.name), run)
 
 
@@ -1593,6 +1601,9 @@ def notify_new(emails: list[dict]):
             return
     seen = set(notify_seen[name]) | notify_pending
     new = [m for m in reversed(metas) if m["message_id"] not in seen]  # oldest first
+    if old := [m["message_id"] for m in new if quiet_old(m)]:  # brought over from WorkMail after the move
+        mark_notified(old)
+        new = [m for m in new if m["message_id"] not in set(old)]
     if not new:
         return
     notify_pending.update(m["message_id"] for m in new)
@@ -1884,6 +1895,9 @@ def sheet_note_incoming(emails: list[dict]):
             return
     new = [m for m in reversed(metas) if m["message_id"] not in sheet_seen]  # oldest first
     for meta in new:
+        if quiet_old(meta):  # brought over from WorkMail after the move: the triage logged it back then
+            sheet_seen[meta["message_id"]] = "seed"
+            continue
         sheet_seen[meta["message_id"]] = "posted"
         when = parse_date(meta.get("date"))
         subject = strip_hidden(re.sub(r"[\r\n]+", " ", meta.get("subject") or "")).strip()[:150]
@@ -3973,9 +3987,179 @@ def password_needed() -> list[dict]:
 
 
 async def reconnect_and_scan():
-    """A new password is stored: new sessions (the old ones may hold the old password), then a look for mail."""
+    """A new password is stored: new sessions (the old ones may hold the old password), then a look for mail and,
+    for a mailbox that moved, at the tree 邮箱搬家 left."""
     await reload_mail_sessions()
     scan_now.set()
+    fold_now.set()
+
+
+# ---------------------------------------------------------------- the company mailbox's move (mailmove.py)
+# settings.json mail.server_move: {"at": when this computer moved, "accounts": the mailboxes moved}. A moved mailbox
+# whose stored password Alibaba Mail refuses is asked for a new one like any other (check_password above).
+
+def server_move() -> dict:
+    rec = CFG["mail"].get("server_move")
+    return rec if isinstance(rec, dict) else {}
+
+
+def save_server_move(rec: dict):
+    config.update(["mail", "server_move"], rec)
+    CFG["mail"]["server_move"] = rec
+
+
+def moved_at(name: str) -> str:
+    """When this mailbox left WorkMail on this computer; "" when it never did."""
+    rec = server_move()
+    return str(rec.get("at") or "") if name in (rec.get("accounts") or []) else ""
+
+
+def quiet_old(meta: dict) -> bool:
+    """A mail of the old mailbox brought over after the move: remembered, never announced or logged as new."""
+    return bool(moved_at(current_account.get())) and \
+        mailmove.quiet_old_mail(parse_date(meta.get("date")), datetime.now(timezone.utc))
+
+
+async def move_company_mailboxes():
+    """At start: WorkMail's servers become Alibaba Mail's, in the login screen's preset and in every company mailbox
+    still on them. Such a mailbox loses its folder indexes (the old UIDs), and the primary one's open phone cases
+    about mails are closed, their UIDs are gone too. Its stored password is tried there as it is (the company kept
+    the passwords); a refused one is asked for in the page like any other (check_password). Each step
+    comes before the one that depends on it, so a start that stops half way is finished by the next one; nothing
+    here may keep the app from starting."""
+    if DEV:  # a dev copy shares the mail component with the real one: it never changes it
+        return
+    preset = mailmove.moved_preset(CFG["mail"].get("company_servers"))
+    if preset:
+        try:
+            config.update(["mail", "company_servers"], preset)
+            CFG["mail"]["company_servers"] = preset
+        except Exception as e:  # noqa: BLE001
+            log("company servers not moved", err_text(e))
+    if LOGGED_OUT:
+        return
+    # only the company's mailboxes can be on WorkMail; a 163 or Gmail one is not asked (each ask costs seconds)
+    domains = {ACCOUNTS[0].address.rpartition("@")[2], str(CFG["mail"].get("company_domain") or "").lstrip("@").lower()}
+    for a in ACCOUNTS:
+        if not a.primary and a.address.rpartition("@")[2] not in domains:
+            continue
+        try:
+            info = await mail_cli.show(a.name)
+            if mailmove.on_old_servers(info):
+                rec = server_move()
+                save_server_move({**rec, "at": rec.get("at") or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                                  "accounts": list(dict.fromkeys([*(rec.get("accounts") or []), a.name]))})
+                # a cache only: dropping it again at a start whose move fails costs one re-read, nothing more
+                with contextlib.suppress(FileNotFoundError):  # any other failure: no move, tried again next start
+                    shutil.rmtree(index_dir(a.name))
+                await mail_cli.update_servers(a.name, info["revision"], mailmove.NEW_SERVERS)
+                log("mailbox moved to Alibaba Mail", a.name)
+            # Only once the mailbox is on Alibaba Mail, and once: a move that keeps failing must not close, start
+            # after start, the cases opened since. A start that stopped right after the move closes them next time.
+            rec = server_move()
+            if a.primary and moved_at(a.name) and a.name not in (rec.get("cases_closed") or []):
+                closed = [c["id"] for c in cases.all_open() if c.get("channel") == "email"
+                          and cases.move(c["id"], mobile.OPEN, "handled")]
+                save_server_move({**rec, "cases_closed": [*(rec.get("cases_closed") or []), a.name]})
+                if closed:
+                    log("phone cases closed by the mailbox move", closed)
+        except Exception as e:  # noqa: BLE001
+            log("mailbox move failed, tried again at the next start", a.name, err_text(e))
+
+
+FOLD_EVERY = 30 * 60  # seconds between two looks at the tree 邮箱搬家 is still filling
+# UIDs per move: Alibaba Mail has no MOVE, and copying 100 mails took longer than the mail component waits for one
+# change (it then reports "unknown" for all of them, although about half had gone; seen 2026-11-02)
+FOLD_BATCH = 20
+FOLD_MAX = 500     # mails per look: a big old mailbox goes over several looks, never in one long run of logins
+FOLD_PAUSE = 2     # seconds between two moves, so the scans and notices on the same session get their turn
+fold_now = asyncio.Event()  # a password just went in: look now
+
+
+async def fold_loop():
+    """邮箱搬家 may go on for hours after the password is in, so its tree is looked at every half hour. Without an
+    end date: a colleague back from a long leave enters the password weeks later, and the tree stays hidden."""
+    wait = 60  # the first look once the mail sessions are up
+    while True:
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(fold_now.wait(), wait)
+        wait = FOLD_EVERY
+        fold_now.clear()
+        for a in list(ACCOUNTS):
+            if not moved_at(a.name) or a.name in password_rejected or a not in ACCOUNTS:
+                continue
+            with on_account(a.name):
+                try:
+                    await fold_moved_mail()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001  tried again at the next look
+                    log("bringing up the moved mail failed", a.name, err_text(e))
+
+
+async def folder_metas(box: str, limit: int) -> list[dict]:
+    """Up to limit mails of a folder, newest first, page by page (filtered: the server searches IMAP itself)."""
+    out = []
+    for page in range(1, limit // FOLDER_MOVE_BATCH + 2):
+        meta = await bg.call("list_emails_metadata", mailbox=box, page=page, page_size=FOLDER_MOVE_BATCH,
+                             since="1970-01-01T00:00:00Z")
+        emails = meta.get("emails") or []
+        out += emails
+        if len(emails) < FOLDER_MOVE_BATCH or len(out) >= limit:
+            break
+    return out[:limit]
+
+
+async def fold_moved_mail():
+    """The mails 邮箱搬家 put under the folder named after the address go where KOL Mail and the triage task look for
+    them (mailmove.fold_plan). Moves only, nothing is deleted; the emptied tree stays, hidden (fetch_folders).
+
+    Alibaba Mail has no MOVE: a move is copy, mark deleted, expunge. One cut off half way (a timeout, a reconnect)
+    leaves copies in the destination whose originals may still be listed, so a mail whose Message-ID is there already
+    is never copied again. A mail the server refuses stays behind without holding up the rest of its folder."""
+    listing = await bg.folder_listing()
+    plan = mailmove.fold_plan(listing["names"], this_account().address, listing["delimiter"], listing["roles"])
+    names, filled, budget = set(listing["names"]), {}, FOLD_MAX
+    there: dict[str, set[str]] = {}  # destination -> the Message-IDs it holds
+    for old, new in plan:  # one folder that fails never holds up the others; it is tried again at the next look
+        if budget <= 0:
+            break
+        try:
+            if new not in names:  # an empty one too: the triage files deals into 纯固薪, CPS+固薪 and 纯CPS by name
+                await bg.call("create_mailbox", mailbox=new)
+                names.add(new)
+                log("moved mailbox: folder made", new)
+            waiting = [m for m in await folder_metas(old, budget) if str(m.get("email_id", "")).isdigit()]
+            if not waiting:
+                continue
+            if new not in there:
+                there[new] = {m["message_id"] for m in await folder_metas(new, 5000) if m.get("message_id")}
+            todo = [m for m in waiting if not m.get("message_id") or m["message_id"] not in there[new]]
+            if len(todo) < len(waiting):
+                log("moved mailbox: already there, left behind", old, len(waiting) - len(todo))
+            for start in range(0, len(todo), FOLD_BATCH):
+                batch = todo[start:start + FOLD_BATCH]
+                data = await bg.call("move_emails", email_ids=[str(m["email_id"]) for m in batch],
+                                     source_mailbox=old, destination_mailbox=new)
+                result = str(data.get("result", data))
+                there[new].update(m["message_id"] for m in batch if m.get("message_id"))
+                budget -= len(batch)
+                if result.startswith("Successfully"):
+                    filled[new] = filled.get(new, 0) + len(batch)
+                else:  # the next look sees what really went (and never copies it twice)
+                    log("moved mailbox: part not brought up", old, "->", new, result[:200])
+                await asyncio.sleep(FOLD_PAUSE)
+        except Exception as e:  # noqa: BLE001
+            log("moved mailbox: not brought up", old, "->", new, err_text(e))
+    if filled:
+        log("moved mailbox: mail brought up", this_account().name, filled)
+        folder_info.pop("names", None)
+        for box in filled:
+            for key in [k for k in lists if k[0] == box]:
+                lists.pop(key, None)
+            folders_changed(new=box)
+        with contextlib.suppress(MailError):
+            await fetch_folders(bg)
 
 
 async def api_accounts_password(request: Request):
@@ -8014,10 +8198,16 @@ async def lifespan(app):
     outbox.cleanup()  # attachments of drafts never sent, older than a week
     sweep_attachments(force=True)  # copies of received attachments unused for a week
     adopt_legacy_indexes()
+    try:
+        await move_company_mailboxes()  # before anything reads a mailbox: its indexes may have to go
+    except Exception as e:  # noqa: BLE001  never in the way of starting
+        log("mailbox move failed", err_text(e))
     loops = [] if LOGGED_OUT else [mail.run(), bg.run(), finder.run(), translator_loop(), prefetch_loop()]
     if not DEV and not LOGGED_OUT:  # a dev copy next to the real service must never answer, notify, log or send anything
         loops += [scan_loop(), tg.run(), telegram_loop(), sheet_loop(), sheet_channels_loop(), mobile_loop(),
                   case_worker(), awake_loop(), tg_sync_loop(), popo_sync_loop(), telegram_speedup()]
+        if server_move().get("accounts"):
+            loops.append(fold_loop())
     if not DEV or os.environ.get("KOL_PET") == "1":  # a dev copy shows its own pet only when asked
         loops.append(keeper.run())
     if autoreport.enabled():

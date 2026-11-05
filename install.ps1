@@ -3,7 +3,8 @@
 # 用法（维护者会在 POPO 群里发带参数的完整命令）：
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -Repo owner/kol-mail -Feedback <反馈地址>
 #
-# 公司邮箱固定是 @lootbar.com（Amazon WorkMail），收发信服务器已经是默认值，不用再问；换公司时用 -Domain、
+# 公司邮箱固定是 @lootbar.com（2026-11-04 起是阿里云邮箱美国站，之前是 Amazon WorkMail），收发信服务器已经是默认值，
+# 不用再问；换公司时用 -Domain、
 # -ImapHost、-SmtpHost、-Company 改。维护者在本机试装时加 -Source <源码目录> -Dir <别的目录> -NoService，
 # 这样不注册开机任务、不放桌面图标、不启动服务（真服务会在下班时间自动回信）。
 #
@@ -19,8 +20,8 @@ param(
     [string]$Feedback = "",
     [string]$Domain = "lootbar.com",
     [string]$Company = "LootBar",
-    [string]$ImapHost = "imap.mail.us-east-1.awsapps.com",
-    [string]$SmtpHost = "smtp.mail.us-east-1.awsapps.com",
+    [string]$ImapHost = "imap.us.alibabacloud.com",
+    [string]$SmtpHost = "smtp.us.alibabacloud.com",
     [string]$GoogleClientId = "",
     [string]$GoogleClientSecret = "",
     [string]$PipIndex = "",
@@ -212,6 +213,16 @@ function Test-MailAccount($account) {
     }
 }
 
+# 这个邮箱还挂在 Amazon WorkMail 上吗（KOL Mail 的 mailmove.py 会把它挪到阿里云，这里不用再测旧服务器）
+function Test-OnWorkMail($account) {
+    $r = Run-Native { & $Mcp account show $account --json }
+    if ($r.Code -ne 0) { return $false }
+    try {
+        $doc = ($r.Out -split "`n" | Where-Object { $_.Trim().StartsWith("{") } | Select-Object -Last 1) | ConvertFrom-Json
+        return "$($doc.data.incoming.host)" -match '\.awsapps\.com$'
+    } catch { return $false }
+}
+
 # 邮件组件把失败分成认证被拒、凭据丢失、网络/TLS 不通、超时几类；只有前两类重输密码有用
 function Test-PasswordProblem($failed) {
     return ($failed -join "`n") -match "Authentication or provider policy rejected|Credential is unavailable"
@@ -255,6 +266,9 @@ function Set-MailPassword($account, $email, [string[]]$addArgs) {
 }
 
 if ($Mirror -and -not $Mirror.StartsWith("https://")) { throw "-Mirror 必须是 https 地址" }
+# 旧安装命令里写明的 WorkMail 服务器换成阿里云的（公司邮箱 2026-11-04 换了）
+if ($ImapHost -match '\.awsapps\.com$') { $ImapHost = "imap.us.alibabacloud.com" }
+if ($SmtpHost -match '\.awsapps\.com$') { $SmtpHost = "smtp.us.alibabacloud.com" }
 
 $App = Join-Path $Dir "app"
 $Venv = Join-Path $Dir "venv"
@@ -381,6 +395,10 @@ if ($webLogin) {
         Say "  马上会弹出一个小窗口，在里面输入邮箱密码（可以 Ctrl+V 粘贴）。密码由邮件组件存进 Windows 凭据管理器。"
         $mailOk = Set-MailPassword $account $email @("account", "add", $account, "--email", $email, "--full-name", $fullName,
             "--imap-host", $ImapHost, "--smtp-host", $SmtpHost, "--imap-user", $email, "--smtp-user", $email)
+    } elseif (Test-OnWorkMail $account) {
+        # 公司邮箱 2026-11-04 从 WorkMail 换到了阿里云：服务器由 KOL Mail 启动时改，原密码不能用时才在页面上重输
+        Say "  公司邮箱换到阿里云了：装好后打开 KOL Mail 会自动换过去；原来的密码不能用的话，页面会请你输入一次。"
+        $mailOk = $true
     } else {
         $failed = @(Test-MailAccount $account)
         $mailOk = -not $failed

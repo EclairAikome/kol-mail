@@ -43,6 +43,9 @@ while [ $# -gt 0 ]; do
         *) echo "不认识的参数：$1" >&2; exit 2 ;;
     esac
 done
+# 公司邮箱 2026-11-04 从 Amazon WorkMail 换到了阿里云邮箱美国站：旧安装命令里的 WorkMail 服务器换成阿里云的
+case "$IMAP_HOST" in *.awsapps.com) IMAP_HOST="imap.us.alibabacloud.com" ;; esac
+case "$SMTP_HOST" in *.awsapps.com) SMTP_HOST="smtp.us.alibabacloud.com" ;; esac
 
 LABEL="local.kolmail"
 APP="$DIR/app"
@@ -267,7 +270,13 @@ else
     fi
     # 连接测试。密码输错了可以当场重输（重跑安装命令时也会再测一次）
     MAIL_OK=0
+    # 还挂在 WorkMail 上的邮箱由 KOL Mail 启动时挪到阿里云（mailmove.py），原密码不能用时才在页面上重输：这里不测旧服务器
+    if "$MCP" account show "$ACCOUNT" --json 2>/dev/null | grep -q '"host":"[^"]*\.awsapps\.com"'; then
+        say "  公司邮箱换到阿里云了：装好后打开 KOL Mail 会自动换过去；原来的密码不能用的话，页面会请你输入一次。"
+        MAIL_OK=1
+    fi
     for try in 1 2 3; do
+        [ "$MAIL_OK" = 1 ] && break
         if TEST_OUT="$("$MCP" account test "$ACCOUNT" 2>&1)"; then say "  邮箱连接正常"; MAIL_OK=1; break; fi
         warn "  邮箱连接测试没通过：$TEST_OUT"
         [ "$YES" = 1 ] && break

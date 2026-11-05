@@ -340,6 +340,32 @@ def test_server_rename_statuses():
     assert imap.sent == [("RENAME", '"A"', '"B/A"')] and checked == [1]
 
 
+class AlibabaImap(FakeImap):
+    """Alibaba Mail: LIST "<a name that does not exist>" "" comes back empty; the root answers."""
+
+    async def list(self, ref, pattern):
+        self.sent.append(("LIST", ref, pattern))
+        if pattern == '""':
+            return ("OK", [("",)] if ref == '""' else [])
+        return ("OK", [f for f in self.folders if f'"{f[0]}"' == pattern])
+
+    async def create(self, name):
+        self.sent.append(("CREATE", name))
+        return (self.answer, [])
+
+
+def test_server_create_learns_the_delimiter_from_the_root_when_the_name_tells_nothing():
+    imap = AlibabaImap([("INBOX",), ("纯固薪",)])
+    classic, client, checked = fake_server(imap)
+    classic._has_already_exists_code = lambda r: False
+    assert asyncio.run(mailserver.create_mailbox(classic, client, "纯CPS")) == "created"
+    assert ("LIST", '""', '""') in imap.sent and imap.sent[-1] == ("CREATE", '"纯CPS"') and checked == [1]
+    imap.sent.clear()
+    assert asyncio.run(mailserver.create_mailbox(classic, client, "纯固薪")) == "already_exists"
+    assert not any(s[0] == "CREATE" for s in imap.sent)
+    assert asyncio.run(mailserver.create_mailbox(classic, client, "INBOX")) == "already_exists"
+
+
 def test_server_delete_only_takes_an_empty_folder_without_subfolders():
     folders_ = [("INBOX",), ("A",), ("A/B",), ("C",)]
     classic, client, _ = fake_server(FakeImap(folders_))

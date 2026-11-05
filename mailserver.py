@@ -11,6 +11,8 @@ The mail is then multipart/mixed( multipart/related( multipart/alternative(text,
 the layout mail programs expect for a signature with pictures. Everything else (plain mails, forwards, the copy in
 Sent, which is built by the same function) stays exactly as mcp-email-server makes it.
 
+create_mailbox gets a second way to learn the hierarchy delimiter, which Alibaba Mail needs (see create_mailbox).
+
 It also adds two tools mcp-email-server lacks, for the folder menu (app.py): kolmail_rename_mailbox (also moves a
 folder under another one) and kolmail_delete_mailbox, which deletes an EMPTY folder without subfolders only (KOL Mail
 moves the mails to Deleted Items first, so nothing is lost on the way). Both need the "organize" permission, like
@@ -24,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import os
 import re
 import sys
 from email.message import Message
@@ -132,6 +135,10 @@ def patch() -> bool:
     create.kolmail = True
     classic.EmailClient._create_message_with_attachments = create
     classic.MIMEText = text_part  # compose_message builds a mail without attachments from it directly
+
+    async def make_folder(self, mailbox):
+        return await create_mailbox(classic, self, mailbox)
+    classic.EmailClient.create_mailbox = make_folder
     try:
         add_folder_tools()
     except Exception as e:  # noqa: BLE001  sending and reading must work without them (the folder menu then fails)
@@ -160,6 +167,48 @@ def _selectable(info) -> bool:
 
 def _same(a: str, b: str) -> bool:
     return a == b or a.casefold() == "inbox" == b.casefold()
+
+
+async def create_mailbox(classic, client, mailbox: str) -> str:
+    """EmailClient.create_mailbox as 1.13.1 has it, except where it learns the hierarchy delimiter: it asks
+    LIST "<new name>" "", which Alibaba Mail answers with nothing for a folder that does not exist yet, and the
+    folder was never made (seen 2026-11-02). Then the root is asked, LIST "" "", as RFC 3501 6.3.8 allows."""
+    imap = await client._connect_imap()
+    try:
+        await classic._imap_login(imap, client.email_server.user_name, client.email_server.password.get_secret_value())
+        await classic._send_imap_id(imap)
+        quoted = classic._quote_mailbox(mailbox)
+        roots = []
+        for reference in (quoted, '""'):
+            hierarchy = await imap.list(reference, '""')
+            classic._raise_for_imap_error(hierarchy, "LIST mailbox hierarchy before CREATE")
+            roots = classic._parse_list_responses(hierarchy[1])
+            if len(roots) == 1:
+                break
+        if len(roots) != 1:
+            raise RuntimeError("LIST mailbox hierarchy returned no unique delimiter")
+        delimiter = roots[0].delimiter
+        if delimiter and mailbox.endswith(delimiter):
+            raise ValueError("mailbox must not end with the server's hierarchy delimiter")
+        response = await imap.list('""', quoted)
+        classic._raise_for_imap_error(response, "LIST mailbox before CREATE")
+        if any(_selectable(f) and _same(f.name, mailbox) for f in classic._parse_list_responses(response[1])):
+            return "already_exists"
+        client._check_mutation_authority()
+        try:
+            created = await imap.create(quoted)
+        except Exception:  # noqa: BLE001  the CREATE may have reached the server: never replayed
+            return "unknown"
+        status = classic._imap_effect_status(created)
+        if status == "succeeded":
+            return "created"
+        if status == "failed":
+            if classic._has_already_exists_code(created):
+                return "already_exists"
+            raise RuntimeError(f"CREATE mailbox failed ({classic._imap_status(created)})")
+        return "unknown"
+    finally:
+        await classic._best_effort_imap_logout(imap)
 
 
 async def rename_mailbox(classic, client, old: str, new: str) -> str:
@@ -278,6 +327,37 @@ def add_folder_tools():
     FOLDER_TOOLS.extend([kolmail_rename_mailbox, kolmail_delete_mailbox])
 
 
+# ---------------------------------------------------------------- catalog files a killed server left behind
+
+def patch_catalog() -> bool:
+    """Let an open of the settings catalog lock down the -wal/-shm files a killed server left, instead of refusing.
+
+    SQLite creates them with inherited permissions and mcp-email-server makes them private right after. A server
+    killed in between (KOL Mail drops a hung backend, e.g. after the computer woke from sleep, 2026-11-04) leaves
+    them inherited, and every later open then refused with "Managed catalog sidecar does not satisfy the Windows
+    private-file policy": the mail backend stayed down until someone fixed the files by hand. When that check fails
+    (inside the server's own catalog lock), they get the server's own hardening and are checked again. Hardening
+    still refuses a hard link or anything but a plain file, so those keep failing as before."""
+    if os.name != "nt" or not supported():
+        return False
+    from mcp_email_server import managed
+
+    original = managed._validate_sidecars
+    if getattr(original, "kolmail", False):
+        return True
+
+    def validate(path):
+        try:
+            return original(path)
+        except managed.ManagedCatalogSecurityError:
+            managed._harden_windows_sidecars(path)
+            return original(path)
+
+    validate.kolmail = True
+    managed._validate_sidecars = validate
+    return True
+
+
 def text_part(body, subtype="plain", charset=None, *, policy=None):
     """MIMEText, except that a marked HTML body becomes multipart/alternative with its plain text first."""
     if subtype == "html" and isinstance(body, str):
@@ -303,6 +383,7 @@ def main():
     if sys.path and Path(sys.path[0] or ".").resolve() == Path(__file__).resolve().parent:
         sys.path.pop(0)  # KOL Mail's own modules (config, app, ...) must not stand in for the server's imports
     patch()
+    patch_catalog()
     from mcp_email_server.cli import app
     sys.argv = ["mcp-email-server", *sys.argv[1:]]
     app()

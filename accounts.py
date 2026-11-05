@@ -199,6 +199,15 @@ class Cli:
         args += ["--smtp-ssl", "--no-smtp-starttls"] if servers["smtp_security"] == "ssl" else ["--no-smtp-ssl", "--smtp-starttls"]
         await self.json(*args, secrets=(password, password))
 
+    async def update_servers(self, name: str, revision: int, servers: dict):
+        """Point an existing account at other servers; its stored passwords stay as they are."""
+        args = ["account", "update", name, "--expected-revision", str(revision),
+                "--imap-host", servers["imap_host"], "--imap-port", str(servers["imap_port"]),
+                "--smtp-host", servers["smtp_host"], "--smtp-port", str(servers["smtp_port"])]
+        args += ["--imap-ssl", "--no-imap-starttls"] if servers["imap_security"] == "ssl" else ["--no-imap-ssl", "--imap-starttls"]
+        args += ["--smtp-ssl", "--no-smtp-starttls"] if servers["smtp_security"] == "ssl" else ["--no-smtp-ssl", "--smtp-starttls"]
+        await self.json(*args)
+
     async def set_password(self, name: str, password: str):
         """A new password for an existing account, the same for receiving and sending (as account add stores it)."""
         for role in ("incoming", "outgoing"):
