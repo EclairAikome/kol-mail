@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import glob
+import html
 import json
 import os
 import re
@@ -22,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from html.parser import HTMLParser
 from urllib.parse import urlparse, urlunparse
 
 DOC_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -334,6 +336,116 @@ def resolve_link(link: str, cli: str, run=None) -> str:
     data = unwrap(runner(["popo", "doc_get_folder_path", f"url={clean}"]))
     space = str(data.get("teamSpaceId") or "")
     return f"popo:{doc}:{space}" if space else f"popo:{doc}"
+
+
+BLOCKS = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "doc-li", "doc-li-head", "li", "tr", "callout", "table", "div",
+          "blockquote", "pre", "code-block"}
+
+
+class _DocText(HTMLParser):
+    """A POPO document's own HTML (`doc_get_doc_detail`, type 1) as lines of plain text."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.lines, self.line, self.href, self.link_text = [], [], None, []
+        self.cell = 0  # inside a table cell, paragraphs stay on the row's line
+
+    def end_line(self):
+        text = re.sub(r"[ \t ]+", " ", "".join(self.line)).strip()
+        if text:
+            self.lines.append(text)
+        self.line = []
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag in ("td", "th"):
+            self.cell += 1
+            self.line.append(" | ")
+        elif self.cell and tag in BLOCKS | {"br"}:
+            self.line.append(" ")
+        elif tag in BLOCKS:
+            self.end_line()
+            if tag[:1] == "h" and tag[1:].isdigit():
+                self.line.append("#" * int(tag[1:]) + " ")
+            elif tag in ("doc-li", "doc-li-head"):
+                level = str(a.get("list-level") or "1")
+                level = min(int(level), 9) if re.fullmatch(r"[0-9]{1,3}", level) else 1  # "²".isdigit() is True
+                self.line.append("  " * max(level - 1, 0) + "- ")
+        elif tag in ("br", "hr"):
+            self.end_line()
+        elif tag == "del":
+            self.line.append("~~")
+        elif tag == "a":
+            self.href, self.link_text = a.get("href") or "", []
+        elif tag == "img":
+            self.line.append("[图片]")
+        elif tag == "attachment":
+            self.line.append(f"[附件 {a.get('file-name') or ''}]".replace(" ]", "]"))
+        elif tag == "mention":
+            self.line.append("@" + str(a.get("name") or a.get("email") or "").split("@")[0])
+
+    def handle_startendtag(self, tag, attrs):
+        if tag in ("td", "th"):  # an empty cell: no end tag will come to close it
+            self.line.append(" | ")
+            return
+        self.handle_starttag(tag, attrs)
+        if tag in BLOCKS:
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th"):
+            self.cell = max(0, self.cell - 1)
+        elif self.cell and tag in BLOCKS:
+            self.line.append(" ")
+        elif tag in BLOCKS:
+            self.end_line()
+        elif tag == "del":
+            self.line.append("~~")
+        elif tag == "a" and self.href is not None:
+            if self.href and self.href not in "".join(self.link_text):
+                self.line.append(f" ({self.href})")
+            self.href = None
+
+    def handle_data(self, data):
+        self.line.append(data)
+        if self.href is not None:
+            self.link_text.append(data)
+
+
+def doc_text(content: str, doc_type=1) -> str:
+    """A document's text from `doc_get_doc_detail`. POPO documents come as one long line of POPO's own HTML: made into
+    one line per paragraph, list item or table row, so a change of one sentence shows as the line it touched.
+    Markdown documents (type 4) already are text."""
+    content = str(content or "")
+    if str(doc_type) == "4" or not content.lstrip().startswith("<"):
+        return content.replace("\r\n", "\n").strip()
+    parser = _DocText()
+    parser.feed(content)
+    parser.close()
+    parser.end_line()
+    return "\n".join(parser.lines).strip()  # convert_charrefs already turned &amp; and the like into text
+
+
+def read_doc(link: str, cli: str, run=None) -> tuple[str, str]:
+    """(title, text) of a POPO document by its docs link: the space id first for team-space links (as resolve_link),
+    then `doc_get_doc_detail`. Checked against popo-cli 0.1.68 on 2026-11-06."""
+    if not doc_id_from_link(link):
+        raise PopoError("不是 POPO 文档的链接（在 POPO 里打开那篇文档，复制浏览器地址栏里的链接）")
+    doc, space = parse_setting(resolve_link(link, cli, run))
+
+    def runner(args):
+        if run:
+            return run(args)
+        try:
+            return run_cli([cli, *args], CALL_TIMEOUT, cli_env(cli))[1].decode("utf-8", "replace")
+        except subprocess.TimeoutExpired:
+            raise PopoError("popo-cli 两分钟没有返回（网络慢或 POPO 服务忙），明天再试") from None
+    args = ["popo", "doc_get_doc_detail", f"docId={doc}"] + ([f"teamSpaceId={space}"] if space else [])
+    data = unwrap(runner(args))
+    text = doc_text(data.get("content") or "", data.get("type"))
+    if not text:
+        raise PopoError("popo-cli 读到的文档是空的")
+    return str(data.get("title") or ""), text
 
 
 def auth_status(cli: str) -> dict:

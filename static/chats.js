@@ -350,12 +350,13 @@
           el("div", { class: "lbl", text: "怎么回" }), el("div", { class: "txt", text: o.approach_zh }),
           el("div", { class: "lbl", text: "为什么" }), el("div", { class: "txt", text: o.why_zh }),
           el("div", { class: "lbl", text: "风险" }), el("div", { class: "txt risk", text: o.risk_zh }),
-          el("button", { class: "act primary", type: "button", onclick: () => draft({ strategy: o }) }, "用这个方案起草"))))));
+          el("button", { class: "act primary", type: "button", onclick: () => draft({ strategy: o }, i) }, "用这个方案起草"))))));
+      st.offer = { options: d.options, recommended: d.recommended, chosen: null };
       note("");
     });
   }
 
-  function draft(extra) {
+  function draft(extra, chosen) {
     return busy("AI 在起草…", async key => {
       // the owner's earlier change requests keep holding in later rounds, as in a mail reply
       const body = { key, ctx: st.ctx, notes: $c("#chatNotes", pane).value, ...extra,
@@ -363,6 +364,11 @@
       const d = await call("/api/chat/draft", body);
       if (key !== st.key) return;
       st.feedbackLog = extra.feedback ? [...(st.feedbackLog || []), extra.feedback].slice(-20) : [];
+      // what the playbook review learns from: the AI's last version, the strategy taken, the corrections
+      if (extra.strategy && st.offer && Number.isInteger(chosen)) st.offer = { ...st.offer, chosen };
+      if (!extra.strategy && !extra.feedback) st.offer = null;
+      if (!extra.feedback) st.zhEditsLog = [];
+      st.aiBody = d.reply_body || ""; st.compliance = d.compliance || {}; st.mode = extra.mode || "draft";
       // d.newest belongs to this draft: what the conversation looked like when it was written (sendIt sends it)
       st.ctx = d.ctx; st.language = d.reply_language || "";
       st.draft = d; st.pairs = d.pairs; st.sendLocked = false;
@@ -421,10 +427,15 @@
       table));
   }
 
+  // replyflow.HAND_EDIT, word for word (as in index.html): the draft was edited by hand after the last AI version
+  const HAND_EDIT = "（主人在这一轮之后手动改过正文，改过的地方以正文为准）";
   function revise() {
-    const fb = $c("#chatFb", pane).value.trim();
+    const fb = $c("#chatFb", pane).value.trim(), body = $c("#chatBody", pane).value;
     if (!fb) { note("先写修改意见", true); return; }
-    return draft({ previous_body: $c("#chatBody", pane).value, feedback: fb });
+    const log = st.feedbackLog || [], said = log.length || $c("#chatNotes", pane).value.trim();
+    if (said && typeof st.aiBody === "string" && body !== st.aiBody && log[log.length - 1] !== HAND_EDIT)
+      st.feedbackLog = [...log, HAND_EDIT];
+    return draft({ previous_body: body, feedback: fb });
   }
   function repair() {
     return busy("在核对中文…", async key => {
@@ -443,6 +454,7 @@
       const d = await call("/api/reply/zhedit", { text: $c("#chatBody", pane).value, edits, language: st.language });
       if (key !== st.key) return;
       $c("#chatBody", pane).value = d.body; st.pairs = d.pairs; renderPairs();
+      st.zhEditsLog = [...(st.zhEditsLog || []), ...edits.map(e => ({ zh_before: e.zh_before, zh_after: e.zh_after }))].slice(-40);
       note((d.warnings || []).join("；"), !!(d.warnings || []).length);
     });
   }
@@ -452,7 +464,9 @@
     const tg = st.conv.channel === "telegram";
     const newest = st.draft && st.draft.newest;
     return busy(tg ? "在发送…" : "在交给 Discord…", async key => {
-      const d = await call("/api/chat/send", { key, text, zh, newest });
+      const d = await call("/api/chat/send", { key, text, zh, newest, ai_body: st.aiBody || "", strategy: st.offer || {},
+        feedback_log: st.feedbackLog || [], zh_edits: st.zhEditsLog || [], compliance: st.compliance || {},
+        notes: $c("#chatNotes", pane).value, mode: st.mode || "draft", language: st.language || "" });
       if (key !== st.key) { loadList(); return; }
       st.draft = null; st.pairs = null;
       $c("#chatDraft", pane).replaceChildren(...kids()); $c("#chatOpts", pane).replaceChildren(...kids()); $c("#chatNotes", pane).value = "";

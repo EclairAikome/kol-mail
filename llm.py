@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROLES = ("translate", "draft")
@@ -57,6 +58,46 @@ SPEND_LIMIT = re.compile(r"spend limit|hit your (?:usage|session|daily|weekly|mo
 INJECTED_TAG = re.compile(r"<(system-reminder|ip_reminder|user-prompt-submit-hook|env|context)\b[^>]*>.*?</\1>\s*",
                           re.DOTALL | re.IGNORECASE)
 INJECTED_OPEN = re.compile(r"</?(system-reminder|ip_reminder|user-prompt-submit-hook)\b[^>]*>", re.IGNORECASE)
+
+
+# Where each call's token counts go, one JSON line per call (app.py sets it to data/llm_usage.jsonl); None: nowhere.
+USAGE_LOG: Path | None = None
+USAGE_LOG_MAX = 5 * 1024 * 1024  # bytes; a longer log is moved to llm_usage.1.jsonl and started again
+
+
+def usage_counts(backend: str, obj: dict) -> dict:
+    """input, cache write, cache read and output tokens from a CLI's answer, as far as it says them."""
+    if backend == "claude":
+        u = obj.get("usage") if isinstance(obj.get("usage"), dict) else {}
+        out = {k: u.get(k) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+                                     "output_tokens")}
+        if isinstance(obj.get("total_cost_usd"), (int, float)):
+            out["cost_usd"] = obj["total_cost_usd"]
+        tiers = u.get("cache_creation") if isinstance(u.get("cache_creation"), dict) else {}
+        for k in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"):  # written for 5 min (1.25x) or 1 h (2x)
+            if isinstance(tiers.get(k), (int, float)):
+                out["cache_write_" + k.split("_")[1]] = tiers[k]
+    else:  # opencode step_finish: {"tokens": {"input", "output", "cache": {"read", "write"}}}
+        t = obj if isinstance(obj, dict) else {}
+        cache = t.get("cache") if isinstance(t.get("cache"), dict) else {}
+        out = {"input_tokens": t.get("input"), "cache_creation_input_tokens": cache.get("write"),
+               "cache_read_input_tokens": cache.get("read"), "output_tokens": t.get("output")}
+    return {k: v for k, v in out.items() if isinstance(v, (int, float))}
+
+
+def log_usage(kind: str, backend: str, model: str, counts: dict) -> None:
+    """One line of data/llm_usage.jsonl. Bookkeeping only: a failure here never fails the call."""
+    if USAGE_LOG is None or not counts:
+        return
+    try:
+        USAGE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        if USAGE_LOG.exists() and USAGE_LOG.stat().st_size > USAGE_LOG_MAX:
+            os.replace(USAGE_LOG, USAGE_LOG.with_name(USAGE_LOG.stem + ".1" + USAGE_LOG.suffix))
+        line = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "kind": kind, "backend": backend, "model": model, **counts}
+        with open(USAGE_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(line, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 class LLMError(Exception):
@@ -277,9 +318,9 @@ def claude_message(user_text: str, files: list[Path]) -> bytes:
 
 
 async def complete(settings: Settings, system_prompt: str, user_text: str, schema: dict, role: str,
-                   timeout: int, files: list[Path] | None = None) -> dict:
+                   timeout: int, files: list[Path] | None = None, kind: str = "other") -> dict:
     """Run one call and return the JSON object the schema describes, scrubbed of injected reminder blocks.
-    files: images or PDFs shown to the model along with user_text."""
+    files: images or PDFs shown to the model along with user_text. kind: what the call is for, in the usage log."""
     if role not in ROLES:
         raise ValueError(role)
     files = [Path(f) for f in files or []]
@@ -291,9 +332,11 @@ async def complete(settings: Settings, system_prompt: str, user_text: str, schem
     model = settings.models[role]
     settings.workdir.mkdir(parents=True, exist_ok=True)
     if settings.backend == "claude":
-        result = await _claude(binary, model, system_prompt, user_text, schema, settings.workdir, timeout, files)
+        result = await _claude(binary, model, system_prompt, user_text, schema, settings.workdir, timeout, files,
+                               kind=kind)
     else:
-        result = await _codemaker(binary, model, system_prompt, user_text, schema, settings.workdir, timeout, files)
+        result = await _codemaker(binary, model, system_prompt, user_text, schema, settings.workdir, timeout, files,
+                                  kind=kind)
     return check_required(scrub(result), schema)
 
 
@@ -309,7 +352,7 @@ async def _communicate(proc, data: bytes | None, timeout: int, label: str) -> tu
 
 
 async def _claude(binary: str, model: str, system_prompt: str, user_text: str, schema: dict, cwd: Path,
-                  timeout: int, files: list[Path] | None = None) -> dict:
+                  timeout: int, files: list[Path] | None = None, kind: str = "other") -> dict:
     # The prompt (with the whole playbook) goes through a private file: a command line is readable by other local
     # processes and Windows caps it at 32K characters.
     prompt_file = cwd / f"prompt-{secrets.token_hex(6)}.md"
@@ -345,6 +388,7 @@ async def _claude(binary: str, model: str, system_prompt: str, user_text: str, s
         obj = stream_result(out) if files else json.loads(out.decode("utf-8", "replace"))
     except ValueError:  # not the CLI's JSON at all: a broken call, not proof the backend is unavailable
         raise LLMError(explain((err or out).decode("utf-8", "replace")[:300] or "Claude Code 输出无法解析", "claude"))
+    log_usage(kind, "claude", model, usage_counts("claude", obj))
     if obj.get("is_error"):
         _fail(str(obj.get("result") or obj.get("terminal_reason") or "Claude Code 调用失败")[:300], "claude")
     structured = obj.get("structured_output")
@@ -397,7 +441,7 @@ async def codemaker_model_id(binary: str, model: str) -> str:
 
 
 async def _codemaker(binary: str, model: str, system_prompt: str, user_text: str, schema: dict, workdir: Path,
-                     timeout: int, files: list[Path] | None = None) -> dict:
+                     timeout: int, files: list[Path] | None = None, kind: str = "other") -> dict:
     model = await codemaker_model_id(binary, model)
     # The agent (system prompt, no tools) is defined in a codemaker.json of a fresh folder per call, so parallel
     # calls never share a prompt and nothing is left in a project folder. It replaces the default agent "build"
@@ -441,6 +485,10 @@ async def _codemaker(binary: str, model: str, system_prompt: str, user_text: str
                 texts.append(str((event.get("part") or {}).get("text") or ""))
             elif event.get("type") == "error":
                 errors.append(json.dumps(event.get("error"), ensure_ascii=False))
+            elif event.get("type") == "step_finish":
+                tokens = (event.get("part") or {}).get("tokens")
+                if isinstance(tokens, dict):
+                    log_usage(kind, "codemaker", model, usage_counts("codemaker", tokens))
         if errors:
             _fail(f"CodeMaker 调用失败：{errors[0][:300]}", "codemaker")
         if not texts:

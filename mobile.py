@@ -361,6 +361,7 @@ COMMANDS = {  # name -> (Chinese aliases, menu description)
     "status": (("状态",), "看现在的开关和待处理的来信"),
     "holiday": (("休假", "放假"), "把一段日期设成假期：/holiday 10-25 11-02"),
     "unholiday": (("取消休假", "取消放假"), "把一段日期从假期里去掉"),
+    "policy": (("策略", "手册更新"), "录入新策略，改谈判手册：/策略 联盟新用户改 8%"),
     "help": (("帮助",), "列出所有指令"),
 }
 MAX_HOLIDAY_DAYS = 60
@@ -375,7 +376,7 @@ def parse_command(text: str) -> tuple[str, str] | None:
     word = head.lstrip("/").split("@")[0]
     for name, (aliases, _desc) in COMMANDS.items():
         if word.lower() == name or word in aliases:
-            if name in ("holiday", "unholiday") or not rest.strip():
+            if name in ("holiday", "unholiday", "policy") or not rest.strip():
                 return name, rest.strip()
     return None
 

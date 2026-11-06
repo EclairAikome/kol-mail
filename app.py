@@ -18,6 +18,7 @@ import email.utils
 import glob
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -47,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))  # python -I leaves the
 import config  # noqa: E402
 import autoreport  # noqa: E402
 import accounts  # noqa: E402
+import attachdir  # noqa: E402
 import autoreply  # noqa: E402
 import chats  # noqa: E402
 import awake  # noqa: E402
@@ -60,6 +62,8 @@ import updater  # noqa: E402
 import outgoing  # noqa: E402
 import received  # noqa: E402
 import replyflow  # noqa: E402
+import episodes  # noqa: E402
+import playbook_learn  # noqa: E402
 import compliance  # noqa: E402
 import onboarding  # noqa: E402
 import tgsetup  # noqa: E402
@@ -606,23 +610,49 @@ class MailBridge:
         if not result.startswith("Successfully"):  # partial failures come back as text, not isError
             raise MailError(result[:300])
 
+    # Mailboxes whose server refuses a search by address: Alibaba Mail, where the company mailboxes moved on
+    # 2026-11-05, answers UID SEARCH TO/FROM with BAD "invalid command or parameters" (mcp-email-server reports
+    # provider_failure) and HEADER TO finds nothing. Shared by every bridge, learned once per run.
+    no_address_search: set[str] = set()
+    ADDRESS_SCAN_PAGES = 2  # pages of 100 newest mails looked through instead of the refused search
+
+    async def by_address(self, box: str, field: str, address: str, page_size: int) -> list[dict]:
+        """Metadata of the mails in box whose sender (field "from_address") or To/Cc (field "to_address") the
+        server matches with address, newest first. A server that refuses the search: the newest mails of the folder,
+        for the caller to check one by one as it does anyway (an IMAP address search is a substring match)."""
+        account = current_account.get()
+        if account not in MailBridge.no_address_search:
+            for attempt in range(2):
+                try:
+                    meta = await self.call("list_emails_metadata", mailbox=box, page_size=page_size,
+                                           **{field: address})
+                    return meta.get("emails", [])
+                except MailError as e:
+                    if "provider_failure" not in str(e):
+                        raise
+                    if attempt == 0:
+                        # Seen 2026-10-27: the server ends one IMAP session ("BYE Internal error occurred") and
+                        # mcp-email-server reports any such failure as this generic error; the next call works.
+                        log("address search retry", box, field)
+                        await asyncio.sleep(2)
+        found = []
+        for page in range(1, MailBridge.ADDRESS_SCAN_PAGES + 1):
+            emails = (await self.list_messages(box, page, 100)).get("emails", [])
+            found += emails
+            if len(emails) < 100:
+                break
+        if account not in MailBridge.no_address_search:  # the folder lists fine: it is the search the server refuses
+            log("server refuses address search, scanning the newest mails instead", account)
+            MailBridge.no_address_search.add(account)
+        return found
+
     async def sent_to(self, address: str, limit: int = 3) -> list[dict]:
         """Our earlier emails to exactly this address, alone or with others on To and Cc (IMAP TO search is a
         substring match, so each one is checked)."""
         if not sent_box():
             return []
-        try:
-            meta = await self.call("list_emails_metadata", mailbox=sent_box(), to_address=address, page_size=20)
-        except MailError as e:
-            if "provider_failure" not in str(e):
-                raise
-            # Seen 2026-10-27: the server ends one IMAP session ("BYE Internal error occurred") and mcp-email-server
-            # reports any such failure as this generic error; the next call works. A reply draft waits on this search,
-            # so one hiccup must not fail it: try once more, as the folder index and the search do.
-            log("sent search retry", address)
-            await asyncio.sleep(2)
-            meta = await self.call("list_emails_metadata", mailbox=sent_box(), to_address=address, page_size=20)
-        ids = [e["email_id"] for e in meta.get("emails", [])
+        emails = await self.by_address(sent_box(), "to_address", address, 20)
+        ids = [e["email_id"] for e in emails
                if address in [sender_address(r) for r in e.get("recipients") or []]][:limit]
         if not ids:
             return []
@@ -637,10 +667,10 @@ class MailBridge:
         found = []
         for box in thread_boxes():
             try:
-                meta = await self.call("list_emails_metadata", mailbox=box, from_address=address, page_size=10)
+                emails = await self.by_address(box, "from_address", address, 10)
             except MailError:
                 continue
-            for e in meta.get("emails", []):
+            for e in emails:
                 if sender_address(e.get("sender")) == address and e.get("message_id") != exclude_message_id:
                     found.append((e.get("date") or "", box, e["email_id"]))
         found.sort(reverse=True)
@@ -690,11 +720,21 @@ ClaudeError = llm.LLMError
 ClaudeUnavailable = llm.LLMUnavailable
 
 
+# What the next model call of this task is for (strategy, draft, rewrite, ...): llm_usage.jsonl counts tokens by it.
+LLM_KIND: contextvars.ContextVar[str] = contextvars.ContextVar("llm_kind", default="other")
+
+
+def call_kind(kind: str) -> None:
+    LLM_KIND.set(kind)
+
+
 async def run_claude(system_prompt: str, user_text: str, schema: dict, model: str, timeout: int,
                      files: list[Path] | None = None) -> dict:
     """model is a role (TRANSLATE_MODEL or DRAFT_MODEL); the backend and the actual model come from settings.
     files: checked images or PDFs the model is shown."""
-    return await llm.complete(AI, system_prompt, user_text, schema, model, timeout, files=files)
+    kind = LLM_KIND.get()
+    LLM_KIND.set("other")  # a call that does not say what it is for is counted as "other", never as the last one
+    return await llm.complete(AI, system_prompt, user_text, schema, model, timeout, files=files, kind=kind)
 
 
 TRANSLATE_SYSTEM = """You are a translation engine for a Chinese marketing manager who negotiates with overseas influencers (KOLs).
@@ -708,6 +748,7 @@ Rules:
 - Keep paragraph breaks.
 - language: the email's main language, written in Chinese (e.g. 西班牙语, 英语).
 - is_chinese: true if the new text is already mainly Chinese; then subject_zh and body_zh may be empty strings.
+- stance: how the sender answers what we last offered or asked: accept, counter, reject, question or other.
 """
 
 TRANSLATE_SCHEMA = {
@@ -717,6 +758,7 @@ TRANSLATE_SCHEMA = {
         "is_chinese": {"type": "boolean"},
         "subject_zh": {"type": "string"},
         "body_zh": {"type": "string"},
+        "stance": {"type": "string", "enum": list(episodes.STANCES)},  # not required: an older answer still counts
     },
     "required": ["language", "is_chinese", "subject_zh", "body_zh"],
 }
@@ -1417,8 +1459,14 @@ async def translate_job(message_id: str, mailbox: str, email_id: str):
     if msg.get("message_id") != message_id:
         raise MessageGone("邮件编号已变化，可能被移动过")
     text = f"Subject: {msg.get('subject', '')}\n\n{msg.get('body', '')}"
+    call_kind("translate")
     result = await run_claude(TRANSLATE_SYSTEM, text, TRANSLATE_SCHEMA, TRANSLATE_MODEL, timeout=180)
     digest = body_hash(msg.get("body", ""))
+    if result.get("stance"):  # how the other side answered our last reply: material for the playbook review
+        with contextlib.suppress(Exception):
+            when = parse_date(msg.get("date"))
+            LEARN.note_reply(sender_address(msg.get("sender", "")), str(result["stance"]),
+                             when.timestamp() if when else time.time(), ref=message_id)
     if result.get("is_chinese"):
         cache.put(message_id, status="skipped", language=result.get("language") or "中文",
                   subject_zh=None, body_zh=None, error=None, body_hash=digest)
@@ -1929,10 +1977,9 @@ async def sheet_note_sent(address: str, subject: str, summary: str, etype: str, 
     try:
         if not message_id:
             await asyncio.sleep(5)  # give the server a moment to file the copy
-            meta = await bg.call("list_emails_metadata", mailbox=sent_box(), to_address=address, page_size=5,
-                                 since=(sent_at - timedelta(minutes=2)).isoformat())
+            emails = await bg.by_address(sent_box(), "to_address", address, 5)  # newest first
             want = norm_subject(subject)
-            for e in meta.get("emails", []):
+            for e in emails:
                 if [sender_address(r) for r in e.get("recipients") or []] == [address] and norm_subject(e.get("subject") or "") == want:
                     message_id = e.get("message_id")
                     break
@@ -2518,8 +2565,38 @@ async def store_and_push_draft(case: dict, body: str, notes: str, approval: str,
                          case_id=case["id"], reply_to=reply_to)
         return
     cases.update(case["id"], **fields)
+    remember_case_version(case["id"], body)
     await tell_owner(mobile.draft_text(case, pairs["rows"], pairs["ok"], notes, approval, warnings),
                      mobile.draft_buttons(case["id"], pairs["ok"], mobile.version(body)), case["id"], reply_to)
+
+
+CASE_VERSIONS_MAX = 10
+
+
+def remember_case_version(case_id: int, body: str) -> None:
+    """Each AI version of a phone case's draft (kv draft_versions:{id}), the last one being what the AI wrote last."""
+    with contextlib.suppress(ValueError, TypeError):
+        versions = json.loads(cases.get_kv(f"draft_versions:{case_id}", "[]"))
+        versions = [v for v in versions if isinstance(v, str)] + [body]
+        cases.set_kv(f"draft_versions:{case_id}", json.dumps(versions[-CASE_VERSIONS_MAX:], ensure_ascii=False))
+
+
+def case_ai_body(case: dict) -> str:
+    with contextlib.suppress(ValueError, TypeError):
+        versions = json.loads(cases.get_kv(f"draft_versions:{case['id']}", "[]"))
+        if versions and isinstance(versions[-1], str):
+            return versions[-1]
+    return case.get("body") or ""
+
+
+def record_case_episode(case: dict, kol_text: str = "") -> None:
+    s = case.get("strategies") or {}
+    record_episode({"mode": "draft", "language": case.get("language") or ""}, channel=f"phone-{case['channel']}",
+                   address=case["peer"], sent=case["body"], zh=case.get("zh") or "", message_id=case.get("ref") or "",
+                   kol_text=kol_text, account=ACCOUNT, ai_body=case_ai_body(case),
+                   strategy={"options": s.get("options") or [], "recommended": s.get("recommended"),
+                             "chosen": case.get("chosen")},
+                   feedback=case_feedback(case["id"]), compliance_result={}, notes="")
 
 
 async def send_case(case: dict) -> tuple[str, str]:
@@ -2565,6 +2642,7 @@ async def _send_case(case: dict) -> tuple[str, str]:
         if not text.startswith("Message sent successfully"):
             return "uncertain", f"发送结果不确定：{text[:150]}"
         record_autoreply("Telegram·手机审批", case["who"] or case["peer"], case.get("language") or "-", "已发送", "")
+        record_case_episode(case)
         spawn(tg_resync(chat_id), "Telegram 私信同步")  # the approved reply reaches 私信 and 沟通记录
         return "sent", "已发送 ✅"
     try:
@@ -2595,6 +2673,7 @@ async def _send_case(case: dict) -> tuple[str, str]:
     sheet_guard("记录手机审批回信", sheet_after_send, kol, subject, "我方回信（手机审批）：" + gist(case["zh"] or case["body"]),
                 "", message_id)
     record_autoreply("邮件·手机审批", kol, case.get("language") or "-", "已发送", warning)
+    record_case_episode(case, own_words(msg.get("body") or "")[:playbook_learn.KOL_TEXT_MAX])
     return "sent", f"已发送 ✅ {warning}" if warning else "已发送 ✅ 副本在“已发送”里"
 
 
@@ -2646,6 +2725,9 @@ async def on_button(bot: mobile.Bot, q: dict):
     pressed = message.get("message_id")
     if parts[0] == "popo":
         await on_popo_button(bot, q, parts, pressed)
+        return
+    if parts[0] == "pb":
+        await on_playbook_button(bot, q, parts, pressed)
         return
     try:
         kind, case_id = parts[0], int(parts[1])
@@ -2811,6 +2893,9 @@ async def handle_update(bot: mobile.Bot, u: dict):
             await bot.send(int(chat["id"]), mobile.help_text())
             return
         command = mobile.parse_command(text)
+        if command and command[0] == "policy":  # 手册更新 from the phone: a model call, so not in owner_command
+            spawn(owner_policy(command[1], m.get("message_id")), "手册更新（手机）")
+            return
         if command:
             await bot.send(int(chat["id"]), owner_command(*command))
             return
@@ -2968,6 +3053,10 @@ def case_view(case: dict) -> dict:
             "has_draft": bool(case["body"]), "ref": case["ref"]}
 
 
+def case_view_with_ai(case: dict) -> dict:
+    return {**case_view(case), "ai_body": case_ai_body(case)}
+
+
 async def api_mobile(request: Request):
     cfg = load_autoreply_config()
     username = bot_state.get("username") or ""
@@ -3026,12 +3115,14 @@ async def api_mobile_case(request: Request):
     case = cases.for_ref(request.query_params.get("message_id", ""))
     if not case:
         return JSONResponse({"case": None})
-    view = case_view(case)
+    view = case_view_with_ai(case)  # ai_body: what the AI wrote last, so an edit at the office shows as one
     view["body"] = case["body"] or ""
     view["feedback"] = case_feedback(case["id"])  # the owner's words on the phone: a revision at the office keeps them
     s = case["strategies"] or {}
     if case["chosen"] is not None and 0 <= case["chosen"] < len(s.get("options", [])):
         view["strategy"] = s["options"][case["chosen"]]
+        view["offer"] = {"options": s.get("options") or [], "recommended": s.get("recommended"),
+                         "chosen": case["chosen"]}
     return JSONResponse({"case": view})
 
 
@@ -3210,7 +3301,16 @@ async def api_setup(request: Request):
         if not current and PLAYBOOK_TEMPLATE.exists():
             current = PLAYBOOK_TEMPLATE.read_text(encoding="utf-8")
         try:
-            write_playbook(onboarding.set_preferences(current, preferences))
+            async with playbook_lock:
+                sync_manual_edits()
+                current = read_playbook() or current  # what an archive or a review wrote while we waited
+                new = onboarding.set_preferences(current, preferences)
+                if new != current and LEARN.get("playbook_text"):
+                    change_playbook(new, source="manual", status="applied",
+                                    hunks=[{"section": "## 我的谈判方式", "why_zh": "我的谈判方式：有改动", "op": "manual"}])
+                else:
+                    write_playbook(new)
+                    remember_playbook(new, True)
         except OSError as e:
             return bad(f"谈判手册保存失败：{err_text(e)}", 500)
     try:
@@ -3228,6 +3328,1128 @@ async def api_setup(request: Request):
             return bad(f"签名和谈判方式已保存，但下班自动回复的开关没改成：{err_text(e)}", 500)
         log("setup: offhours_mode", mode)
     return JSONResponse({"ok": True})
+
+
+# ---------------------------------------------------------------- the playbook learning from its user (v0.9)
+# Every reply sent becomes an episode (episodes.py): the AI's last version, what went out, what the owner said. When
+# enough of them hold a correction and the drafts are idle, a review (at most once a day) asks the model for small
+# changes to the playbook text; playbook_learn.judge decides what is written at once (on a 14-day trial, undone with
+# one click), what waits for the owner's yes, and what is thrown away. 手册更新 turns one sentence of the owner into
+# changes at once, rules included (data/rules_overrides.yaml over rules/negotiation_rules.yaml). Every change of the
+# playbook, whoever made it, is recorded and shown once in a short notice (also on the owner's phone).
+
+LEARN = episodes.Store(DATA / "learning.sqlite3")
+PLAYBOOK_HISTORY = DATA / "playbook_history"
+RULES_OVERRIDES = DATA / "rules_overrides.yaml"
+CASE_ARCHIVE = DATA / "案例库_归档.md"
+SOP_SNAPSHOTS = DATA / "sop_snapshots"
+CHANGELOG = BASE / "CHANGELOG.md"
+compliance.OVERRIDES_FILE = RULES_OVERRIDES
+llm.USAGE_LOG = DATA / "llm_usage.jsonl"
+if not SETUP_DONE and not LEARN.get("seen_version"):  # a first install: nothing "new" to announce later
+    LEARN.put("seen_version", config.version())
+LEARN_IDLE = 15 * 60          # seconds without a draft request before a review may run
+LEARN_MIN = 3                 # new episodes with a correction needed for a review
+LEARN_TICK = 60
+LEARN_BATCH = 12              # episodes one review reads at most (about 1k tokens each, on a ~15k base)
+HISTORY_KEEP = 200            # old playbook versions kept
+HUMAN_SOURCES = ("update", "approve", "manual", "rollback", "revert", "archive", "expiry")
+learn_state = {"last_activity": 0.0, "running": ""}
+playbook_lock = asyncio.Lock()
+
+
+def note_activity() -> None:
+    """A draft was asked for: the review waits until the drafts have been idle for LEARN_IDLE."""
+    learn_state["last_activity"] = time.time()
+
+
+def learning_cfg() -> dict:
+    value = CFG.get("learning")
+    return value if isinstance(value, dict) else {}
+
+
+def text_sha(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:16]
+
+
+def playbook_now() -> str:
+    """The playbook as it is on disk ("" when there is none or it cannot be read)."""
+    try:
+        return read_playbook()
+    except PlaybookUnreadable:
+        return ""
+
+
+def save_history(text: str) -> str:
+    """A copy of this version in data/playbook_history; returns its file name ("" when there was nothing to keep)."""
+    if not text:
+        return ""
+    PLAYBOOK_HISTORY.mkdir(parents=True, exist_ok=True)
+    name = datetime.now().strftime("%Y%m%d-%H%M%S-") + text_sha(text)[:6] + ".md"
+    (PLAYBOOK_HISTORY / name).write_text(text, encoding="utf-8")
+    for old in sorted(PLAYBOOK_HISTORY.glob("*.md"))[:-HISTORY_KEEP]:
+        with contextlib.suppress(OSError):
+            old.unlink()
+    return name
+
+
+def remember_playbook(text: str, human: bool) -> None:
+    """The version we know of, so a hand edit in an editor shows as a change of its own; a change a person made
+    (or approved) is the new size baseline of the automatic changes."""
+    LEARN.put("playbook_text", text)
+    LEARN.put("playbook_sha", text_sha(text))
+    if human or not LEARN.get("baseline_chars"):
+        LEARN.put("baseline_chars", str(len(text)))
+
+
+def baseline_chars() -> int:
+    try:
+        return int(LEARN.get("baseline_chars") or 0)
+    except ValueError:
+        return 0
+
+
+def change_playbook(new: str, *, source: str, status: str, hunks: list[dict], note: str = "", trial: bool = False,
+                    meta: dict | None = None) -> int:
+    """Write a new version (the old one goes to the history first) and record the change. Call under playbook_lock."""
+    old = playbook_now()
+    backup = save_history(old)
+    write_playbook(new)
+    remember_playbook(new, source in HUMAN_SOURCES)
+    cid = LEARN.add_change(source, status, hunks, note=note, sha_before=text_sha(old), sha_after=text_sha(new),
+                           backup=backup, trial=trial, meta=meta)
+    log("playbook changed", source, status, f"{len(hunks)} hunk(s)", f"#{cid}")
+    notify_change(cid)
+    return cid
+
+
+def sync_manual_edits() -> int | None:
+    """The playbook changed on disk since we last wrote or saw it (edited by hand): record that as a change of its
+    own, so it is in the history and its notice shows once. The first look only remembers the version."""
+    text = playbook_now()
+    if not text:
+        return None
+    last = LEARN.get("playbook_text")
+    if not last:
+        remember_playbook(text, True)
+        return None
+    if text_sha(text) == LEARN.get("playbook_sha"):
+        return None
+    hunks = [{"section": "", "why_zh": line, "op": "manual"} for line in playbook_learn.manual_lines(last, text)]
+    backup = save_history(last)
+    remember_playbook(text, True)
+    cid = LEARN.add_change("manual", "applied", hunks, sha_before=text_sha(last), sha_after=text_sha(text),
+                           backup=backup)
+    log("playbook edited by hand", f"#{cid}")
+    notify_change(cid)
+    return cid
+
+
+def hunk_view(h: dict) -> dict:
+    return {k: h.get(k) for k in ("section", "op", "anchor", "new_text", "kind", "why_zh", "state", "reason",
+                                  "evidence_quote", "touches_rules", "evidence_episode_ids", "redline")}
+
+
+# ------------------------------------------------------------ the notice
+
+def changelog_lines(since: str, upto: str) -> list[str]:
+    """The lines of CHANGELOG.md for the versions after `since` up to `upto` ("## v0.9.0 ..." headings, "- " lines)."""
+    try:
+        text = CHANGELOG.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    out, take = [], False
+    for line in text.splitlines():
+        m = re.match(r"^##\s+v?(\d+\.\d+\.\d+)", line)
+        if m:
+            v = updater.parse_version(m.group(1))
+            take = bool(v and v <= (updater.parse_version(upto) or v)
+                        and (not since or v > (updater.parse_version(since) or (0, 0, 0))))
+            continue
+        if take and line.strip().startswith("- "):
+            out.append(line.strip()[2:].strip())
+    return out[:12]
+
+
+def version_notice() -> dict | None:
+    """What is new in this version of KOL Mail, once after an update. A first install only remembers its version."""
+    current, seen = config.version(), LEARN.get("seen_version")
+    if seen == current:
+        return None
+    if not seen and not SETUP_DONE:
+        LEARN.put("seen_version", current)
+        return None
+    lines = changelog_lines(seen, current)
+    return {"version": current, "title": f"KOL Mail 更新到了 v{current}", "lines": lines or ["修了一些问题，用起来和以前一样"]}
+
+
+def notice_for(changes: list[dict]) -> dict | None:
+    """One notice for every playbook change not seen yet, merged."""
+    if not changes:
+        return None
+    applied = [c for c in changes if c["status"] not in ("pending", "expired") and not c.get("alert")]
+    hunks = [h for c in applied for h in c["hunks"] if h.get("state", "apply") in ("apply", "accepted", "")]
+    pending = sum(len([h for h in c["hunks"] if h.get("state") == "pending"]) for c in changes if c["status"] == "pending")
+    expired = [h for c in changes if c["status"] == "expired" for h in c["hunks"]]
+    rules = [r for c in applied for r in (c.get("meta") or {}).get("rule_changes") or [] if r.get("state") == "accepted"]
+    sources = {c["source"] for c in applied}
+    days = [d for c in applied for d in (c.get("meta") or {}).get("days") or []]
+    alerts = [c["alert"] for c in changes if c.get("alert")]
+    if hunks:
+        title = playbook_learn.notice_title(len(hunks), sources.pop() if len(sources) == 1 else "mixed", days)
+    elif alerts and not pending and not expired:
+        title = f"有 {len(alerts)} 处自动修改可能让草稿变差了"
+    elif rules:
+        title = f"硬规则更新了 {len(rules)} 条（手册更新）"
+    elif pending:
+        title = f"手册有 {pending} 处修改建议待您批"
+    else:
+        title = f"手册里有 {len(expired)} 条到期了"
+    lines = playbook_learn.notice_lines(hunks) + [playbook_learn.clip("硬规则：" + (r.get("why_zh") or r.get("rule_id")))
+                                                  for r in rules]
+    if pending and hunks:
+        lines.append(f"另有 {pending} 处待您批")
+    lines += [playbook_learn.clip(f"已过期：{h.get('anchor', '')}") for h in expired[:3]]
+    return {"ids": [c["id"] for c in changes], "title": title, "lines": lines[:10], "alerts": alerts}
+
+
+def notify_change(change_id: int) -> None:
+    """The phone notice of a change, sent in the background (nothing to do outside the event loop, e.g. in a test)."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    spawn(push_change_notice(change_id), "手册更新通知")
+
+
+async def push_change_notice(change_id: int):
+    """The same short notice on the owner's phone (only where the phone is paired)."""
+    if not owner_chat():
+        return
+    c = LEARN.change(change_id)
+    if not c:
+        return
+    n = notice_for([c])
+    if not n:
+        return
+    tail = "\n到电脑上 设置 → 手册变更记录 查看或撤销" if c["status"] != "pending" or c["source"] != "update" else ""
+    await tell_owner("📘 " + n["title"] + "\n" + "\n".join(n["lines"]) + tail)
+
+
+async def api_playbook_notice(request: Request):
+    """GET: the notice to show now (playbook changes not seen yet, and what is new in this version), or nothing.
+    POST {ids, version}: seen."""
+    if request.method == "POST":
+        body = await request.json()
+        ids = [int(i) for i in body.get("ids") or [] if str(i).isdigit()]
+        LEARN.mark_seen(ids)
+        if body.get("version") == config.version():
+            LEARN.put("seen_version", config.version())
+        return JSONResponse({"ok": True})
+    sync_manual_edits()
+    return JSONResponse({"playbook": notice_for(LEARN.unseen()), "version": version_notice()})
+
+
+# ------------------------------------------------------------ the change log page
+
+def change_view(c: dict, current: str) -> dict:
+    revertible = c["status"] in ("trial", "kept", "applied") and c["source"] not in ("manual", "revert", "rollback") \
+        and bool(c["hunks"]) and all(h.get("applied") for h in c["hunks"])
+    if revertible:
+        text = current
+        for h in reversed(c["hunks"]):
+            text = playbook_learn.revert_hunk(text, h["applied"]) if text is not None else None
+        revertible = text is not None
+    return {"id": c["id"], "at": c["at"], "source": c["source"],
+            "source_zh": playbook_learn.SOURCE_ZH.get(c["source"], c["source"]), "status": c["status"],
+            "note": c.get("note") or "", "alert": c.get("alert") or "", "trial_until": c.get("trial_until"),
+            "hunks": [hunk_view(h) for h in c["hunks"]], "revertible": revertible,
+            "rollback": bool(c.get("backup") and (PLAYBOOK_HISTORY / c["backup"]).exists()),
+            "rule_changes": (c.get("meta") or {}).get("rule_changes") or []}
+
+
+async def api_playbook_changes(request: Request):
+    sync_manual_edits()
+    current = playbook_now()
+    rows = [change_view(c, current) for c in LEARN.changes(limit=150)]
+    groups = {"trial": [r for r in rows if r["status"] == "trial"],
+              "pending": [r for r in rows if r["status"] == "pending"],
+              "expired": [r for r in rows if r["status"] == "expired"],
+              "history": [r for r in rows if r["status"] not in ("trial", "pending", "expired")]}
+    groups["trial"].sort(key=lambda r: not r["alert"])  # a change the guard flagged comes first
+    return JSONResponse({**groups, "overrides": overrides_view(), "contrast": LEARN.contrast_count(),
+                         "running": learn_state["running"],
+                         "last_review": LEARN.get("last_review"), "overrides_error": compliance.overrides_problem(),
+                         "chars": len(current), "baseline": baseline_chars(),
+                         "sop_docs": len(learning_cfg().get("sop_docs") or []), "popo_cli": bool(popo_cli())})
+
+
+def overrides_view() -> list[str]:
+    """The hard rules the owner changed through 手册更新, one line each (for the change log page)."""
+    import yaml
+    try:
+        data = yaml.safe_load(RULES_OVERRIDES.read_text(encoding="utf-8")) if RULES_OVERRIDES.exists() else None
+    except (OSError, yaml.YAMLError):
+        return ["rules_overrides.yaml 读不了"]
+    if not isinstance(data, dict):
+        return []
+    lines = []
+    for rid, fields in (data.get("rules") or {}).items():
+        for k, v in (fields or {}).items() if isinstance(fields, dict) else []:
+            lines.append(f"{rid}：{'已关闭检查' if k == 'disabled' and v is True else f'{k} = {v}'}")
+    lines += [f"词表 {name} = {pattern}" for name, pattern in (data.get("vocab") or {}).items()]
+    return lines
+
+
+async def api_playbook_overrides_reset(request: Request):
+    """All hard rules back as shipped (rules/negotiation_rules.yaml): the owner's overrides are kept in the change
+    log, so this can be looked up later."""
+    async with playbook_lock:
+        before = RULES_OVERRIDES.read_text(encoding="utf-8") if RULES_OVERRIDES.exists() else ""
+        if not before:
+            return bad("现在没有改过的硬规则")
+        restore_overrides("")
+        cid = LEARN.add_change("update", "applied", [{"section": "", "why_zh": "硬规则恢复默认", "op": "rules"}],
+                               meta={"overrides_before": before})
+        notify_change(cid)
+    return JSONResponse({"ok": True})
+
+
+def revert_text(current: str, c: dict) -> str | None:
+    text = current
+    for h in reversed(c["hunks"]):
+        if text is None or not h.get("applied"):
+            return None
+        text = playbook_learn.revert_hunk(text, h["applied"])
+    return text
+
+
+def restore_overrides(text: str | None) -> None:
+    """Put data/rules_overrides.yaml back as it was before a change (None or "": no overrides)."""
+    if text:
+        write_overrides_text(text)
+    else:
+        with contextlib.suppress(FileNotFoundError):
+            RULES_OVERRIDES.unlink()
+
+
+def write_overrides_text(text: str) -> None:
+    RULES_OVERRIDES.parent.mkdir(parents=True, exist_ok=True)
+    tmp = RULES_OVERRIDES.with_name(RULES_OVERRIDES.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, RULES_OVERRIDES)
+
+
+async def api_playbook_revert(request: Request):
+    """Undo one change: each of its hunks is put back as long as its spot is still there; otherwise the page offers
+    the rollback of the whole version instead."""
+    body = await request.json()
+    async with playbook_lock:
+        sync_manual_edits()
+        c = LEARN.change(int(body.get("id") or 0))
+        if not c or c["status"] not in ("trial", "kept", "applied"):
+            return bad("这条改动不能撤销")
+        text = revert_text(playbook_now(), c)
+        if text is None:
+            return JSONResponse({"error": "这处改动之后手册又改过，没法单独撤销；可以整版回滚到它之前的版本",
+                                 "conflict": True}, status_code=409)
+        meta = c.get("meta") or {}
+        if "overrides_before" in meta:
+            later = [x for x in LEARN.changes(("trial", "kept", "applied"), limit=500)
+                     if x["id"] > c["id"] and "overrides_before" in (x.get("meta") or {})]
+            if later:
+                return JSONResponse({"error": "这次之后硬规则又改过，单独撤销会把后面的也抹掉；可以整版回滚到它之前",
+                                     "conflict": True}, status_code=409)
+            restore_overrides(meta["overrides_before"])
+        hunks = [{"section": h.get("section"), "why_zh": "撤销：" + (h.get("why_zh") or ""), "op": "revert"}
+                 for h in c["hunks"]]
+        LEARN.update_change(c["id"], status="reverted")
+        cid = change_playbook(text, source="revert", status="applied", hunks=hunks, meta={"of": c["id"]})
+    return JSONResponse({"ok": True, "id": cid})
+
+
+async def api_playbook_rollback(request: Request):
+    """Back to the version before one change: everything changed since goes too (the current version is kept in
+    the history, so this can itself be rolled back)."""
+    body = await request.json()
+    async with playbook_lock:
+        sync_manual_edits()
+        c = LEARN.change(int(body.get("id") or 0))
+        if not c or not c.get("backup"):
+            return bad("这条改动没有留存旧版本")
+        try:
+            old = (PLAYBOOK_HISTORY / c["backup"]).read_text(encoding="utf-8")
+        except OSError:
+            return bad("旧版本的文件找不到了")
+        later = [x for x in LEARN.changes(limit=500) if x["id"] >= c["id"] and x["status"] in ("trial", "kept", "applied")]
+        with_rules = sorted((x for x in later if "overrides_before" in (x.get("meta") or {})), key=lambda x: x["id"])
+        if with_rules:
+            restore_overrides(with_rules[0]["meta"]["overrides_before"])
+        for x in later:
+            LEARN.update_change(x["id"], status="reverted")
+        cid = change_playbook(old, source="rollback", status="applied",
+                              hunks=[{"section": "", "why_zh": f"整版回滚到第 {c['id']} 条改动之前", "op": "rollback"}],
+                              meta={"to": c["id"]})
+    return JSONResponse({"ok": True, "id": cid})
+
+
+async def api_playbook_decide(request: Request):
+    """The owner's yes or no to waiting hunks (index) or rule changes (rule) of one pending change; all=true for
+    every one still open. A yes is written at once, as a change of its own."""
+    body = await request.json()
+    accept = body.get("accept") is True
+    async with playbook_lock:
+        sync_manual_edits()
+        c = LEARN.change(int(body.get("id") or 0))
+        if not c or c["status"] != "pending":
+            return bad("这条已经处理过了")
+        result = decide_pending(c, accept, body)
+    if isinstance(result, str):
+        return bad(result)
+    return JSONResponse({"ok": True, **result})
+
+
+def decide_pending(c: dict, accept: bool, body: dict) -> dict | str:
+    """Apply (or drop) the chosen items of a pending change. Returns what was done, or an error for the owner."""
+    hunks, meta = c["hunks"], c.get("meta") or {}
+    rules = meta.get("rule_changes") or []
+    everything = body.get("all") is True
+    # "全部接受" never takes a red-line item along: those are said yes to one by one (a "no" to all is fine)
+    def bulk(item):
+        return item.get("state") == "pending" and not (accept and item.get("redline"))
+    picked = [i for i, h in enumerate(hunks) if bulk(h)] if everything else \
+        ([int(body["index"])] if str(body.get("index", "")).isdigit() else [])
+    picked_rules = [i for i, r in enumerate(rules) if bulk(r)] if everything else \
+        ([int(body["rule"])] if str(body.get("rule", "")).isdigit() else [])
+    if not picked and not picked_rules:
+        return "没有要处理的条目"
+    applied, problems = [], []
+    if accept:
+        text = playbook_now()
+        for i in picked:
+            if not (0 <= i < len(hunks)) or hunks[i].get("state") != "pending":
+                continue
+            h = hunks[i]
+            problem = playbook_learn.shape_problem(text, h, allow_protected=c["source"] == "update")
+            if problem:
+                hunks[i] = {**h, "state": "rejected", "reason": problem}
+                problems.append(f"{h.get('section') or ''}：{problem}")
+                continue
+            after, record = playbook_learn.apply_hunk(text, h)
+            problem = playbook_learn.structure_problem(text, after, allow_protected=c["source"] == "update")
+            if problem:
+                hunks[i] = {**h, "state": "rejected", "reason": problem}
+                problems.append(f"{h.get('section') or ''}：{problem}")
+                continue
+            text = after
+            hunks[i] = {**h, "state": "accepted", "reason": ""}
+            applied.append({**h, "state": "accepted", "reason": "", "applied": record})
+        new_meta = {"from": c["id"], "days": meta.get("days") or []}
+        accepted_rules = [rules[i] for i in picked_rules if 0 <= i < len(rules) and rules[i].get("state") == "pending"]
+        if accepted_rules:
+            before = RULES_OVERRIDES.read_text(encoding="utf-8") if RULES_OVERRIDES.exists() else ""
+            try:
+                write_overrides_text(merged_overrides(before, accepted_rules))
+            except (OSError, ValueError, compliance.RulesError) as e:
+                return f"硬规则没改成：{e}"
+            new_meta.update(overrides_before=before, rule_changes=[{**r, "state": "accepted"} for r in accepted_rules])
+            for i in picked_rules:
+                rules[i] = {**rules[i], "state": "accepted"}
+        if applied:
+            change_playbook(text, source="approve" if c["source"] != "update" else "update", status="applied",
+                            hunks=applied, note=c.get("note") or "", meta=new_meta)
+        elif accepted_rules:
+            cid = LEARN.add_change("update", "applied", [], note=c.get("note") or "", meta=new_meta)
+            notify_change(cid)
+    else:
+        for i in picked:
+            if 0 <= i < len(hunks) and hunks[i].get("state") == "pending":
+                hunks[i] = {**hunks[i], "state": "rejected", "reason": "您选了不要"}
+        for i in picked_rules:
+            if 0 <= i < len(rules) and rules[i].get("state") == "pending":
+                rules[i] = {**rules[i], "state": "rejected"}
+    open_left = any(h.get("state") == "pending" for h in hunks) or any(r.get("state") == "pending" for r in rules)
+    LEARN.update_change(c["id"], hunks=hunks, meta={**meta, "rule_changes": rules},
+                        status="pending" if open_left else "done", seen_at=time.time())
+    return {"applied": len(applied), "problems": problems}
+
+
+# ------------------------------------------------------------ 手册更新: the owner's one sentence
+
+RULE_FIELDS = {"cap", "title_zh", "fix", "disabled", "vocab"}
+# The vocabulary entries 手册更新 may change: the ones its model is shown (rules_yaml_brief). negation, refusal and
+# the like decide what counts as turning something down, and loosening them would switch red lines off unseen.
+RULE_VOCAB = ("default_cps", "pushback", "profit")
+
+
+def merged_overrides(current_text: str, changes: list[dict]) -> str:
+    """data/rules_overrides.yaml with these rule changes added; checked against the rule file before it is used, so
+    an override that would break the check is refused here and never written."""
+    import yaml
+    data = yaml.safe_load(current_text) if current_text.strip() else {}
+    data = data if isinstance(data, dict) else {}
+    rules, vocab = dict(data.get("rules") or {}), dict(data.get("vocab") or {})
+    for ch in changes:
+        if ch["field"] == "vocab":
+            vocab[ch["vocab_name"]] = ch["new"]
+        elif ch["field"] == "cap":
+            rules.setdefault(ch["rule_id"], {})["cap"] = float(ch["new"])
+        elif ch["field"] == "disabled":
+            rules.setdefault(ch["rule_id"], {})["disabled"] = str(ch["new"]).strip().lower() == "true"
+        else:
+            rules.setdefault(ch["rule_id"], {})[ch["field"]] = ch["new"]
+    out = {k: v for k, v in (("rules", rules), ("vocab", vocab)) if v}
+    raw = yaml.safe_load(compliance.RULES_FILE.read_text(encoding="utf-8"))
+    compliance.parse(compliance.overlay(raw, out))  # raises RulesError for a change the check could not use
+    header = "# 您经“手册更新”改过的硬规则，叠在 rules/negotiation_rules.yaml 上。更新 KOL Mail 不会覆盖这个文件。\n"
+    return header + yaml.safe_dump(out, allow_unicode=True, sort_keys=False)
+
+
+def clean_rule_changes(raw) -> list[dict]:
+    """The model's rule changes that name a real rule (or vocabulary entry) and a field it may change, each with the
+    owner-facing line 这条会改动硬规则 X（原：…，新：…）."""
+    try:
+        rules = {r["id"]: r for r in compliance.load().rules}
+        vocab = compliance.load().vocab
+    except compliance.RulesError:
+        return []
+    out = []
+    for ch in raw if isinstance(raw, list) else []:
+        if not isinstance(ch, dict) or ch.get("field") not in RULE_FIELDS:
+            continue
+        rid, field = str(ch.get("rule_id") or ""), ch["field"]
+        if field == "vocab":
+            name = str(ch.get("vocab_name") or "")
+            if name not in vocab or name not in RULE_VOCAB:
+                continue
+            old = vocab[name].pattern
+        else:
+            if rid not in rules:
+                continue
+            name = ""
+            old = str(rules[rid].get(field, "")) if field != "disabled" else "false"
+        new = str(ch.get("new") or "").strip()
+        if not new or new == old:
+            continue
+        if field == "cap":
+            try:
+                if not (math.isfinite(float(new)) and 0 < float(new) <= 100):
+                    continue
+            except ValueError:
+                continue
+        if field == "disabled" and new.lower() not in ("true", "false"):
+            continue
+        title = rules.get(rid, {}).get("title_zh") or name or rid
+        redline = rid in playbook_learn.REDLINE_RULES or field == "disabled"
+        if field == "disabled" and new.lower() == "true":
+            card = f"⚠ 这条会关闭硬规则检查“{title}”：以后草稿违反它也不会被拦下"
+        elif redline:
+            card = f"⚠ 这条会改动红线规则“{title}”（{field}）。原：{old} 新：{new}"
+        else:
+            card = f"这条会改动硬规则“{title}”（原：{playbook_learn.clip(old, 60)}，新：{playbook_learn.clip(new, 60)}）"
+        out.append({"rule_id": rid, "field": field, "vocab_name": name, "old": old[:400], "new": new[:2000],
+                    "why_zh": " ".join(str(ch.get("why_zh") or "").split())[:120], "state": "pending",
+                    "redline": redline, "card_zh": card})
+    try:
+        merged_overrides(RULES_OVERRIDES.read_text(encoding="utf-8") if RULES_OVERRIDES.exists() else "", out)
+    except (OSError, ValueError, compliance.RulesError) as e:
+        log("rule changes refused", err_text(e))
+        return [{**ch, "state": "rejected", "card_zh": ch["card_zh"] + f"（这条规则改法检查没通过：{e}）"} for ch in out]
+    return out
+
+
+def rules_yaml_brief() -> str:
+    """The hard rules as the 手册更新 model sees them: id, title, fix, and the cap or vocabulary they use."""
+    try:
+        rules = compliance.load()
+    except compliance.RulesError:
+        return ""
+    lines = []
+    for r in rules.rules:
+        lines.append(f"- id: {r['id']}\n  title_zh: {r['title_zh']}" + (f"\n  cap: {r['cap']}" if "cap" in r else "")
+                     + (f"\n  fix: {' '.join(str(r.get('fix') or '').split())}" if r.get("fix") else ""))
+    lines.append("vocab:\n" + "\n".join(f"  {k}: '{v.pattern}'" for k, v in rules.vocab.items()
+                                          if k in ("default_cps", "pushback", "profit")))
+    return "\n".join(lines)
+
+
+def learn_role() -> str:
+    role = str(learning_cfg().get("model") or DRAFT_MODEL)
+    return role if role in llm.ROLES else DRAFT_MODEL
+
+
+async def learn_call(system: str, user: str, schema: dict, kind: str) -> dict:
+    """One call of the learning tasks: the draft tier, or the model settings.json names under learning.model."""
+    call_kind(kind)
+    role = str(learning_cfg().get("model") or "")
+    if role and role not in llm.ROLES:  # a model id of its own
+        settings = llm.Settings(backend=AI.backend, models={DRAFT_MODEL: role}, claude_bin=AI.claude_bin,
+                                codemaker_bin=AI.codemaker_bin, workdir=AI.workdir)
+        return await llm.complete(settings, system, user, schema, DRAFT_MODEL, 600, kind=kind)
+    return await run_claude(system, user, schema, learn_role(), timeout=600)
+
+
+async def propose_update(says: str) -> int:
+    """The owner's sentence turned into a pending change (hunks over the whole playbook, rule changes): its id."""
+    playbook = playbook_now()
+    if not playbook:
+        raise ValueError("还没有谈判手册")
+    boundary = secrets.token_hex(8)
+    system = replyflow.UPDATE_SYSTEM.replace("{owner}", OWNER).replace("{boundary}", boundary)
+    user = "\n\n".join([section(boundary, "OWNER_SAYS", says), section(boundary, "TODAY", datetime.now().date().isoformat()),
+                        section(boundary, "PLAYBOOK", playbook), section(boundary, "HARD_RULES", rules_yaml_brief())])
+    result = await learn_call(system, user, replyflow.UPDATE_SCHEMA, "update")
+    hunks = playbook_learn.clean_hunks(result.get("hunks"), limit=12)
+    judged = playbook_learn.judge(playbook, hunks, source="update", baseline=baseline_chars(), allow_protected=True)
+    for h in judged:  # nothing is written before the owner says yes on the card
+        if h["state"] == "apply":
+            h.pop("applied", None)
+            h["state"] = "pending"
+            h["redline"] = (playbook_learn.is_protected(playbook_learn.hunk_section(playbook, h))
+                            or playbook_learn.touches_redline({**h, "touches_rules": []}, playbook, figures=False))
+            if h["redline"]:  # the owner's own numbers are what they asked for: only red-line subjects are marked
+                h["reason"] = "⚠ 改到红线或受保护的节，请单独确认"
+    rule_changes = clean_rule_changes(result.get("rule_changes"))
+    if not any(h["state"] == "pending" for h in judged) and not any(r["state"] == "pending" for r in rule_changes):
+        raise ValueError("AI 没找到手册里要改的地方" + (f"：{result.get('summary_zh')}" if result.get("summary_zh") else ""))
+    return LEARN.add_change("update", "pending", judged, note=says, seen=True,
+                            meta={"rule_changes": rule_changes, "summary_zh": str(result.get("summary_zh") or "")[:300]})
+
+
+async def api_playbook_update(request: Request):
+    """手册更新: the owner's sentence -> a confirmation card (nothing is written yet)."""
+    body = await request.json()
+    says = strip_hidden(str(body.get("text") or "")).strip()
+    if not says:
+        return bad("先写一句：这次要改什么")
+    if len(says) > 2000:
+        return bad("一次写短一点（2000 字以内）")
+    try:
+        with feed.working("thinking"):
+            cid = await propose_update(says)
+    except ValueError as e:
+        return bad(str(e))
+    except ClaudeError as e:
+        return reply_error(e)
+    return JSONResponse({"ok": True, "change": change_view(LEARN.change(cid), playbook_now())})
+
+
+# ------------------------------------------------------------ the review
+
+async def review_playbook(manual: bool = False) -> dict:
+    """One review of the episodes with a correction not reviewed yet. No such episode: no model call at all."""
+    batch = LEARN.review_batch(LEARN_BATCH)
+    if not batch:
+        return {"applied": 0, "pending": 0, "rejected": 0, "note": "没有新的可以学习的修改"}
+    if learn_state["running"]:
+        return {"applied": 0, "pending": 0, "rejected": 0, "note": "复盘正在进行"}
+    learn_state["running"] = "review"
+    try:
+        playbook = playbook_now()
+        if not playbook:
+            return {"applied": 0, "pending": 0, "rejected": 0, "note": "还没有谈判手册"}
+        boundary = secrets.token_hex(8)
+        pb_part, ep_part = playbook_learn.review_input(playbook, batch, lambda name, text: section(boundary, name, text))
+        user = "\n\n".join([pb_part, section(boundary, "HARD_RULES", hard_rules()), ep_part])
+        system = replyflow.LEARN_SYSTEM.replace("{owner}", OWNER).replace("{boundary}", boundary)
+        LEARN.put("last_review", datetime.now().date().isoformat())  # tried today, whatever happens next
+        result = await learn_call(system, user, replyflow.LEARN_SCHEMA, "learn")
+        LEARN.mark_used([ep["id"] for ep in batch])
+        # replies that teach nothing are put aside too, so a long quiet spell never hides older ones
+        LEARN.mark_used([ep["id"] for ep in LEARN.episodes(unused=True, limit=2000)
+                         if not (playbook_learn.learnable(ep) and playbook_learn.has_contrast(ep))])
+        hunks = playbook_learn.clean_hunks(result.get("hunks"))
+        by_id = {ep["id"]: ep for ep in batch}
+        async with playbook_lock:
+            sync_manual_edits()
+            playbook = playbook_now()
+            judged = playbook_learn.judge(playbook, hunks, source="auto", baseline=baseline_chars(), episodes=by_id)
+            for h in judged:
+                h["days"] = sorted({by_id[i]["day"] for i in h.get("evidence_episode_ids") or [] if i in by_id})
+            applied = [h for h in judged if h["state"] == "apply"]
+            pending = [h for h in judged if h["state"] == "pending"]
+            rejected = [h for h in judged if h["state"] == "rejected"]
+            if applied:
+                new = playbook_learn.apply_all(playbook, applied)
+                change_playbook(new, source="auto", status="trial", hunks=applied, trial=True,
+                                meta={"days": sorted({d for h in applied for d in h["days"]}),
+                                      "episodes": [ep["id"] for ep in batch]})
+            if pending:
+                over = any("体积预算" in h.get("reason", "") for h in pending)
+                cid = LEARN.add_change("auto", "pending", pending, meta={
+                    "days": sorted({d for h in pending for d in h["days"]}), "archive_hint": over})
+                notify_change(cid)
+            if rejected:
+                log("review hunks thrown away", "; ".join(f"{h.get('section')}: {h['reason']}" for h in rejected))
+        return {"applied": len(applied), "pending": len(pending), "rejected": len(rejected), "note": ""}
+    finally:
+        learn_state["running"] = ""
+
+
+async def api_playbook_review(request: Request):
+    """现在复盘: the review at once, whatever the count and the time of day (still no call without corrections)."""
+    try:
+        with feed.working("thinking"):
+            result = await review_playbook(manual=True)
+    except ClaudeError as e:
+        return reply_error(e)
+    return JSONResponse({"ok": True, **result})
+
+
+def append_archive(rows: list[str]) -> None:
+    with open(CASE_ARCHIVE, "a", encoding="utf-8") as f:
+        f.write(f"\n<!-- {datetime.now():%Y-%m-%d %H:%M} 从手册移来 -->\n" + "\n".join(rows) + "\n")
+
+
+async def api_playbook_archive(request: Request):
+    """Move the oldest rows of the case library to data/案例库_归档.md, which no prompt reads."""
+    body = await request.json()
+    try:
+        n = max(1, min(50, int(body.get("rows") or 5)))
+    except (TypeError, ValueError):
+        return bad("参数不对")
+    async with playbook_lock:
+        sync_manual_edits()
+        text, moved = playbook_learn.archive_cases(playbook_now(), n)
+        if not moved:
+            return bad("案例库里没有可以归档的行")
+        await asyncio.to_thread(append_archive, moved)
+        cid = change_playbook(text, source="archive", status="applied",
+                              hunks=[{"section": "案例库", "why_zh": f"{len(moved)} 条旧案例移到归档", "op": "archive"}])
+    return JSONResponse({"ok": True, "moved": len(moved), "id": cid})
+
+
+async def api_playbook_expired(request: Request):
+    """A dated line ran out: delete it, restore what the change that wrote it replaced, or keep it."""
+    body = await request.json()
+    action = body.get("action")
+    async with playbook_lock:
+        sync_manual_edits()
+        c = LEARN.change(int(body.get("id") or 0))
+        if not c or c["status"] != "expired" or action not in ("delete", "restore", "keep"):
+            return bad("这条已经处理过了")
+        line = (c["hunks"] or [{}])[0].get("anchor", "")
+        if action == "keep":
+            LEARN.update_change(c["id"], status="done", seen_at=time.time())
+            return JSONResponse({"ok": True})
+        if action == "restore":
+            origin = LEARN.change(int((c.get("meta") or {}).get("from") or 0))
+            text = revert_text(playbook_now(), origin) if origin else None
+            if text is None:
+                return bad("找不到写进这一行的那次改动（或之后又改过），只能删掉这一行或手动改")
+            LEARN.update_change(origin["id"], status="reverted")
+            hunks = [{"section": c["hunks"][0].get("section"), "why_zh": "到期，恢复原文", "op": "revert"}]
+        else:
+            text, _ = playbook_learn.apply_hunk(playbook_now(), {"op": "delete", "anchor": line, "new_text": ""}) \
+                if playbook_learn.anchor_count(playbook_now(), line) == 1 else (None, None)
+            if text is None:
+                return bad("手册里找不到这一行了（可能已经改过）")
+            hunks = [{"section": c["hunks"][0].get("section"), "why_zh": "到期，删掉这一行", "op": "delete"}]
+        change_playbook(text, source="expiry", status="applied", hunks=hunks, meta={"of": c["id"]})
+        LEARN.update_change(c["id"], status="done", seen_at=time.time())
+    return JSONResponse({"ok": True})
+
+
+# ------------------------------------------------------------ results, guard, dated lines, the weekly card
+
+REDLINE_REFUSAL = re.compile(
+    r"(prepay|prepayment|upfront|up-front|deposit|advance payment|before (the )?(video|stream|post|publication)|"
+    r"bank transfer|wire transfer|paypal|предоплат|аванс|anticipo|adelantado|transferencia bancaria|virement)",
+    re.IGNORECASE)
+
+
+def refuses_redline(text: str) -> bool:
+    """Our reply turns down a red-line ask (prepayment, bank transfer, ...): how the negotiation ends then says
+    nothing about the way of negotiating, so it is never learned from (else the lesson would be 'loosen the red
+    line to close')."""
+    try:
+        negation = compliance.load().vocab.get("negation")
+    except compliance.RulesError:
+        negation = None
+    for s in playbook_learn.sentences(text or ""):
+        if REDLINE_REFUSAL.search(s) and (negation is None or negation.search(s)):
+            return True
+    return False
+
+
+def deal_addresses() -> set[str]:
+    """Everyone in a 成交 folder (deal_boxes) of the primary mailbox, from the saved folder indexes."""
+    found = set()
+    for box in deal_boxes():
+        for meta in saved_index(box):
+            for raw in [meta.get("sender"), *(meta.get("recipients") or [])]:
+                a = sender_address(str(raw or ""))
+                if a:
+                    found.add(a)
+    return found
+
+
+async def sheet_outcomes() -> dict[str, str]:
+    """email -> 已谈成 / 已婉拒 from the 阶段 column of the owner's KOL总表 (only that sheet has it)."""
+    if SHEET_MODE != "legacy" or not sheet_enabled():
+        return {}
+    try:
+        rows = await sheet_list("邮箱,阶段")
+    except Exception as e:  # noqa: BLE001  a result source that is not there is only skipped
+        log("sheet stages unreadable", err_text(e))
+        return {}
+    out = {}
+    for row in rows:
+        stage = str(row.get("阶段") or "").strip()
+        if stage in ("已谈成", "已婉拒"):
+            for a in sheet_emails(row.get("邮箱")):
+                out[a] = stage
+    return out
+
+
+async def collect_outcomes() -> int:
+    """Results for the latest episode to each person, by code only: the KOL总表 stage, a 成交 folder, a week of
+    silence. A reply that refused a red line gets no result."""
+    n = 0
+    opened = LEARN.open_outcomes()
+    if not opened:
+        return 0
+    deals = await asyncio.to_thread(deal_addresses)
+    stages = await sheet_outcomes()
+    for ep in opened:
+        if refuses_redline(ep.get("sent_body") or ""):
+            LEARN.set_outcome(ep["id"], "（这封里有红线拒绝句，结果不归因给打法）", "redline")
+        elif stages.get(ep["address"]):
+            LEARN.set_outcome(ep["id"], stages[ep["address"]], "sheet")
+        elif ep["address"] in deals:
+            LEARN.set_outcome(ep["id"], "已谈成（在成交文件夹里）", "deal_box")
+        else:
+            continue
+        n += 1
+    return n + LEARN.mark_silent()
+
+
+GUARD_MIN = 3        # drafts on each side of a change before the guard compares them
+GUARD_RISE = 0.5     # more automatic rewrites per draft than before: the change is flagged
+
+
+def guard_changes() -> list[int]:
+    """An automatic change after which the drafts need clearly more compliance rewrites (or a rule fires much more
+    often) is flagged at the top of the change log, with the hint to undo it."""
+    flagged = []
+    for c in LEARN.changes(("trial", "kept"), limit=30):
+        if c["source"] != "auto" or c.get("alert") or not c.get("sha_before") or not c.get("sha_after"):
+            continue
+        n0, mean0, rates0 = LEARN.rule_stats(c["sha_before"])
+        n1, mean1, rates1 = LEARN.rule_stats(c["sha_after"])
+        if n0 < GUARD_MIN or n1 < GUARD_MIN:
+            continue
+        rising = [r for r, v in rates1.items() if v - rates0.get(r, 0.0) >= 0.3]
+        if mean1 - mean0 >= GUARD_RISE or rising:
+            why = f"这次自动修改之后，每封草稿的合规改写从 {mean0:.1f} 次升到 {mean1:.1f} 次" + \
+                (f"，常被拦的规则：{'、'.join(rising[:3])}" if rising else "") + "，建议撤销"
+            LEARN.update_change(c["id"], alert=why, seen_at=None)
+            flagged.append(c["id"])
+    return flagged
+
+
+def expiry_scan(today) -> list[int]:
+    """Dated lines whose end date has passed: one reminder each (never deleted on their own)."""
+    playbook = playbook_now()
+    known = set(json.loads(LEARN.get("expired_lines") or "[]"))
+    out = []
+    for item in playbook_learn.dated_lines(playbook, today):
+        key = text_sha(item["line"])
+        if key in known:
+            continue
+        known.add(key)
+        origin = next((c for c in LEARN.changes(("trial", "kept", "applied"), limit=300)
+                       if any(item["line"] in (h.get("applied") or {}).get("after", "") for h in c["hunks"])), None)
+        at = playbook.find(item["line"])
+        cid = LEARN.add_change("expiry", "expired", [{
+            "section": playbook_learn.short_heading(onboarding.section_of(playbook, at)), "anchor": item["line"],
+            "why_zh": f"已过期（至 {item['until']}）", "op": "expired"}], meta={"from": origin["id"] if origin else 0})
+        notify_change(cid)
+        out.append(cid)
+    LEARN.put("expired_lines", json.dumps(sorted(known)))
+    return out
+
+
+async def weekly_card(today) -> bool:
+    """Monday on the owner's phone: how many changes the review made this week and how many wait."""
+    if not owner_chat() or today.weekday() != 0 or LEARN.get("weekly_card") == today.isoformat():
+        return False
+    since = time.time() - 7 * 24 * 3600
+    auto = sum(len(c["hunks"]) for c in LEARN.since(since, ("auto",)) if c["status"] in ("trial", "kept"))
+    waiting = sum(len([h for h in c["hunks"] if h.get("state") == "pending"]) for c in LEARN.changes(("pending",)))
+    LEARN.put("weekly_card", today.isoformat())
+    await tell_owner(f"📘 本周手册自动改了 {auto} 处，待您批 {waiting} 处。到电脑上 设置 → 手册变更记录 查看。")
+    return True
+
+
+async def daily_learning(today) -> None:
+    """Once a day, by code only: trials that ran out, old texts dropped, results, the guard, run-out dates."""
+    LEARN.put("daily", today.isoformat())
+    LEARN.end_trials()
+    LEARN.prune()
+    with contextlib.suppress(Exception):
+        await collect_outcomes()
+    guard_changes()
+    expiry_scan(today)
+    await weekly_card(today)
+
+
+async def learning_tick(now: float | None = None) -> None:
+    now = now or time.time()
+    today = datetime.fromtimestamp(now).date()
+    sync_manual_edits()
+    if LEARN.get("daily") != today.isoformat():
+        await daily_learning(today)
+    idle = now - learn_state["last_activity"] >= LEARN_IDLE
+    if not idle or learn_state["running"]:
+        return
+    if LEARN.get("last_review") != today.isoformat() and LEARN.contrast_count() >= LEARN_MIN:
+        await review_playbook()
+    if learning_cfg().get("sop_docs") and LEARN.get("sop_day") != today.isoformat():
+        LEARN.put("sop_day", today.isoformat())
+        await sop_sync()
+
+
+async def learning_loop():
+    note_activity()  # the first review waits until the drafts after a start have been idle a while
+    while True:
+        await asyncio.sleep(LEARN_TICK)
+        try:
+            await learning_tick()
+        except ClaudeError as e:
+            log("playbook review failed", err_text(e))
+            LEARN.put("last_review", datetime.now().date().isoformat())  # tried today: not again every minute
+        except Exception as e:  # noqa: BLE001  the learning never stops the app
+            log("playbook learning failed", err_text(e))
+
+
+# ------------------------------------------------------------ the SOP documents on POPO
+
+def sop_key(url: str) -> str:
+    return re.sub(r"[^0-9A-Za-z_-]", "_", popogrid.doc_id_from_link(url) or text_sha(url))[:60]
+
+
+def fetch_sop(url: str, cli: str) -> str:
+    """The SOP's text, one line per paragraph (popogrid.read_doc: doc_get_folder_path for team spaces, then
+    doc_get_doc_detail; popo-cli has no doc_get_content)."""
+    return popogrid.read_doc(url, cli)[1]
+
+
+async def sop_sync() -> dict:
+    """Each SOP document of settings learning.sop_docs read through popo-cli and kept as a snapshot. Nothing changed:
+    no model call. Changed: one call for playbook changes, all of them waiting for the owner (the playbook says the
+    owner's rules win over the SOP)."""
+    docs = [str(u).strip() for u in learning_cfg().get("sop_docs") or [] if str(u).strip()]
+    cli = popo_cli()
+    if not docs:
+        return {"note": "没有配置 SOP 文档"}
+    if not cli:
+        state["sop_error"] = "要自动跟 SOP 文档，这台电脑得先装好并登录 popo-cli"
+        return {"note": state["sop_error"]}
+    done = []
+    for url in docs:
+        key = sop_key(url)
+        folder = SOP_SNAPSHOTS / key
+        try:
+            text = await asyncio.to_thread(fetch_sop, url, cli)
+        except popogrid.PopoError as e:
+            state["sop_error"] = f"SOP 文档读不了：{e}"
+            log("sop read failed", url, err_text(e))
+            continue
+        state.pop("sop_error", None)
+        snaps = sorted(folder.glob("*.md")) if folder.exists() else []
+        old = snaps[-1].read_text(encoding="utf-8") if snaps else ""
+        if old == text:
+            done.append({"doc": url, "changed": False})
+            continue
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / (datetime.now().strftime("%Y%m%d-%H%M%S") + ".md")).write_text(text, encoding="utf-8")
+        if not old:  # the first snapshot is the starting point, nothing to compare yet
+            done.append({"doc": url, "changed": False, "first": True})
+            continue
+        diff = playbook_learn.text_diff(old, text)
+        cid = await sop_proposal(url, diff)
+        done.append({"doc": url, "changed": True, "change": cid})
+    return {"docs": done}
+
+
+async def sop_proposal(url: str, diff: str) -> int | None:
+    playbook = playbook_now()
+    if not playbook:
+        return None
+    boundary = secrets.token_hex(8)
+    system = replyflow.SOP_SYSTEM.replace("{owner}", OWNER).replace("{boundary}", boundary)
+    user = "\n\n".join([section(boundary, "SOP_NAME", url), section(boundary, "SOP_DIFF", diff),
+                        section(boundary, "PLAYBOOK", playbook)])
+    result = await learn_call(system, user, replyflow.SOP_SCHEMA, "sop")
+    judged = playbook_learn.judge(playbook, playbook_learn.clean_hunks(result.get("hunks")), source="sop",
+                                  baseline=baseline_chars())
+    pending = [h for h in judged if h["state"] == "pending"]
+    changes = len([line for line in diff.splitlines() if line[:1] in "+-" and not line.startswith(("+++", "---"))])
+    note = f"SOP 有 {changes} 行变化，建议改手册 {len(pending)} 处，待您批"
+    cid = LEARN.add_change("sop", "pending" if pending else "done", pending or [], note=note,
+                           meta={"doc": url, "summary_zh": str(result.get("summary_zh") or "")[:300]},
+                           seen=not pending)
+    if pending:
+        notify_change(cid)
+    return cid
+
+
+# ------------------------------------------------------------ episodes: what was sent, next to what the AI wrote
+
+def as_list(value) -> list:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value or "[]")
+        except ValueError:
+            return []
+    return value if isinstance(value, list) else []
+
+
+def as_dict(value) -> dict:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value or "{}")
+        except ValueError:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+OWNER_ALLOWS_REDLINE = re.compile(
+    r"先付|预付|付定金|首付|提前(付|打款)|先打款|银行转账|电汇|走银行|折扣码|说官方|官方授权|"
+    r"upfront|deposit|prepay|in advance|bank transfer|wire transfer", re.IGNORECASE)
+REFUSING = re.compile(r"不|别|没|勿|禁|拒|\bno\b|\bnot\b|\bnever\b|n't")
+
+
+def allows_redline(words: str) -> bool:
+    """The owner's words for a reply allow a red-line subject (这次破例先付一半), rather than refuse it (别提预付)."""
+    text = playbook_learn.folded(words)
+    return any(not REFUSING.search(text[max(0, m.start() - 6):m.start()]) for m in OWNER_ALLOWS_REDLINE.finditer(text))
+
+
+def redline_exception(sent: str, check: dict, owner_words: list[str] | None = None) -> bool:
+    """The reply breaks a red line on purpose (the owner asked, or edited it in): never learned from. Judged on what
+    was sent, by the rule check itself, on what the draft's check said, and on the owner's own words for it."""
+    if any(allows_redline(w) for w in owner_words or []):
+        return True
+    waived = set(check.get("waived_rules") or [])
+    broken = {b.get("rule") for b in check.get("broken") or [] if isinstance(b, dict)}
+    if (waived | broken) & playbook_learn.REDLINE_RULES:
+        return True
+    try:
+        found = compliance.check(sent, compliance.Context(), compliance.load())
+    except Exception:  # noqa: BLE001  a check that trips over the text decides nothing
+        return False
+    return any(v.rule in playbook_learn.REDLINE_RULES and v.action == "revise" for v in found)
+
+
+def record_episode(body: dict, *, channel: str, address: str, sent: str, zh: str = "", message_id: str = "",
+                   kol_text: str = "", account: str = "", strategy: dict | None = None,
+                   feedback: list | None = None, ai_body: str | None = None, compliance_result: dict | None = None,
+                   notes: str | None = None) -> int | None:
+    """One episode after a send. Bookkeeping only: any failure is logged and the send stays a success."""
+    try:
+        s = strategy if strategy is not None else as_dict(body.get("strategy"))
+        check = compliance_result if compliance_result is not None else as_dict(body.get("compliance"))
+        options = [o for o in s.get("options") or [] if isinstance(o, dict)][:3]
+
+        def index(v):
+            return v if isinstance(v, int) and 0 <= v < max(len(options), 1) else None
+        ai = ai_body if ai_body is not None else str(body.get("ai_body") or "")
+        said = feedback if feedback is not None else as_list(body.get("feedback_log"))
+        owner_words = [str(notes if notes is not None else body.get("notes") or ""), *[str(f) for f in said]]
+        return LEARN.record(
+            channel=channel, mode=str(body.get("mode") or "draft")[:20], account=account or current_account.get(),
+            address=address, message_id=message_id or None, language=str(body.get("language") or "")[:40],
+            strategy_options=[{k: str(o.get(k) or "")[:600] for k in ("title_zh", "approach_zh", "why_zh")}
+                              for o in options],
+            recommended=index(s.get("recommended")), chosen=index(s.get("chosen")),
+            ai_body=strip_hidden(ai.replace("\r\n", "\n")).strip(), sent_body=sent, body_zh=zh,
+            feedback_log=[f for f in replyflow.clean_history(feedback if feedback is not None
+                                                              else as_list(body.get("feedback_log")))
+                          if f != replyflow.HAND_EDIT],  # the hand edit itself is in the diff
+            zh_edits=[{"zh_before": str(e.get("zh_before") or "")[:2000], "zh_after": str(e.get("zh_after") or "")[:2000]}
+                      for e in as_list(body.get("zh_edits"))[:40] if isinstance(e, dict)],
+            compliance={k: check.get(k) for k in ("checked", "revisions", "missed", "waived_rules", "flagged") if k in check},
+            playbook_sha=LEARN.get("playbook_sha") or text_sha(playbook_now()),
+            exception=redline_exception(sent, check, owner_words), kol_text=kol_text[:4000],
+            notes=(notes if notes is not None else str(body.get("notes") or ""))[:4000])
+    except Exception as e:  # noqa: BLE001
+        log("episode not recorded", address, err_text(e))
+        return None
+
+
+async def api_learning_status(request: Request):
+    return JSONResponse({"contrast": LEARN.contrast_count(), "last_review": LEARN.get("last_review"),
+                         "running": learn_state["running"], "sop_error": state.get("sop_error", "")})
+
+
+# ------------------------------------------------------------ /策略 on the owner's phone
+
+def update_card_text(c: dict) -> str:
+    lines = [f"📘 手册更新 #{c['id']}：{c.get('note') or ''}"]
+    for i, h in enumerate(c["hunks"]):
+        if h.get("state") == "pending":
+            n = 400 if h.get("redline") else 80
+            lines.append(f"{i + 1}. {'⚠ ' if h.get('redline') else ''}"
+                         f"{playbook_learn.short_heading(h.get('section') or '')}：{h.get('why_zh') or ''}\n"
+                         f"   原：{playbook_learn.clip(h.get('anchor') or '', n)}\n"
+                         f"   新：{playbook_learn.clip(h.get('new_text') or '（删掉）', n)}")
+    for j, r in enumerate((c.get("meta") or {}).get("rule_changes") or []):
+        if r.get("state") == "pending":
+            lines.append(f"R{j + 1}. {r.get('card_zh')}")
+    return "\n".join(lines)
+
+
+def update_card_buttons(c: dict) -> list:
+    rows = [[(f"✅ 第{i + 1}处", f"pb:y:{c['id']}:{i}"), (f"❌ 第{i + 1}处", f"pb:n:{c['id']}:{i}")]
+            for i, h in enumerate(c["hunks"]) if h.get("state") == "pending"][:8]
+    rows += [[(f"✅ 规则R{j + 1}", f"pb:yr:{c['id']}:{j}"), (f"❌ 规则R{j + 1}", f"pb:nr:{c['id']}:{j}")]
+             for j, r in enumerate((c.get("meta") or {}).get("rule_changes") or []) if r.get("state") == "pending"][:4]
+    rows.append([("✅ 其余全部接受（⚠ 的要单独点）", f"pb:Y:{c['id']}"), ("❌ 都不要", f"pb:N:{c['id']}")])
+    return rows
+
+
+async def owner_policy(says: str, reply_to: int | None = None):
+    """/策略 <一句话> from the owner's phone: the same card as 手册更新 on the page, with a button per change."""
+    if not says.strip():
+        await tell_owner("写法：/策略 一句话，比如 /策略 联盟新用户改 8%", reply_to=reply_to)
+        return
+    await tell_owner("收到，正在读手册找要改的地方…", reply_to=reply_to)
+    try:
+        cid = await propose_update(says.strip()[:2000])
+    except (ValueError, ClaudeError) as e:
+        await tell_owner(f"没改成：{err_text(e)}", reply_to=reply_to)
+        return
+    c = LEARN.change(cid)
+    await tell_owner(update_card_text(c), update_card_buttons(c), reply_to=reply_to)
+
+
+async def on_playbook_button(bot: mobile.Bot, q: dict, parts: list[str], pressed: int | None):
+    if len(parts) < 3 or parts[1] not in ("y", "n", "yr", "nr", "Y", "N") or not parts[2].isdigit():
+        await bot.answer(q["id"], "看不懂这个按钮")
+        return
+    body = {"accept": parts[1] in ("y", "yr", "Y")}
+    if parts[1] in ("Y", "N"):
+        body["all"] = True
+    elif len(parts) == 4 and parts[3].isdigit():
+        body["rule" if parts[1].endswith("r") else "index"] = int(parts[3])
+    async with playbook_lock:
+        sync_manual_edits()
+        c = LEARN.change(int(parts[2]))
+        if not c or c["status"] != "pending":
+            await bot.answer(q["id"], "这条已经处理过了")
+            return
+        result = decide_pending(c, body["accept"], body)
+    if isinstance(result, str):
+        await bot.answer(q["id"], result[:180])
+        return
+    await bot.answer(q["id"], "已写进手册" if body["accept"] else "好的，不改")
+    left = LEARN.change(int(parts[2]))
+    if left and left["status"] == "pending":
+        await tell_owner(update_card_text(left), update_card_buttons(left), reply_to=pressed)
+    elif result.get("problems"):
+        await tell_owner("有几处没写进去：" + "；".join(result["problems"]), reply_to=pressed)
 
 
 # ---------------------------------------------------------------- linking a colleague's own KOL sheet (settings page)
@@ -6082,7 +7304,13 @@ async def checked_attachment(mailbox: str, email_id: str, name: str) -> tuple[Pa
             touch_folder(folder)  # an old empty folder must not be swept while the download is under way
             with contextlib.suppress(OSError):
                 (folder / "clean.json").unlink()  # a fresh download is always checked afresh
-            tmp = folder / f"part-{secrets.token_hex(4)}"
+            # Downloaded into a private folder mcp-email-server accepts and moved into the cache after: the cache
+            # inherits its drive's permissions, and a drive where every signed-in user may change files made every
+            # download fail with "Attachment destination parent is unsafe" (attachdir.py).
+            try:
+                tmp = await asyncio.to_thread(attachdir.download_target, folder)
+            except attachdir.AttachDirError as e:
+                raise MailError(str(e)) from e
             try:
                 try:
                     result = await mail.call("download_attachment", timeout=120, email_id=email_id,
@@ -6090,6 +7318,9 @@ async def checked_attachment(mailbox: str, email_id: str, name: str) -> tuple[Pa
                 except MailError as e:
                     if re.search(r"virus|potentially unwanted|WinError 22[56]", str(e), re.I):
                         return "Windows Defender 拦下了这个文件", ""
+                    hint = attachdir.explain(str(e))
+                    if hint:
+                        raise MailError(hint) from e
                     raise
                 saved = Path(str(result.get("saved_path") or tmp))
                 try:
@@ -6097,8 +7328,13 @@ async def checked_attachment(mailbox: str, email_id: str, name: str) -> tuple[Pa
                 except FileNotFoundError:  # Defender's real-time protection removed it as soon as it was written
                     return "Windows Defender 认定它是病毒，已经隔离", ""
                 if size > ATTACH_MAX_BYTES:
+                    with contextlib.suppress(OSError):
+                        saved.unlink()
                     raise MailError("附件超过 25 MB，请到邮箱客户端里查看")
-                os.replace(saved, path)
+                try:
+                    await asyncio.to_thread(attachdir.move_into, saved, path)
+                except OSError as e:
+                    raise MailError(f"附件下载好了，但没能放进缓存文件夹，请稍后再试（{err_text(e)}）") from e
             finally:
                 with contextlib.suppress(OSError):
                     tmp.unlink()
@@ -6515,9 +7751,20 @@ async def compose_context(body: dict) -> tuple[str, dict]:
     return token, {**base, "to": to, "cc": cc, "language": language, "subject": subject}
 
 
-def prompt_args(boundary: str) -> dict:
+def prompt_args(boundary: str, kind: str = "strategy") -> dict:
+    """What every strategy, draft, chat and compose prompt is built from. The case library (案例库) is read only when
+    the options are worked out (kind "strategy"): the draft, chat and compose tasks never use it, and it is the
+    biggest section of a grown playbook."""
+    playbook = read_file(PLAYBOOK, "谈判手册")
+    if kind != "strategy":
+        playbook = playbook_learn.without_case_library(playbook)
     return {"owner": OWNER, "owner_role": OWNER_ROLE, "company": COMPANY, "boundary": boundary,
-            "playbook": read_file(PLAYBOOK, "谈判手册"), "hard_rules": hard_rules()}
+            "playbook": playbook, "hard_rules": hard_rules()}
+
+
+def user_message(boundary: str, parts: list[str]) -> str:
+    """The user turn of a strategy, draft, chat or compose call: how its sections are marked, then the sections."""
+    return "\n\n".join([replyflow.markers_intro(OWNER, COMPANY, boundary), *parts])
 
 
 def hard_rules() -> str:
@@ -6531,11 +7778,13 @@ def hard_rules() -> str:
 
 async def propose_strategies(ctx: dict, notes: str) -> dict:
     boundary = secrets.token_hex(8)
-    system = replyflow.strategy_system(**prompt_args(boundary))
+    system = replyflow.strategy_system(**prompt_args(boundary, "strategy"))
     parts = replyflow.context_sections(boundary, ctx)
     if notes:
         parts.append(section(boundary, "OWNER_NOTES", notes))
-    result = await run_claude(system, "\n\n".join(parts), replyflow.STRATEGY_SCHEMA, DRAFT_MODEL, timeout=300)
+    note_activity()
+    call_kind("strategy")
+    result = await run_claude(system, user_message(boundary, parts), replyflow.STRATEGY_SCHEMA, DRAFT_MODEL, timeout=300)
     situation, options, recommended = replyflow.clean_options(result)
     return {"person_zh": replyflow.person_text(result), "situation_zh": situation, "options": options,
             "recommended": recommended}
@@ -6562,19 +7811,19 @@ def history_section(boundary: str, history: list[str] | None) -> list[str]:
 
 async def write_draft(ctx: dict, *, mode: str = "draft", strategy: dict | None = None, notes: str = "",
                       previous: str = "", feedback: str = "", broken: str = "", history: list[str] | None = None,
-                      missed: list[str] | None = None) -> dict:
+                      missed: list[str] | None = None, boundary: str = "") -> dict:
     """broken: the rules PREVIOUS_DRAFT broke (compliance.revision_brief) and missed: the owner's instructions it
     does not carry out yet (owner_check); with either, the draft is rewritten in MODE comply. history: the owner's
     earlier rounds of feedback on this reply, oldest first, which still hold. A ctx from compose_context makes it a
-    new email (replyflow.compose_system), which also gets a subject."""
-    boundary = secrets.token_hex(8)
+    new email (replyflow.compose_system), which also gets a subject. boundary: the one of the first draft, so that a
+    rewrite repeats its prompt word for word up to the parts that change (PREVIOUS_DRAFT on, and MODE at the end)."""
+    boundary = boundary or secrets.token_hex(8)
     channel = ctx.get("channel", "email")
     compose = bool(ctx.get("compose"))
     system = (replyflow.compose_system if compose else replyflow.draft_system)(
-        **prompt_args(boundary), signature=SIGNATURE, channel=channel)
+        **prompt_args(boundary, "compose" if compose else "draft"), signature=SIGNATURE, channel=channel)
     fixing = bool(previous and (broken or missed))
-    parts = [f"MODE: {('comply translate' if mode == 'translate' else 'comply') if fixing else mode}",
-             *(replyflow.compose_sections if compose else replyflow.context_sections)(boundary, ctx)]
+    parts = [*(replyflow.compose_sections if compose else replyflow.context_sections)(boundary, ctx)]
     if strategy:
         parts.append(section(boundary, "CHOSEN_STRATEGY", replyflow.strategy_text(strategy)))
     if notes:
@@ -6588,8 +7837,11 @@ async def write_draft(ctx: dict, *, mode: str = "draft", strategy: dict | None =
         parts.append(section(boundary, "COMPLIANCE_FEEDBACK", broken))
     if previous and missed:
         parts.append(section(boundary, "OWNER_NOT_DONE", "\n".join(f"- {m}" for m in missed)))
-    result = await run_claude(system, "\n\n".join(parts), replyflow.COMPOSE_SCHEMA if compose else replyflow.DRAFT_SCHEMA,
-                              DRAFT_MODEL, timeout=300)
+    parts.append(f"MODE: {('comply translate' if mode == 'translate' else 'comply') if fixing else mode}")
+    note_activity()
+    call_kind("rewrite" if fixing else "compose" if compose else "draft")
+    result = await run_claude(system, user_message(boundary, parts),
+                              replyflow.COMPOSE_SCHEMA if compose else replyflow.DRAFT_SCHEMA, DRAFT_MODEL, timeout=300)
     reply, warnings = clean_reply(result["reply_body"], channel)
     out = {"reply_language": result.get("reply_language", ""), "reply_body": reply,
            "notes_zh": result.get("notes_zh", ""),
@@ -6605,10 +7857,12 @@ async def chat_about_draft(ctx: dict, previous: str, feedback: str, history: lis
     history: the owner's earlier change requests for this reply, which still hold."""
     boundary = secrets.token_hex(8)
     channel = ctx.get("channel", "email")
-    system = replyflow.chat_system(**prompt_args(boundary), signature=SIGNATURE, channel=channel)
+    system = replyflow.chat_system(**prompt_args(boundary, "chat"), signature=SIGNATURE, channel=channel)
     parts = [*replyflow.context_sections(boundary, ctx), *history_section(boundary, history),
              section(boundary, "PREVIOUS_DRAFT", previous), section(boundary, "OWNER_FEEDBACK", feedback)]
-    result = await run_claude(system, "\n\n".join(parts), replyflow.CHAT_SCHEMA, DRAFT_MODEL, timeout=300)
+    note_activity()
+    call_kind("chat")
+    result = await run_claude(system, user_message(boundary, parts), replyflow.CHAT_SCHEMA, DRAFT_MODEL, timeout=300)
     revised = str(result.get("revised_body") or "").strip()
     out = {"answer_zh": str(result.get("answer_zh") or "").strip(), "reply_body": "", "warnings": [],
            "needs_approval_zh": str(result.get("needs_approval_zh") or "").strip()}
@@ -6633,6 +7887,7 @@ async def side_by_side(text: str) -> dict:
             boundary = secrets.token_hex(8)
             user = section(boundary, "PARAGRAPHS", json.dumps([paragraphs[i] for i in todo], ensure_ascii=False))
             system = replyflow.BACKTRANSLATE_SYSTEM.replace("{boundary}", boundary)
+            call_kind("backtranslate")
             try:
                 result = await run_claude(system, user, replyflow.PARAGRAPHS_SCHEMA, role, timeout=180)
                 zh = [str(x) for x in result.get("zh") or []]
@@ -6659,11 +7914,12 @@ async def side_by_side(text: str) -> dict:
 async def checked_draft(ctx: dict, *, mode: str = "draft", strategy: dict | None = None, notes: str = "",
                         previous: str = "", feedback: str = "", history: list[str] | None = None) -> tuple[dict, dict]:
     """write_draft held to the owner's instructions and the hard rules (enforce_rules): the draft and its Chinese
-    side-by-side."""
+    side-by-side. Its rewrites use the first draft's boundary (write_draft)."""
+    boundary = secrets.token_hex(8)
     draft = await write_draft(ctx, mode=mode, strategy=strategy, notes=notes, previous=previous, feedback=feedback,
-                              history=history)
+                              history=history, boundary=boundary)
     return await enforce_rules(ctx, draft, mode=mode, strategy=strategy, notes=notes, feedback=feedback,
-                               history=history)
+                               history=history, boundary=boundary)
 
 
 def unchecked(draft: dict, why: str) -> dict:
@@ -6687,13 +7943,14 @@ async def owner_check(owner: list[str], body: str, zh: str,
     user = "\n\n".join([section(boundary, "OWNER_INSTRUCTIONS", json.dumps(owner, ensure_ascii=False)),
                         section(boundary, "DRAFT", body), section(boundary, "DRAFT_ZH", zh),
                         section(boundary, "FLAGS", json.dumps(items, ensure_ascii=False))])
+    call_kind("owner_check")
     result = await run_claude(system, user, replyflow.OWNER_CHECK_SCHEMA, DRAFT_MODEL, timeout=180)
     return replyflow.owner_verdict(result, {v.rule for v in flags})
 
 
 async def enforce_rules(ctx: dict, draft: dict, *, mode: str = "draft", strategy: dict | None = None, notes: str = "",
                         feedback: str = "", rewrites: int | None = None,
-                        history: list[str] | None = None) -> tuple[dict, dict]:
+                        history: list[str] | None = None, boundary: str = "") -> tuple[dict, dict]:
     """The draft and its side-by-side, held to the owner's instructions first and to rules/negotiation_rules.yaml
     (compliance.py) second. Whenever the owner said anything for this reply (notes, earlier feedback, feedback),
     owner_check decides which flagged rules the owner asked for (those stay, and are only mentioned) and which of
@@ -6717,6 +7974,8 @@ async def enforce_rules(ctx: dict, draft: dict, *, mode: str = "draft", strategy
     waived: dict[str, str] = {}  # title -> the text the owner asked for
     missed: list[str] = []
     held: list[compliance.Violation] = []  # flagged while owner_check could not run: left to the owner
+    waived_ids: list[str] = []
+    flagged: list[str] | None = None  # what the first check found: the guard compares playbook versions by it
     revisions = 0
     while True:
         zh = "\n\n".join(r["zh"] for r in pairs["rows"] if not r.get("failed"))
@@ -6728,6 +7987,8 @@ async def enforce_rules(ctx: dict, draft: dict, *, mode: str = "draft", strategy
             log("compliance check failed", err_text(e))
             return unchecked({**draft, "notes_zh": notes_zh, "warnings": warnings}, f"检查出错：{err_text(e)}"), pairs
         broken = [v for v in found if v.action == "revise"]
+        if flagged is None:
+            flagged = sorted({v.rule for v in broken})
         missed = []
         if owner:
             flags = [v for v in broken if v.check not in SUPERSEDED_BY_OWNER_CHECK]
@@ -6739,6 +8000,7 @@ async def enforce_rules(ctx: dict, draft: dict, *, mode: str = "draft", strategy
                 held, broken = broken, []
                 break
             waived = {v.title_zh: " / ".join(v.evidence) for v in flags if v.rule in allowed}  # in this version
+            waived_ids = sorted({v.rule for v in flags if v.rule in allowed})
             broken = [v for v in flags if v.rule not in allowed]
         if (not broken and not missed) or revisions >= limit:
             break
@@ -6747,7 +8009,7 @@ async def enforce_rules(ctx: dict, draft: dict, *, mode: str = "draft", strategy
         try:
             rewritten = await write_draft(ctx, mode=mode, strategy=strategy, notes=notes, feedback=feedback,
                                           previous=draft["reply_body"], broken=compliance.revision_brief(broken),
-                                          history=history, missed=missed)
+                                          history=history, missed=missed, boundary=boundary)
             rewritten_pairs = await side_by_side(rewritten["reply_body"])
         except ClaudeError as e:
             log("compliance rewrite failed", err_text(e))
@@ -6774,7 +8036,8 @@ async def enforce_rules(ctx: dict, draft: dict, *, mode: str = "draft", strategy
             "needs_approval_zh": materials.merge_approval(draft.get("needs_approval_zh", ""),
                                                           compliance.review_notes(found)),
             "compliance": {"checked": True, "ok": not (broken or missed or held), "revisions": revisions,
-                           "fixed": done, "waived": list(waived), "missed": missed,
+                           "fixed": done, "waived": list(waived), "missed": missed, "waived_rules": waived_ids,
+                           "flagged": flagged or [],
                            "broken": [{"rule": v.rule, "title_zh": v.title_zh, "evidence": v.evidence}
                                       for v in broken + held]}}, pairs
 
@@ -6851,6 +8114,7 @@ async def rewrite_paragraphs(text: str, edits: list[dict], language: str) -> lis
     items = [{k: e[k] for k in ("original", "zh_before", "zh_after")} for e in edits]
     user = "\n\n".join([section(boundary, "EMAIL", text), section(boundary, "LANGUAGE", language),
                         section(boundary, "EDITS", json.dumps(items, ensure_ascii=False))])
+    call_kind("zhedit")
     result = await run_claude(system, user, replyflow.ZH_EDIT_SCHEMA, DRAFT_MODEL, timeout=240)
     new = [strip_hidden(str(p)).strip() for p in llm.scrub(result.get("paragraphs") or [])]
     if len(new) != len(edits) or not all(new):
@@ -6952,7 +8216,7 @@ async def api_compose_draft(request: Request):
 # bcc and target (the answered message, "mailbox\nemail_id") belong to a reply; feedback_log is the JSON list of the
 # owner's earlier rounds of feedback on this draft.
 DRAFT_FIELDS = ("notes", "to", "subject", "body", "lang", "summary", "approval", "feedback", "cc", "language",
-                "bcc", "target", "feedback_log")
+                "bcc", "target", "feedback_log", "ai_body", "strategy", "zh_edits", "compliance", "mode")
 DRAFT_LIMIT = 50_000  # characters of one field; a reply is a few thousand
 
 
@@ -7132,6 +8396,10 @@ async def send_reply(body: dict, mailbox: str, email_id: str, who: Recipients, s
             # One row, the conversation's; the Message-ID only for a mail to one person, as for a new email.
             sheet_guard("记录回信", sheet_after_send, filed, subject, "我方回信" + note + "：" + gist(zh or text), "",
                         message_id if len(who.all) == 1 else None)
+        theirs = sender_address(msg.get("sender", "")) != self_address()
+        record_episode(body, channel="email", address=filed, sent=text, zh=zh, message_id=message_id or "",
+                       kol_text=own_words(msg.get("body") or "")[:playbook_learn.KOL_TEXT_MAX] if theirs else "",
+                       account=account)
     except Exception as e:  # noqa: BLE001
         log("after-send bookkeeping failed", ",".join(who.to), err_text(e))
     return JSONResponse({"ok": True, "to": who.to, "cc": who.cc, "bcc": who.bcc, "warning": warning})
@@ -7214,6 +8482,8 @@ async def send_new(body: dict, to: list[str], cc: list[str], subject: str, text:
                 sheet_wake.set()
             sheet_guard("记录新邮件", sheet_after_send, address, subject, "我方新邮件" + note + "：" + gist(zh or text),
                         "新邮件", message_id if len(to) + len(cc) == 1 else None)
+        record_episode(body, channel="email-new", address=to[0], sent=text, zh=zh, message_id=message_id or "",
+                       account=account)
     except Exception as e:  # noqa: BLE001
         log("after-send bookkeeping failed (new mail)", ",".join(to), err_text(e))
     return JSONResponse({"ok": True, "to": to, "cc": cc, "warning": warning})
@@ -7855,6 +9125,15 @@ def chat_parts(text: str, zh) -> list[dict]:
     return [{"text": p, "zh": chats.plain(z, 1000)} for p, z in zip(parts, zh)]
 
 
+def record_chat_episode(body: dict, key: str, channel: str, text: str, msgs: list[dict]) -> None:
+    """A chat reply sent (or queued for Discord): an episode like a mail's, with the other side's latest messages."""
+    theirs = [str(m.get("text") or "") for m in msgs if not m.get("out")][-6:]
+    zh = body.get("zh")
+    record_episode(body, channel=channel, address=key, sent=text,
+                   zh="\n\n".join(str(z) for z in zh) if isinstance(zh, list) else "",
+                   kol_text="\n".join(theirs)[-playbook_learn.KOL_TEXT_MAX:])  # the latest: what this answers
+
+
 async def api_chat_send(request: Request):
     """Telegram: sent now, part by part. Discord: queued for the extension. Either way only a text whose Chinese
     side-by-side was verified, and only if the other side wrote nothing new since the draft was made."""
@@ -7907,6 +9186,7 @@ async def api_chat_send(request: Request):
         if conv["channel"] == "discord":
             CHATS.queue(key, parts)
             chat_sent[(key, digest)] = now
+            record_chat_episode(body, key, conv["channel"], text, msgs)
             return JSONResponse({"ok": True, "queued": len(parts)})
         chat_sent[(key, digest)] = now  # from the first part on: an uncertain send must never be repeated
         sent = 0
@@ -7934,6 +9214,7 @@ async def api_chat_send(request: Request):
         close_cases_for("telegram", str(chat_id))  # an off-hours phone case for this chat is answered now
     spawn(tg_resync(chat_id), "Telegram 私信同步")
     log("sent chat reply", key, f"{sent} part(s)")
+    record_chat_episode(body, key, "telegram", text, msgs)
     return JSONResponse({"ok": True, "sent": sent})
 
 
@@ -8205,7 +9486,7 @@ async def lifespan(app):
     loops = [] if LOGGED_OUT else [mail.run(), bg.run(), finder.run(), translator_loop(), prefetch_loop()]
     if not DEV and not LOGGED_OUT:  # a dev copy next to the real service must never answer, notify, log or send anything
         loops += [scan_loop(), tg.run(), telegram_loop(), sheet_loop(), sheet_channels_loop(), mobile_loop(),
-                  case_worker(), awake_loop(), tg_sync_loop(), popo_sync_loop(), telegram_speedup()]
+                  case_worker(), awake_loop(), tg_sync_loop(), popo_sync_loop(), telegram_speedup(), learning_loop()]
         if server_move().get("accounts"):
             loops.append(fold_loop())
     if not DEV or os.environ.get("KOL_PET") == "1":  # a dev copy shows its own pet only when asked
@@ -8286,6 +9567,16 @@ routes = [
     Route("/api/sheet/unlink", api_sheet_unlink, methods=["POST"]),
     Route("/api/ai/check", api_ai_check, methods=["POST"]),
     Route("/api/update", api_update, methods=["GET", "POST"]),
+    Route("/api/playbook/notice", api_playbook_notice, methods=["GET", "POST"]),
+    Route("/api/playbook/changes", api_playbook_changes),
+    Route("/api/playbook/revert", api_playbook_revert, methods=["POST"]),
+    Route("/api/playbook/rollback", api_playbook_rollback, methods=["POST"]),
+    Route("/api/playbook/decide", api_playbook_decide, methods=["POST"]),
+    Route("/api/playbook/update", api_playbook_update, methods=["POST"]),
+    Route("/api/playbook/review", api_playbook_review, methods=["POST"]),
+    Route("/api/playbook/archive", api_playbook_archive, methods=["POST"]),
+    Route("/api/playbook/expired", api_playbook_expired, methods=["POST"]),
+    Route("/api/playbook/overrides/reset", api_playbook_overrides_reset, methods=["POST"]),
     Route("/api/restart", api_restart, methods=["POST"]),
     Route("/api/mobile", api_mobile),
     Route("/api/mobile/token", api_mobile_token, methods=["POST"]),

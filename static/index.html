@@ -220,6 +220,19 @@
   #version:hover, #version:focus-visible { color: var(--accent); border-bottom-color: var(--accent); outline: none; }
   #version.busy { cursor: progress; }
   #setupDlg { width: min(680px, 94vw); }
+  #pbDlg { width: min(860px, 96vw); max-height: 92vh; }
+  #pbDlg h4 { margin: 14px 0 6px; font-size: 14px; }
+  #pbDlg .pbitem { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 6px 0; background: var(--panel); }
+  #pbDlg .pbitem.alert { border-color: var(--bad); }
+  #pbDlg .pbhead { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  #pbDlg .pbhead .note { margin: 0; }
+  #pbDlg .pbhunk { margin: 6px 0 0; padding: 6px 8px; border-left: 3px solid var(--line); }
+  #pbDlg .pbhunk .old { color: var(--muted, #888); text-decoration: line-through; white-space: pre-wrap; }
+  #pbDlg .pbhunk .new { white-space: pre-wrap; }
+  #pbDlg .pbhunk .why { font-weight: 600; }
+  #pbDlg textarea#pbSays { width: 100%; min-height: 54px; box-sizing: border-box; }
+  #pbNoticeDlg ul { margin: 6px 0 10px; padding-left: 1.2em; }
+  #pbNoticeDlg .alert { color: var(--bad); }
   #setupSheet input[type=text], #setupSheet input[type=number], #setupSheet select { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
   #sheetPath { flex: 1; min-width: 240px; }
   #sheetPopoRow[hidden], #sheetGoogleRow[hidden], #sheetGoogleLink[hidden] { display: none; }
@@ -349,6 +362,7 @@ try {
   <span id="status">连接中…</span>
   <button class="act" id="aiCheckBtn" type="button" hidden>重新检测 AI</button>
   <span class="note" id="version" role="button" tabindex="0" title="点一下马上检查更新"></span>
+  <button class="act" id="pbBtn" type="button" title="手册更新、手册变更记录（撤销、批准）">手册</button>
   <button class="act" id="setupBtn" type="button" title="签名、谈判方式和 KOL 总表">设置</button>
 </header>
 <dialog id="mobileDlg" class="small">
@@ -388,6 +402,8 @@ try {
 - 固定费一般给到多少，什么情况下可以加
 - 砍价时你习惯怎么说，语气偏正式还是轻松
 - 哪些事绝对不能答应（比如预付、声称官方授权）"></textarea>
+  <div class="row2"><button class="act" id="setupPbBtn" type="button">手册更新和变更记录…</button>
+    <span class="note" style="margin:0">一句话录入新策略；看 AI 根据您的修改自动改了手册哪里，随时撤销</span></div>
   <label class="blk"><input type="checkbox" id="setupOffhours"> 下班时间自动回复固定模板</label>
   <p class="note" id="setupOffhoursNote" style="margin:0">不在工作时间（周一到周五 10:00 到 18:00，GMT+8）收到的 KOL 邮件和 Telegram 私聊，自动回一段固定的“我现在下班了，回来再回复你”。默认关，需要时（比如休长假）再打开。</p>
   <div class="row2"><button class="act primary" id="setupSave" type="button">保存</button>
@@ -527,6 +543,24 @@ try {
   <textarea id="fbText" maxlength="2000" placeholder="哪里不好用、想要什么功能，都可以写"></textarea>
   <div class="row2"><button class="act primary" id="fbSend" type="button">发送</button>
     <button class="act" id="fbClose" type="button">关闭</button><span class="note" id="fbNote"></span></div>
+</dialog>
+<dialog id="pbNoticeDlg" class="small" aria-labelledby="pbNoticeTitle">
+  <h3 id="pbNoticeTitle"></h3>
+  <ul id="pbNoticeLines"></ul>
+  <div id="pbNoticeVersion" hidden><h3 id="pbVersionTitle"></h3><ul id="pbVersionLines"></ul></div>
+  <div class="row2"><button class="act primary" id="pbNoticeOk" type="button">知道了</button>
+    <button class="act" id="pbNoticeOpen" type="button">查看 / 撤销</button></div>
+</dialog>
+<dialog id="pbDlg" class="small" aria-labelledby="pbTitle">
+  <h3 id="pbTitle">谈判手册：更新和变更记录</h3>
+  <label class="blk" for="pbSays">手册更新：一句话说清这次要改的策略</label>
+  <textarea id="pbSays" maxlength="2000" placeholder="比如：联盟新用户改 8%（11-03 起，到 11-30）。AI 会找出手册里所有要跟着改的地方，逐处给您确认，确认后立刻生效。"></textarea>
+  <div class="row2"><button class="act primary" id="pbSaysBtn" type="button">找出要改的地方</button>
+    <button class="act" id="pbReviewBtn" type="button" title="用最近您改过的草稿复盘一次，没有新的修改就不会调用 AI">现在复盘</button>
+    <span class="note" id="pbNote"></span></div>
+  <div id="pbCard"></div>
+  <div id="pbGroups"></div>
+  <div class="row2"><button class="act" id="pbClose" type="button">关闭</button></div>
 </dialog>
 <dialog id="folderDlg" class="small">
   <form id="folderForm">
@@ -1884,6 +1918,7 @@ async function strategies(ctx) {
                                                     notes: field(v, "notes").value, ...replyRcpt(ctx) });
     if (st.current !== ctx) return;
     ctx.token = r.ctx; ctx.strategyFor = target;
+    ctx.offer = { options: r.options, recommended: r.recommended, chosen: null };  // the playbook review learns from it
     const person = field(v, "person");
     person.textContent = r.person_zh || "";
     person.hidden = person.previousElementSibling.hidden = !r.person_zh;
@@ -1903,7 +1938,7 @@ async function strategies(ctx) {
       btn.textContent = "用这个方案起草";
       btn.onclick = () => {
         box.querySelectorAll(".opt").forEach(x => x.classList.remove("chosen")); el.classList.add("chosen");
-        draft(ctx, { strategy: o });
+        draft(ctx, { strategy: o, chosen: i });
       };
       el.append(btn); box.append(el);
     });
@@ -1936,6 +1971,10 @@ async function draft(ctx, opts) {
                                          strategy: translate ? null : (opts.strategy || ctx.strategy || null) });
     if (st.current !== ctx) return;  // the user moved on; drop this draft rather than attach it to another email
     ctx.token = r.ctx; if (opts.strategy) ctx.strategy = opts.strategy;
+    if (opts.strategy && ctx.offer && Number.isInteger(opts.chosen)) ctx.offer = { ...ctx.offer, chosen: opts.chosen };
+    if (!opts.strategy && !opts.feedback && !opts.previous) ctx.offer = null;  // drafted from the notes alone
+    if (!opts.feedback) ctx.zhEditsLog = [];
+    ctx.compliance = r.compliance || null; ctx.mode = translate ? "translate" : "draft";
     ctx.feedbackLog = opts.feedback ? [...(ctx.feedbackLog || []), opts.feedback].slice(-20) : [];
     ctx.sent = false;
     if (!ctx.compose) { ctx.draftFor = target; ctx.draftRcpt = normRcpt(field(v, "rto").value); markTarget(ctx); }
@@ -2047,6 +2086,7 @@ async function applyZhEdits(ctx) {
     if (st.current !== ctx) return;
     if (field(v, "rbody").value !== text) { markStale(ctx); return; }  // edited by hand meanwhile: that wins
     field(v, "rbody").value = r.body;
+    ctx.zhEditsLog = [...(ctx.zhEditsLog || []), ...edits.map(e => ({ zh_before: e.zh_before, zh_after: e.zh_after }))].slice(-40);
     showPairs(ctx, r.pairs);
     saveSoon(ctx);
     if (r.pairs && r.pairs.ok) {
@@ -2117,12 +2157,21 @@ function draftFields(ctx) {
   const common = { notes: field(v, "notes").value, feedback: field(v, "feedback").value,
     body: shown ? field(v, "rbody").value : "", lang: field(v, "rlang").textContent,
     summary: field(v, "rstrategy").textContent, approval: field(v, "rapproval").textContent,
-    feedback_log: JSON.stringify(ctx.feedbackLog || []) };
+    feedback_log: JSON.stringify(ctx.feedbackLog || []), ...learnFields(ctx, true) };
   if (ctx.compose) return { ...common, to: field(v, "cto").value, cc: field(v, "ccc").value,
                             subject: field(v, "rsubject").value, language: field(v, "clang").value };
   return { ...common, to: field(v, "rto").value, cc: field(v, "rcc").value, bcc: field(v, "rbcc").value,
            target: targetKey(ctx), subject: shown ? field(v, "rsubject").value : "" };
 }
+
+// What the playbook review learns from, saved with the draft and sent with the mail: the AI's last version (so a
+// hand edit shows as one), the strategies offered and the one chosen, the Chinese corrections, the rule check.
+function learnFields(ctx, asText) {
+  const f = { ai_body: typeof ctx.aiBody === "string" ? ctx.aiBody : "", strategy: ctx.offer || {},
+              zh_edits: ctx.zhEditsLog || [], compliance: ctx.compliance || {}, mode: ctx.mode || "" };
+  return asText ? { ...f, strategy: JSON.stringify(f.strategy), zh_edits: JSON.stringify(f.zh_edits), compliance: JSON.stringify(f.compliance) } : f;
+}
+function parsed(text, fallback) { try { const v = JSON.parse(text || ""); return v && typeof v === "object" ? v : fallback; } catch { return fallback; } }
 
 function saveSoon(ctx) {
   if (!ctx.kolAddress || ctx.sent) return;
@@ -2157,6 +2206,9 @@ async function restoreDraft(ctx, address) {
   field(v, "notes").value = d.notes || "";
   field(v, "feedback").value = d.feedback || "";
   try { ctx.feedbackLog = JSON.parse(d.feedback_log || "[]").filter(x => typeof x === "string"); } catch { ctx.feedbackLog = []; }
+  ctx.offer = parsed(d.strategy, null); if (ctx.offer && !Array.isArray(ctx.offer.options)) ctx.offer = null;
+  ctx.zhEditsLog = parsed(d.zh_edits, []); if (!Array.isArray(ctx.zhEditsLog)) ctx.zhEditsLog = [];
+  ctx.compliance = parsed(d.compliance, null); ctx.mode = d.mode || "";
   if (!ctx.compose) {  // the message it answers and its recipients, as they were when it was saved
     const [box, id] = (d.target || "").split("\n");
     // Saved per person, not per conversation: a message this (fully loaded) conversation does not hold is not kept.
@@ -2183,7 +2235,8 @@ async function restoreDraft(ctx, address) {
     if (!ctx.compose || !field(v, "rsubject").value) field(v, "rsubject").value = d.subject || "";
     if (ctx.compose) { ctx.subjectOk = null; ctx.draftTo = oneLine(d.to).toLowerCase(); showSubjectZh(ctx); }
     field(v, "rlang").textContent = d.lang || "";
-    field(v, "rbody").value = d.body; ctx.aiBody = d.body;
+    // the AI's own last version as it was saved: the restored body may already hold the owner's hand edits
+    field(v, "rbody").value = d.body; ctx.aiBody = d.ai_body ? d.ai_body : null;
     field(v, "rstrategy").textContent = d.summary || "";
     field(v, "rapproval").textContent = d.approval || "无";
     showPairs(ctx, null);
@@ -2228,9 +2281,11 @@ async function send(ctx) {
   note.className = "note"; note.textContent = "发送中…";
   try {
     const attachments = (ctx.outAtts || []).map(a => a.id);
-    const r = ctx.compose ? await post("/api/compose/send", { to, cc, subject, body, body_zh: ctx.pairs.zh, attachments })
+    const learn = { ...learnFields(ctx, false), feedback_log: ctx.feedbackLog || [], notes: field(v, "notes").value,
+                    language: field(v, "rlang").textContent };
+    const r = ctx.compose ? await post("/api/compose/send", { to, cc, subject, body, body_zh: ctx.pairs.zh, attachments, ...learn })
       : await post("/api/send", { mailbox: ctx.mailbox, email_id: ctx.email_id, to, cc, bcc, draft_key: ctx.kolAddress,
-                                  subject, body, body_zh: ctx.pairs.zh, attachments });
+                                  subject, body, body_zh: ctx.pairs.zh, attachments, ...learn });
     note.textContent = `已发送给 ${[].concat(r.to).join("、")}` + (r.cc && r.cc.length ? `，抄送 ${r.cc.join("、")}` : "") +
                        (r.bcc && r.bcc.length ? `，密送 ${r.bcc.join("、")}` : "") +
                        (atts.length ? `，带 ${atts.length} 个附件` : "") +
@@ -2592,7 +2647,8 @@ async function phoneDraft(ctx) {
     field(v, "rbody").value = c.body;
     if (!field(v, "rsubject").value) field(v, "rsubject").value = (/^re:/i.test(c.subject || "") ? "" : "Re: ") + (c.subject || "");
     if (!field(v, "rto").value.trim() && c.channel === "email") field(v, "rto").value = (c.who.match(/<([^>]+)>/) || [])[1] || "";
-    ctx.draftFor = targetKey(ctx); ctx.aiBody = c.body; markTarget(ctx);
+    ctx.draftFor = targetKey(ctx); ctx.aiBody = c.ai_body || c.body; markTarget(ctx);
+    ctx.offer = c.offer || null; ctx.zhEditsLog = []; ctx.compliance = null; ctx.mode = "draft";
     ctx.feedbackLog = (c.feedback || []).filter(x => typeof x === "string");  // what was said on the phone still holds
     field(v, "rstrategy").textContent = "手机上起草的版本";
     field(v, "rapproval").textContent = "无";
@@ -3175,6 +3231,183 @@ $("#aiCheckBtn").onclick = safe(async () => {
   try { await post("/api/ai/check", {}); } catch (e) { /* the status line shows what is wrong */ }
   finally { b.disabled = false; b.textContent = "重新检测 AI"; await loadStatus(); }
 });
+
+// ---------------------------------------------------------------- the playbook: what changed (a notice once), the
+// change log (undo, approve, roll back) and 手册更新 (one sentence of the owner -> changes they confirm one by one)
+const PB_GROUPS = [["trial", "试用中（14 天内可以一键撤销）"], ["pending", "待您批"], ["expired", "已过期提醒"], ["history", "历史"]];
+const PB_STATUS = { trial: "试用中", kept: "已保留", pending: "待您批", rejected: "没采用", reverted: "已撤销", done: "已处理", applied: "已生效", expired: "已过期" };
+
+async function checkPlaybookNotice() {
+  if (st.loginShown || document.querySelector("dialog[open]")) return;
+  let n;
+  try { n = await api("/api/playbook/notice"); } catch (e) { return; }
+  if ((!n.playbook && !n.version) || document.querySelector("dialog[open]")) return;
+  st.pbNotice = n;
+  const p = n.playbook, v = n.version;
+  $("#pbNoticeTitle").textContent = p ? p.title : (v ? v.title : "");
+  const lines = $("#pbNoticeLines"); lines.textContent = "";
+  for (const t of p ? [...(p.alerts || []), ...p.lines] : []) {
+    const li = document.createElement("li"); li.textContent = t;
+    if ((p.alerts || []).includes(t)) li.className = "alert";
+    lines.append(li);
+  }
+  lines.hidden = !p;
+  $("#pbNoticeVersion").hidden = !(p && v);
+  const vlines = p ? $("#pbVersionLines") : lines;
+  if (v) {
+    if (p) { $("#pbVersionTitle").textContent = v.title; vlines.textContent = ""; }
+    else lines.hidden = false;
+    for (const t of v.lines) { const li = document.createElement("li"); li.textContent = t; vlines.append(li); }
+  }
+  $("#pbNoticeOpen").hidden = !p;
+  $("#pbNoticeDlg").showModal();
+}
+async function pbNoticeSeen() {
+  const n = st.pbNotice || {};
+  st.pbNotice = null;
+  $("#pbNoticeDlg").close();
+  await post("/api/playbook/notice", { ids: n.playbook ? n.playbook.ids : [], version: n.version ? n.version.version : "" }).catch(() => {});
+}
+$("#pbNoticeOk").onclick = safe(pbNoticeSeen);
+$("#pbNoticeOpen").onclick = safe(async () => { await pbNoticeSeen(); await openPlaybook(); });
+$("#pbNoticeDlg").addEventListener("cancel", () => { pbNoticeSeen(); });
+
+function pbEl(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+function pbButton(label, fn, primary) { const b = pbEl("button", "act" + (primary ? " primary" : ""), label); b.type = "button"; b.onclick = safe(fn); return b; }
+function pbNote(text, err) { const n = $("#pbNote"); n.className = err ? "note err" : "note"; n.textContent = text || ""; }
+
+function pbHunk(h, actions) {
+  const box = pbEl("div", "pbhunk");
+  const head = pbEl("div", "pbhead");
+  head.append(pbEl("span", "why", `${h.section || ""}${h.section ? "：" : ""}${h.why_zh || ""}`));
+  if (h.reason) head.append(pbEl("span", "note", h.reason));
+  box.append(head);
+  if (h.anchor && h.op !== "insert_after" && h.op !== "expired") box.append(pbEl("div", "old", h.anchor));
+  if (h.op === "insert_after" && h.anchor) box.append(pbEl("div", "note", "加在这句后面：" + h.anchor.slice(0, 80)));
+  if (h.op === "expired" && h.anchor) box.append(pbEl("div", "new", h.anchor));
+  if (h.new_text) box.append(pbEl("div", "new", h.new_text));
+  if (h.evidence_quote) box.append(pbEl("div", "note", "依据：" + h.evidence_quote));
+  if (actions) { const row = pbEl("div", "row2"); actions.forEach(a => row.append(a)); box.append(row); }
+  return box;
+}
+
+async function pbDo(path, body, done) {
+  try { const r = await post(path, body); pbNote(done || "好了"); await loadPlaybook(); return r; }
+  catch (e) {
+    if (e.data && e.data.conflict && confirm(e.message + "。要整版回滚吗？（这条之后的所有改动都会一起撤掉，当前版本会留在历史里）")) {
+      return pbDo("/api/playbook/rollback", body, "已整版回滚");
+    }
+    pbNote(e.message, true);
+  }
+}
+
+function pbChange(c) {
+  const box = pbEl("div", "pbitem" + (c.alert ? " alert" : ""));
+  const head = pbEl("div", "pbhead");
+  head.append(pbEl("b", "", `${new Date(c.at * 1000).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })} · ${c.source_zh}`));
+  head.append(pbEl("span", "note", PB_STATUS[c.status] || c.status));
+  if (c.status === "trial" && c.trial_until) head.append(pbEl("span", "note", "试用到 " + new Date(c.trial_until * 1000).toLocaleDateString("zh-CN")));
+  if (c.revertible) head.append(pbButton("撤销", () => confirm("撤销这次改动？") && pbDo("/api/playbook/revert", { id: c.id }, "已撤销")));
+  if (c.rollback && (c.status === "trial" || c.status === "kept" || c.status === "applied"))
+    head.append(pbButton("整版回滚到这次之前", () => confirm("回到这次改动之前的版本？之后的所有改动都会撤掉（当前版本会留在历史里）") && pbDo("/api/playbook/rollback", { id: c.id }, "已整版回滚")));
+  box.append(head);
+  if (c.alert) box.append(pbEl("p", "note err", c.alert));
+  if (c.note) box.append(pbEl("p", "note", (c.source === "update" ? "您的原话：" : "") + c.note));
+  c.hunks.forEach((h, i) => {
+    let actions = null;
+    if (c.status === "pending" && h.state === "pending")
+      actions = [pbButton("接受", () => pbDo("/api/playbook/decide", { id: c.id, index: i, accept: true }, "已写进手册"), true),
+                 pbButton("不要", () => pbDo("/api/playbook/decide", { id: c.id, index: i, accept: false }, "好的，不改"))];
+    if (c.status === "expired")
+      actions = [pbButton("删掉这一行", () => pbDo("/api/playbook/expired", { id: c.id, action: "delete" })),
+                 pbButton("恢复原文", () => pbDo("/api/playbook/expired", { id: c.id, action: "restore" })),
+                 pbButton("先留着", () => pbDo("/api/playbook/expired", { id: c.id, action: "keep" }))];
+    if (c.status !== "pending" || h.state === "pending" || h.state === "rejected") box.append(pbHunk(h, actions));
+  });
+  (c.rule_changes || []).forEach((r, j) => {
+    const line = pbEl("div", "pbhunk");
+    line.append(pbEl("div", "why", r.card_zh || ""), pbEl("div", "note", r.why_zh || ""));
+    if (c.status === "pending" && r.state === "pending") {
+      const row = pbEl("div", "row2");
+      row.append(pbButton("接受", () => pbDo("/api/playbook/decide", { id: c.id, rule: j, accept: true }, "硬规则已改"), true),
+                 pbButton("不要", () => pbDo("/api/playbook/decide", { id: c.id, rule: j, accept: false }, "好的，不改")));
+      line.append(row);
+    } else line.append(pbEl("div", "note", r.state === "accepted" ? "已生效" : r.state === "rejected" ? "没采用" : ""));
+    box.append(line);
+  });
+  if (c.status === "pending" && c.hunks.filter(h => h.state === "pending").length + (c.rule_changes || []).filter(r => r.state === "pending").length > 1) {
+    const row = pbEl("div", "row2");
+    const marked = c.hunks.some(h => h.state === "pending" && h.redline) || (c.rule_changes || []).some(r => r.state === "pending" && r.redline);
+    row.append(pbButton(marked ? "其余全部接受（⚠ 的要单独点）" : "全部接受", () => pbDo("/api/playbook/decide", { id: c.id, all: true, accept: true }, "已写进手册"), true),
+               pbButton("都不要", () => pbDo("/api/playbook/decide", { id: c.id, all: true, accept: false }, "好的，不改")));
+    box.append(row);
+  }
+  return box;
+}
+
+async function loadPlaybook() {
+  const d = await api("/api/playbook/changes");
+  const box = $("#pbGroups"); box.textContent = "";
+  const info = pbEl("p", "note", `手册现在 ${d.chars} 字（自动修改的上限是 ${Math.round((d.baseline || d.chars) * 1.1)} 字）。`
+    + `还没复盘的修改：${d.contrast} 封（攒够 3 封、并且 15 分钟没在起草时，每天自动复盘一次）。`
+    + (d.last_review ? ` 上次复盘：${d.last_review}。` : "") + (d.running ? " 正在复盘…" : ""));
+  box.append(info);
+  if (d.overrides_error) box.append(pbEl("p", "note err", d.overrides_error));
+  if ((d.overrides || []).length) {
+    const o = pbEl("div", "pbitem");
+    o.append(pbEl("b", "", "您改过的硬规则（AI 草稿的自动检查按这些来）"));
+    const ul = pbEl("ul"); d.overrides.forEach(t => ul.append(pbEl("li", "", t))); o.append(ul);
+    o.append(pbButton("全部恢复默认", () => confirm("把改过的硬规则全部恢复成默认？手册文字不会变。") && pbDo("/api/playbook/overrides/reset", {}, "硬规则已恢复默认")));
+    box.append(o);
+  }
+  if (d.pending.some(c => c.hunks.some(h => (h.reason || "").includes("体积预算")))) {
+    const row = pbEl("div", "row2");
+    row.append(pbEl("span", "note", "手册快超出体积预算了：可以把案例库里最早的 5 条移到归档文件（归档不进 AI 的提示，随时能打开看）。"),
+               pbButton("移 5 条旧案例到归档", () => confirm("把案例库最早的 5 条移到 data\\案例库_归档.md？") && pbDo("/api/playbook/archive", { rows: 5 }, "已归档")));
+    box.append(row);
+  }
+  for (const [key, title] of PB_GROUPS) {
+    const items = d[key] || [];
+    if (!items.length && key !== "history") continue;
+    box.append(pbEl("h4", "", `${title}（${items.length}）`));
+    if (!items.length) box.append(pbEl("p", "note", "还没有记录"));
+    items.forEach(c => box.append(pbChange(c)));
+  }
+}
+
+async function openPlaybook() {
+  pbNote(""); $("#pbCard").textContent = "";
+  if (!$("#pbDlg").open) $("#pbDlg").showModal();
+  try { await loadPlaybook(); } catch (e) { pbNote(e.message, true); }
+}
+$("#pbBtn").onclick = safe(openPlaybook);
+$("#pbClose").onclick = () => $("#pbDlg").close();
+$("#setupPbBtn").onclick = safe(async () => { $("#setupDlg").close(); await openPlaybook(); });
+$("#pbSaysBtn").onclick = safe(async () => {
+  const text = $("#pbSays").value.trim();
+  if (!text) { pbNote("先写一句：这次要改什么", true); return; }
+  const b = $("#pbSaysBtn"); b.disabled = true; pbNote("AI 正在通读手册，找出所有要跟着改的地方，约一分钟…");
+  try {
+    const r = await post("/api/playbook/update", { text });
+    $("#pbSays").value = "";
+    const card = $("#pbCard"); card.textContent = "";
+    card.append(pbEl("h4", "", "请逐处确认（确认后立刻生效，不等复盘）"), pbChange(r.change));
+    pbNote("");
+    await loadPlaybook();
+  } catch (e) { pbNote(e.message, true); }
+  finally { b.disabled = false; }
+});
+$("#pbReviewBtn").onclick = safe(async () => {
+  const b = $("#pbReviewBtn"); b.disabled = true; pbNote("正在复盘最近您改过的草稿…");
+  try {
+    const r = await post("/api/playbook/review", {});
+    pbNote(r.note || `复盘好了：自动写进 ${r.applied} 处（试用中），待您批 ${r.pending} 处，丢弃 ${r.rejected} 处。`);
+    await loadPlaybook();
+  } catch (e) { pbNote(e.message, true); }
+  finally { b.disabled = false; }
+});
+setTimeout(safe(checkPlaybookNotice), 4000);
+setInterval(safe(checkPlaybookNotice), 120000);
 
 $("#fbBtn").onclick = () => { $("#fbNote").textContent = ""; $("#fbDlg").showModal(); $("#fbText").focus(); };
 $("#fbClose").onclick = () => $("#fbDlg").close();

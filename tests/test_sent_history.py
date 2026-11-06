@@ -33,6 +33,7 @@ def no_wait(monkeypatch):
     async def sleep(s):
         pass
     monkeypatch.setattr(app.asyncio, "sleep", sleep)
+    app.MailBridge.no_address_search.clear()
 
 
 def test_one_server_hiccup_does_not_fail_the_draft():
@@ -43,11 +44,19 @@ def test_one_server_hiccup_does_not_fail_the_draft():
     assert bridge.calls == ["list_emails_metadata", "list_emails_metadata", "get_emails_content"]
 
 
-def test_a_server_that_keeps_failing_is_still_reported():
+def test_a_refused_search_falls_back_to_the_newest_mails():
+    # Alibaba Mail refuses every search by address (tests/test_address_search.py): the folder is read instead
     bridge = Fake([FLAKY, FLAKY])
+    got = asyncio.run(bridge.sent_to("kol@example.com"))
+    assert [e["body"] for e in got] == ["our offer"]
+    assert bridge.calls == ["list_emails_metadata"] * 3 + ["get_emails_content"]
+
+
+def test_a_server_that_keeps_failing_is_still_reported():
+    bridge = Fake([FLAKY] * 4)  # the search twice, then the plain list and its own fallback
     with pytest.raises(app.MailError, match="provider_failure"):
         asyncio.run(bridge.sent_to("kol@example.com"))
-    assert bridge.calls == ["list_emails_metadata", "list_emails_metadata"]
+    assert bridge.calls == ["list_emails_metadata"] * 4
 
 
 def test_other_errors_are_not_retried():

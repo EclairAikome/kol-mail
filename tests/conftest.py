@@ -12,3 +12,5 @@ _settings.write_text(json.dumps({
 }), encoding="utf-8")
 os.environ["KOL_MAIL_SETTINGS"] = str(_settings)
 os.environ["KOL_MAIL_DATA"] = str(_settings.parent / "data")  # app.py writes its files here, never in the checkout
+# attachdir.py downloads into %LOCALAPPDATA%\kol-mail\attach-tmp: a test never touches the real one
+os.environ["LOCALAPPDATA"] = str(_settings.parent / "localappdata")

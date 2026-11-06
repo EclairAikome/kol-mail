@@ -212,13 +212,15 @@ def test_a_breaking_draft_is_rewritten_until_it_complies(monkeypatch):
     draft, pairs = asyncio.run(app.checked_draft(CTX, notes="回他"))
     assert draft["reply_body"] == GOOD and pairs["ok"]
     assert draft["compliance"] == {"checked": True, "ok": True, "revisions": 1, "broken": [], "waived": [],
-                                   "missed": [],
+                                   "missed": [], "waived_rules": [],
+                                   "flagged": ["no-extra-banner-promise", "payment-after-publication"],
                                    "fixed": [r["title_zh"] for r in c.load().rules
                                              if r["id"] in ("payment-after-publication", "no-extra-banner-promise")]}
     assert any(w.startswith("合规检查自动改写了 1 次") for w in draft["warnings"])
     assert draft["notes_zh"] == "第 1 版"  # what the version does, not the rewrite's note
     rewrite = calls[1]
-    assert rewrite.startswith("MODE: comply") and "COMPLIANCE_FEEDBACK>>" in rewrite and "PREVIOUS_DRAFT>>" in rewrite
+    # MODE comes last: a rewrite repeats the draft's prompt word for word up to PREVIOUS_DRAFT (prompt cache)
+    assert rewrite.endswith("\nMODE: comply") and "COMPLIANCE_FEEDBACK>>" in rewrite and "PREVIOUS_DRAFT>>" in rewrite
     assert "Rule payment-after-publication" in rewrite and "OWNER_NOTES>>\n回他" in rewrite
 
 
@@ -378,7 +380,7 @@ def test_the_side_by_side_belongs_to_the_final_text(monkeypatch):
 def test_a_translation_stays_a_translation_when_rewritten(monkeypatch):
     calls = fake_model(monkeypatch, [BAD, GOOD])
     asyncio.run(app.checked_draft(CTX, mode="translate", notes="我们视频发布后付款"))
-    assert calls[1].startswith("MODE: comply translate") and "OWNER_NOTES>>\n我们视频发布后付款" in calls[1]
+    assert calls[1].endswith("\nMODE: comply translate") and "OWNER_NOTES>>\n我们视频发布后付款" in calls[1]
 
 
 def test_owner_feedback_goes_into_every_rewrite(monkeypatch):
@@ -412,7 +414,7 @@ def test_what_the_owner_asked_for_is_never_rewritten_away(monkeypatch):
 def test_a_draft_that_skipped_the_owners_feedback_is_sent_back_for_it(monkeypatch):
     calls = fake_model(monkeypatch, [GOOD, GOOD], verdicts=[((), ["主人要求价格改成两条 150 美元，草稿没改"]), ((), [])])
     draft, _ = asyncio.run(app.checked_draft(CTX, previous="old", feedback="价格改成两条 150 美元"))
-    assert len(calls) == 2 and calls[1].startswith("MODE: comply")
+    assert len(calls) == 2 and calls[1].endswith("\nMODE: comply")
     assert "OWNER_NOT_DONE>>\n- 主人要求价格改成两条 150 美元，草稿没改" in calls[1]
     assert draft["compliance"]["ok"] and draft["compliance"]["missed"] == []
 

@@ -62,6 +62,36 @@ def set_preferences(playbook: str, preferences: str) -> str:
     return playbook.rstrip("\n") + "\n\n" + section.rstrip("\n") + "\n"
 
 
+def sections(playbook: str) -> list[tuple[str, int, int]]:
+    """(heading line, start, end) of every "## " section of the playbook, in order; a section ends at the next "#"
+    or "##" heading. Text before the first section (the title, the opening paragraph) is in none of them."""
+    playbook = _normalize(playbook)
+    found = []
+    for m in _SECTION.finditer(playbook):
+        line_end = playbook.find("\n", m.start())
+        line_end = len(playbook) if line_end < 0 else line_end
+        following = _NEXT.search(playbook, line_end)
+        found.append((playbook[m.start():line_end].strip(), m.start(), following.start() if following else len(playbook)))
+    return found
+
+
+def section_of(playbook: str, offset: int) -> str:
+    """The heading of the section that holds this offset, "" for the text before the first section."""
+    for heading, start, end in sections(playbook):
+        if start <= offset < end:
+            return heading
+    return ""
+
+
+def without_sections(playbook: str, drop) -> str:
+    """The playbook with every section whose heading drop(heading) accepts left out, everything else unchanged."""
+    playbook = _normalize(playbook)
+    for heading, start, end in reversed(sections(playbook)):
+        if drop(heading):
+            playbook = playbook[:start] + playbook[end:]
+    return playbook
+
+
 def clean_signature(text: str) -> str:
     lines = [line.strip() for line in _CONTROL.sub("", (text or "").replace("\r\n", "\n")).split("\n")]
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip("\n")

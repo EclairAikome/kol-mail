@@ -14,6 +14,10 @@ from pathlib import Path
 import yaml
 
 RULES_FILE = Path(__file__).resolve().parent / "rules" / "negotiation_rules.yaml"
+# The user's own revisions of the rules (手册更新), laid over RULES_FILE: data/rules_overrides.yaml, which the updater
+# never replaces. app.py sets the path; None: no overrides.
+OVERRIDES_FILE: Path | None = None
+OVERRIDE_FIELDS = ("title_zh", "fix", "cap", "patterns", "allow", "disabled")
 ACTIONS = ("revise", "review")
 EVIDENCE_MAX = 160
 IMAGE_EXT = re.compile(r"\.(png|jpe?g|webp|gif|heic|bmp)\b", re.IGNORECASE)
@@ -63,6 +67,7 @@ class Rules:
 # ---------------------------------------------------------------- loading
 
 _cache: dict = {"mtime": None, "path": None, "rules": None}
+_overrides_problem: dict = {"error": ""}
 
 
 REGEX_KEYS = ("near", "exempt", "kol_mentions", "unless_owner", "trigger", "reminder", "games", "markers",
@@ -133,14 +138,68 @@ def parse(raw) -> Rules:
     return Rules(rules, vocab, int(revisions))
 
 
+def overlay(raw: dict, overrides) -> dict:
+    """The raw rule file with the user's overrides laid over it: {"rules": {id: {field: value}}, "vocab": {name:
+    regex}}. Only OVERRIDE_FIELDS of existing rules change ("disabled": true takes a rule out); a rule id or a field
+    the overrides name that does not exist is an error, so a typo never passes for a change."""
+    if not overrides:
+        return raw
+    if not isinstance(overrides, dict):
+        raise RulesError("rules_overrides.yaml 应该是 rules/vocab 的对照")
+    rules = [dict(r) for r in raw.get("rules") or []]
+    by_id = {str(r.get("id")): r for r in rules if isinstance(r, dict)}
+    drop = set()
+    for rid, fields in (overrides.get("rules") or {}).items():
+        rid = str(rid)
+        if rid not in by_id:
+            raise RulesError(f"rules_overrides.yaml 里的规则 {rid} 在规则文件里没有")
+        if not isinstance(fields, dict):
+            raise RulesError(f"rules_overrides.yaml 里规则 {rid} 应该是“字段: 值”")
+        for k, v in fields.items():
+            if k not in OVERRIDE_FIELDS:
+                raise RulesError(f"rules_overrides.yaml 不能改规则 {rid} 的 {k}")
+            if k == "disabled":
+                if v is True:
+                    drop.add(rid)
+                continue
+            by_id[rid][k] = v
+    vocab = dict(raw.get("vocab") or {})
+    for name, pattern in (overrides.get("vocab") or {}).items():
+        if str(name) not in vocab:
+            raise RulesError(f"rules_overrides.yaml 里的 vocab {name} 在规则文件里没有")
+        vocab[str(name)] = pattern
+    return {**raw, "rules": [r for r in rules if str(r.get("id")) not in drop], "vocab": vocab}
+
+
+def read_overrides(path: Path | None) -> dict | None:
+    if path is None or not path.exists():
+        return None
+    try:
+        return yaml.safe_load(path.read_text(encoding="utf-8")) or None
+    except (OSError, yaml.YAMLError) as e:
+        raise RulesError(f"rules_overrides.yaml 读不了：{e}") from e
+
+
+def overrides_problem() -> str:
+    """Why the user's overrides are not in force right now ("" when they are, or there are none)."""
+    return _overrides_problem["error"]
+
+
 def load(path: Path | None = None) -> Rules:
-    """The rules, read again whenever the file changes."""
+    """The rules, read again whenever the file or the user's overrides change. Overrides that do not parse are left
+    out (the base rules still hold, overrides_problem says why): a broken override never switches the check off."""
     path = path or RULES_FILE
+    over = OVERRIDES_FILE if path == RULES_FILE else None
     try:
         mtime = path.stat().st_mtime_ns
     except OSError as e:
         raise RulesError(f"读不到规则文件 {path.name}：{e}") from e
-    if _cache["rules"] is not None and _cache["mtime"] == mtime and _cache["path"] == path:
+    try:
+        over_mtime = over.stat().st_mtime_ns if over is not None and over.exists() else None
+    except OSError:
+        over_mtime = None
+    key = (mtime, over, over_mtime)
+    if _cache["rules"] is not None and _cache["mtime"] == key and _cache["path"] == path:
         return _cache["rules"]
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -152,7 +211,13 @@ def load(path: Path | None = None) -> Rules:
         raise
     except Exception as e:  # noqa: BLE001  whatever a hand edit did, the drafts go on without the check
         raise RulesError(f"规则文件 {path.name} 格式不对：{e}") from e
-    _cache.update(mtime=mtime, path=path, rules=rules)
+    _overrides_problem["error"] = ""
+    if over_mtime is not None:
+        try:
+            rules = parse(overlay(raw, read_overrides(over)))
+        except Exception as e:  # noqa: BLE001  the base rules hold; the page says the overrides are off
+            _overrides_problem["error"] = f"您改过的硬规则没生效：{e}"
+    _cache.update(mtime=key, path=path, rules=rules)
     return rules
 
 
