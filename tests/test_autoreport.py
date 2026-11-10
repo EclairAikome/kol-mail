@@ -225,6 +225,43 @@ def test_an_error_from_before_the_computer_slept_has_not_lasted(sent):
     assert w.check(blip) == []  # the network is not up yet a moment after waking: not an eight-hour outage
 
 
+class MacClocks:
+    """awake.clocks() on a Mac: the first clock goes on while the Mac sleeps; the second, the one time.monotonic
+    reads there (mach_absolute_time), stands still."""
+
+    def __init__(self):
+        self.wall = self.up = 1000.0
+
+    def __call__(self):
+        return self.wall, self.up
+
+    def run(self, seconds: float):
+        self.wall += seconds
+        self.up += seconds
+
+    def sleep(self, seconds: float):
+        self.wall += seconds
+
+
+def test_a_mac_napping_all_night_is_not_an_outage(sent, monkeypatch):
+    # A colleague's MacBook, 2026-11-10 02:38-05:20: asleep, with a Power Nap wake every quarter of an hour, and each
+    # wake found the Telegram long poll from before the sleep dead (ReadTimeout). Counted on time.monotonic, which
+    # stands still while a Mac sleeps, the wakes added up to "已经持续 40 分钟" and a report blaming the network.
+    import awake
+    mac = MacClocks()
+    monkeypatch.setattr(awake, "clocks", mac)
+    w = autoreport.StateWatcher({"mobile_error": "手机审稿"})
+    timeout = {"mobile_error": "手机审稿机器人：连不上 Telegram：ReadTimeout（自动重试中）"}
+    for _ in range(12):  # three hours: four minutes awake, eleven asleep
+        for _ in range(4):
+            assert w.check(timeout) == []
+            mac.run(60)
+        mac.sleep(11 * 60)
+    # the same error for half an hour on a Mac that stays awake is an outage
+    reported = [w.check(timeout) for _ in range(31) if not mac.run(60)]
+    assert reported[-1] == ["mobile_error"] and not any(reported[:-1])
+
+
 def test_a_long_report_is_cut_but_keeps_its_version(sent):
     autoreport.report("AI", "boom", "x" * 10000, wait=True)
     [text] = sent

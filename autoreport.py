@@ -356,6 +356,17 @@ CLEAR_CHECKS = 3    # checks in a row without an error before an outage counts a
 SLEEP_GAP = 5 * 60  # a gap this long between two checks: the computer slept, so nothing has "lasted" across it
 
 
+def wall_clock() -> float:
+    """Seconds that go on while the computer sleeps, so that SLEEP_GAP sees a sleep. time.monotonic does not on a Mac
+    (mach_absolute_time stands still in sleep): there a night of Power Nap wakes, each finding the network calls from
+    before the sleep dead, added up to a lasting outage (a colleague's MacBook, 2026-11-10). awake.clocks() reads one
+    that does; time.monotonic where the system offers none. Imported here: awake is standard library only too, and
+    the service runners' report_exit never needs it."""
+    import awake
+    pair = awake.clocks()
+    return pair[0] if pair else time.monotonic()
+
+
 def self_healing(value: str) -> bool:
     """Every part of it (the mail scan joins one error per mailbox with "；") is an error the app gets over itself."""
     parts = [p for p in value.split("；") if p.strip()]
@@ -371,7 +382,7 @@ class StateWatcher:
     PATIENCE, and then once per likely cause until the outage is over: one night of a colleague's patchy VPN sent five
     Telegram reports and three POPO ones on 2026-10-28, each gone a minute later."""
 
-    def __init__(self, names: dict[str, str], clock=time.monotonic):
+    def __init__(self, names: dict[str, str], clock=wall_clock):
         self.names = names  # field -> where, e.g. {"claude_error": "AI"}
         self.seen: dict[str, str] = {}
         self.since: dict[str, float] = {}  # field -> when this outage began

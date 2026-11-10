@@ -50,6 +50,23 @@ def test_off_hours_email_follows_the_mode(monkeypatch, mode, expected):
     assert run_offhours(monkeypatch, mode) == expected
 
 
+def test_phone_review_has_no_cap_per_off_period(monkeypatch, tmp_path):
+    """A busy weekend once stopped at 40 phone cases and the rest waited for Monday; every message gets one now."""
+    import mobile
+    store = mobile.Cases(tmp_path / "m.sqlite3", tz=autoreply.TZ)
+    queued = []
+    monkeypatch.setattr(app, "cases", store)
+    monkeypatch.setattr(app.case_queue, "put_nowait", queued.append)
+    monkeypatch.setattr(app, "alert", lambda *a, **k: (_ for _ in ()).throw(AssertionError(a)))
+    period = datetime.now(autoreply.TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    for i in range(60):
+        app.open_email_case({**KOL_MAIL, "message_id": f"<m{i}@x.com>", "email_id": str(i),
+                             "sender": f"K{i} <k{i}@gmail.com>"}, f"k{i}@gmail.com", period)
+    for i in range(60):
+        app.open_telegram_case(1000 + i, f"T{i}", [{"id": 1, "date": "d", "text": "hi"}], 1, period, f"tg:{i}:1")
+    assert len(queued) == 120
+
+
 def test_off_hours_telegram_sends_nothing_when_off(monkeypatch):
     cfg = autoreply.Config(schedule=OffHours(), telegram_enabled=True, offhours_mode="off")
     monkeypatch.setattr(app, "load_autoreply_config", lambda: cfg)
