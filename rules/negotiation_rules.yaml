@@ -1,5 +1,5 @@
-# Hard rules every reply to a KOL must keep, taken from the negotiation playbook (谈判手册), the KOL team SOP
-# (koc分销+云机新游kol拓新SOP) and the owner's own corrections of earlier drafts. compliance.py checks each draft
+# Hard rules every reply to a KOL must keep, taken from the negotiation playbook (谈判手册), the team's SOP
+# and the owner's own corrections of earlier drafts. compliance.py checks each draft
 # against them; app.py rewrites a failing draft up to max_revisions times and then flags it to the owner.
 #
 # Each rule:
@@ -21,7 +21,7 @@
 #   skip_with_outgoing_attachments  off when the caller knows files go with the reply
 # Text in quotes ("...", “...”, «...», 「...」) is left out of pattern rules: it is mostly the title of a KOL's video.
 #
-# The owner's own words win over every rule here (主人 2026-10-29: "我的话就是金科玉律"). Whenever the owner wrote notes
+# The owner's own words win over every rule here . Whenever the owner wrote notes
 # or feedback for a draft, app.py's owner_check asks a model which flags the owner asked for: those stay in the draft
 # and are only mentioned, never rewritten away. It also checks that every instruction of the owner was carried out,
 # which replaces owner-wording-kept below; that rule only acts when the owner check cannot run.
@@ -49,7 +49,7 @@ vocab:
   price_quote: '[$€£₽¥]\s?\d|\d[\d.,\s]{0,12}(usd|us\$|dollars?|bucks|eur|euros?|€|gbp|£|руб\w*|₽|rub|r\$|brl|reais|yen|円|원|krw|元|rmb|cad|aud|usdt)\b|\b(rate|price|fee|charge|quote)\w*[^.\n]{0,25}\d{2,}|\d{2,}[^.\n]{0,12}(per|a|each) (video|stream|post|short)'
   profit: 'net profit|\bprofit|\bmargin|\b\d{2}\s?/\s?\d{2}\b[^.\n]{0,15}split|прибыл|маржи|ganancia|beneficio|margen|lucro|margem|bénéfice|gewinn|利润|利益|이익|수익|纯利'
   giveaway: 'giveaway|free coupons?|розыгрыш|sorteo|sorteio|concours|gewinnspiel|抽奖|プレゼント企画|경품'
-  # A competitor named counts too: "mi contrato con Eneba de fijo más comisión" (Polimorfia, 2026-10-13).
+  # A competitor named counts too: "mi contrato con <a competitor> de fijo más comisión".
   pushback: '\d{1,2}\s?%|other (platforms?|sites?|companies)|another (platform|site)|competitor|higher (rate|commission|share|percentage)|more commission|too low|not enough|другие (площадки|сайты)|конкурент|больше процент|мало|otras plataformas|muy bajo|别家|其他平台|\beneba\b|\bg2a\b|\bkinguin\b|\bcodashop\b|\bseagm\b|\bgamivo\b|\bdriffle\b'
   acceptance: '\b(deal|agreed|it''s a deal|works for us|we accept|we can do|confirmed|let''s do|sounds good)\b|договорились|согласны|подтверждаем|\bde acuerdo\b|trato hecho|\bfechado\b|combinado|\bd''accord\b|einverstanden|承知しました|了解しました|좋습니다|확정'
 
@@ -57,10 +57,10 @@ rules:
 
   - id: payment-after-publication
     title_zh: 只在内容发布后付款，不预付、不付定金、不按“草稿确认先付一半”
-    source: 谈判手册第零节第 1 条、第六节；SOP 固薪部分“所有付款必须在视频发后进行”；主人 2026-10-16、2026-10-22 纠正
+    source: 谈判手册第零节第 1 条、第六节；团队 SOP；主人的纠正
     action: revise
     check: patterns
-    # "Оплату до публикации ... сделать не сможем" (sent 2026-10-22) refuses a prepayment and passes.
+    # "Оплату до публикации ... сделать не сможем" refuses a prepayment and passes.
     negation_ok: true
     fix: >-
       All payment happens only after the content is published (for several pieces, pay for what is already live,
@@ -80,7 +80,7 @@ rules:
 
   - id: no-bank-transfer
     title_zh: 不走银行转账，回复里不出现 bank
-    source: 谈判手册第零节第 2 条、第六节；SOP“只推荐走任务中心和 aff 付款”
+    source: 谈判手册第零节第 2 条、第六节；团队 SOP
     action: revise
     check: patterns
     fix: >-
@@ -101,7 +101,7 @@ rules:
 
   - id: no-asking-payment-method
     title_zh: 不问对方想用什么方式收款，付款方式按 SOP 由我们说明
-    source: 主人 2026-10-16、2026-10-19 纠正；SOP 固薪部分“介绍付款”
+    source: 主人的纠正；团队 SOP
     action: revise
     check: patterns
     fix: >-
@@ -119,7 +119,7 @@ rules:
 
   - id: no-discount-code-promise
     title_zh: 不许诺专属折扣码、具体折扣率，也不说链接自带折扣
-    source: 谈判手册第八节；主人 2026-10-21“别说观众折扣码”、2026-10-23“discount code 不留”
+    source: 谈判手册第八节；主人的纠正
     action: revise
     check: patterns
     negation_ok: true
@@ -139,7 +139,7 @@ rules:
 
   - id: aff-signup-not-utm
     title_zh: 链接让达人自己加入流量联盟生成，不拼 utm_source 链接，不发 SOP 示例链接
-    source: 谈判手册第一节“谈成后的落地”；SOP“确认意向后完成落地”；主人 2026-10-22 纠正
+    source: 谈判手册第一节“谈成后的落地”；团队 SOP；主人的纠正
     action: revise
     check: patterns
     fix: >-
@@ -156,7 +156,7 @@ rules:
 
   - id: handle-cannot-change-reminder
     title_zh: 让达人配专属链接时，要提醒 handle 保存后不能改
-    source: 谈判手册第一节落地第 2 条；SOP“配置成功后无法修改”
+    source: 谈判手册第一节落地第 2 条；团队 SOP
     action: revise
     check: reminder
     trigger: 'lootbar\.(com|gg)/account/affiliate|customi[sz]ed link|custom link'
@@ -167,7 +167,7 @@ rules:
 
   - id: no-uid-for-link
     title_zh: 配链接这一步不找达人要 UID，只有 Task Center 付款或佣金有疑问时才要
-    source: 谈判手册第一节落地第 4 条；SOP 大马小组案例“不要过多提出疑问……索要用户的 LootBar UID”
+    source: 谈判手册第一节落地第 4 条；团队 SOP
     action: revise
     check: patterns
     exempt: 'task center|payout|payment|paid|commission|order|ban|trouble|problem|issue|support|viewers?|their lootbar|выплат|оплат|комисси|заказ|бан|pago|comisión|pagamento|comissão|pedido|支払|정산|付款|佣金|订单|封号'
@@ -192,7 +192,7 @@ rules:
 
   - id: trial-no-guarantee
     title_zh: 两周试合作不能承诺之后一定给固定费
-    source: 谈判手册第一节第 2 条；SOP 固薪部分 2.2“两周试合作不代表一定能获得固薪”
+    source: 谈判手册第一节第 2 条；团队 SOP
     action: revise
     check: patterns
     negation_ok: true
@@ -206,7 +206,7 @@ rules:
 
   - id: profit-share-cap
     title_zh: 利润分成最高 50%，50% 以上不谈
-    source: 谈判手册第二节（SOP 的 80% 上限不再用）
+    source: 谈判手册第二节
     action: revise
     check: profit_share_cap
     cap: 50
@@ -217,7 +217,7 @@ rules:
   - id: cps-opens-at-default
     title_zh: 纯 CPS 先报默认档（新用户 GMV 5%、老用户 1%），对方嫌低才升级成纯利分成
     # Pure CPS only: a draft that also names a fixed fee is a fixed fee plus share and is not checked (手册第二节).
-    source: 谈判手册第一节第 1 条、第二节；主人 2026-10-22
+    source: 谈判手册第一节第 1 条、第二节；主人的纠正
     action: revise
     check: cps_opens_at_default
     fix: >-
@@ -227,7 +227,7 @@ rules:
 
   - id: no-order-level-visibility
     title_zh: 不说后台能看到每笔订单、完整流水，只说能看到分成收益
-    source: 谈判手册第二节；主人 2026-10-22
+    source: 谈判手册第二节；主人的纠正
     action: revise
     check: patterns
     negation_ok: true
@@ -244,11 +244,11 @@ rules:
 
   - id: no-sweetener-before-quote
     title_zh: 对方还没报价时，不亮佣金、分成、Giveaway 这类加码（底牌留后手）
-    source: 主人 2026-10-22“我们手里要有底牌，牌不能一次性打光”
+    source: 主人的纠正
     action: revise
     check: sweetener_before_quote
     # The fix only takes the extras out: a price or package the draft offers stays (asking for data instead of
-    # answering is the formula the owner rejected on 2026-10-29).
+    # answering is the formula the owner rejected).
     fix: >-
       The KOL has not quoted a price yet. Remove any extra on top of the fee (affiliate commission, profit share,
       giveaway, coupons, codes); they are kept for later in the negotiation. Keep everything else as it is, including
@@ -265,7 +265,7 @@ rules:
 
   - id: no-extra-banner-promise
     title_zh: 横幅在 brief 文末，指向 brief 即可，不答应另发横幅
-    source: 主人 2026-10-22 “brief 里有我们 banner”、2026-10-23 “banner 不是在 brief 里就有吗”
+    source: 主人的纠正
     action: revise
     check: patterns
     exempt: '\b(brief|бриф)\b[^\n]{0,80}\b(end|bottom|last (page|section|part))\b|\b(brief|бриф)\b[^\n]{0,80}(конце|final|fim|末尾|最後|끝)'
@@ -310,7 +310,7 @@ rules:
 
   - id: no-official-authorization-claim
     title_zh: 不声称有游戏官方授权或官方合作，也不提供“授权文件”
-    source: 谈判手册第七节；SOP 客诉部分
+    source: 谈判手册第七节；团队 SOP
     action: revise
     check: patterns
     negation_ok: true
@@ -340,7 +340,7 @@ rules:
 
   - id: withdrawal-fees-truthful
     title_zh: 提现手续费由达人自己承担，不说免手续费
-    source: 谈判手册第六节；SOP Task Center“余额提现需达人自己承担手续费”
+    source: 谈判手册第六节；团队 SOP
     action: revise
     check: patterns
     near: '\b(withdraw\w*|payouts?|cash(ing)? out)\b|вывод|retir|saque|retrait|auszahl|出金|출금|提现'
@@ -352,7 +352,7 @@ rules:
 
   - id: no-country-value-judgment
     title_zh: 砍价时不说“某国观众不值这个价”，说参考了过往同类创作者的合作数据
-    source: 谈判手册第五节；SOP 固薪部分“砍价后别提到是某国家观众”
+    source: 谈判手册第五节；团队 SOP
     action: revise
     check: patterns
     fix: >-
@@ -376,7 +376,7 @@ rules:
 
   - id: no-giveaway-for-excluded-games
     title_zh: 米哈游游戏和官充游戏不做 Giveaway
-    source: 谈判手册第十节；SOP Giveaway“目前不支持 giveaway”名单
+    source: 谈判手册第十节；团队 SOP
     action: revise
     check: giveaway_games
     games: 'genshin|原神|геншин|honkai|star rail|\bhsr\b|星穹铁道|崩坏|хонкай|zenless|\bzzz\b|绝区零|marvel rivals|漫威争锋|eggy party|蛋仔|where winds meet|燕云|racing master|blood strike'
@@ -386,7 +386,7 @@ rules:
 
   - id: no-reasking-received-data
     title_zh: 对方发过的截图和数据不再找他要
-    source: 谈判手册第十一节；主人 2026-10-22“这是对对方极大的不尊重”
+    source: 谈判手册第十一节；主人的纠正
     action: revise
     check: reasking_received
     patterns:
@@ -398,7 +398,7 @@ rules:
 
   - id: owner-wording-kept
     title_zh: 主人给的卖点和说法照原话写进去，不删不弱化
-    source: 主人 2026-10-23“我说的你就照做”
+    source: 主人的纠正
     action: revise
     check: owner_wording
     # A Chinese clause of the owner's notes counts as a claim when it holds one of these markers (a selling point),
@@ -445,7 +445,7 @@ rules:
 
   - id: no-casual-congrats-on-life-change
     title_zh: 达人说辞职、转全职、休息时别随手恭喜，可能背后有难处
-    source: 主人 2026-10-22“别恭喜……没事别下头”
+    source: 主人的纠正
     action: review
     check: patterns
     kol_mentions: '\b(quit|resign\w*|full[- ]time|left my job|leaving my job|taking a break|hiatus|family (emergency|reasons))\b|уволил|ухожу с работы|на полную ставку|перерыв|renunci|tiempo completo|demiti|tempo integral|退職|휴식|그만두'

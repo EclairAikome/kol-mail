@@ -12,7 +12,7 @@ import triage_report as tr  # noqa: E402
 
 # Private-looking details are put together at run time: written out whole, the release scan would refuse this file.
 USER, MAC_USER = "wang" + ".wei", "li" + ".na"
-ADDRESS = USER + "@" + "lootbar-like.com"
+ADDRESS = USER + "@" + "acme-like.com"
 HOOK = "https://open.popo.example/open-apis/" + "robots/v1/hook/" + "abcdefghijklmnop1234"
 
 WIN_REPORT = f"""KOL Mail  10:42
@@ -47,7 +47,7 @@ def no_denylist(monkeypatch, tmp_path):
 def test_a_report_becomes_a_failing_masked_skeleton(tmp_path):
     [r] = tr.triage(WIN_REPORT, tmp_path)
     text = r["path"].read_text(encoding="utf-8")
-    for private in (USER, "lootbar-like", "abcdefghijklmnop1234"):
+    for private in (USER, "acme-like", "abcdefghijklmnop1234"):
         assert private not in text
     assert "C:\\\\Users\\\\alex\\\\AppData" in text and "someone@example.com" in text
     assert tr.leaks(text) == []

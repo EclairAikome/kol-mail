@@ -12,12 +12,25 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
+import accounts  # noqa: E402
 import config  # noqa: E402
 
 TZ = timezone(timedelta(hours=float(config.S["utc_offset_hours"])))  # a fixed offset: GMT+8 has no daylight saving
 SELF_ADDRESS = (config.S["mail"]["address"] or "").lower()
-# Colleagues get no automatic replies; without a setting, the domain of our own address is the company's.
-OWN_DOMAIN = (config.S["mail"]["company_domain"] or ("@" + SELF_ADDRESS.split("@", 1)[1] if "@" in SELF_ADDRESS else "")).lower()
+
+
+def own_domain(company_domain: str, address: str) -> str:
+    """"@company.com", whose senders are colleagues: no automatic replies to them, no rows in KOL总表. The
+    setting, else the domain of our own address. Never a mailbox anyone can open, set or not: with an address on
+    Gmail, every KOL on Gmail would count as a colleague."""
+    setting = (company_domain or "").strip().lower()
+    if setting and setting.lstrip("@") not in accounts.PUBLIC_DOMAINS:
+        return setting
+    domain = address.rpartition("@")[2].lower() if "@" in address else ""
+    return "@" + domain if domain and domain not in accounts.PUBLIC_DOMAINS else ""
+
+
+OWN_DOMAIN = own_domain(config.S["mail"]["company_domain"] or "", SELF_ADDRESS)
 MACHINE_SENDER = re.compile(
     r"(^|[._+-])(no[-_]?reply|do[-_]?not[-_]?reply|notifications?|mailer-daemon|postmaster|bounces?)([._+-]|@)"
     r"|@amazonses\.com$|mailer-daemon")

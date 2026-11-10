@@ -88,7 +88,7 @@ OURS = ["我方", "我们", "我", "己方", "自己", "本方", "me", "us", "we
 THEIRS = ["对方", "kol", "达人", "博主", "红人", "主播", "他们", "them", "they", "theirs", "creator", "influencer",
           "theirturn", "their turn"]
 LINK = re.compile(r"https?://\S+|(?:www\.)?(?:youtube\.com|youtu\.be|twitch\.tv|tiktok\.com|t\.me)/\S+", re.IGNORECASE)
-# a chat account with its display name, "tg:1274797389(@yummytim)": its "@" does not make it an address
+# a chat account with its display name, "tg:5550001234(@riverowl)": its "@" does not make it an address
 CHAT_TEXT = re.compile(r"(?<![a-z0-9])(?:tg|dc)\s*:\s*\d{1,20}\s*(?:\([^;；]*\))?", re.IGNORECASE)
 
 

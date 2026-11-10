@@ -76,7 +76,7 @@ def test_chinese_headers_and_an_email_column_with_an_odd_name(tmp_path):
     wb = Workbook()
     ws = wb.active
     ws.append(["达人", "主页", "联系方式", "跟进情况", "日期", "负责人"])
-    ws.append(["小王", "https://www.twitch.tv/w", "w@example.com", "谈价中", dt.datetime(2026, 9, 1), "吉利"])
+    ws.append(["小王", "https://www.twitch.tv/w", "w@example.com", "谈价中", dt.datetime(2026, 9, 1), "小李"])
     wb.save(tmp_path / "b.xlsx")
     guess = us.inspect(tmp_path / "b.xlsx", None, None)["guess"]
     assert guess["email"] == "联系方式"  # found by its content

@@ -70,5 +70,5 @@ def test_a_similar_heading_is_another_section():
 
 
 def test_signature_is_cleaned():
-    assert ob.clean_signature("  Eclair \r\n Marketing | LootBar  \n\n\n") == "Eclair\nMarketing | LootBar"
+    assert ob.clean_signature("  Jordan \r\n Marketing | LootBar  \n\n\n") == "Jordan\nMarketing | LootBar"
     assert ob.clean_signature("") == ""

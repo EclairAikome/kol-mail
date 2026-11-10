@@ -173,11 +173,11 @@ def split_emails(value) -> list[str]:
 CHAT_TOKEN = re.compile(r"\s*(tg|dc)\s*:\s*(\d{1,20})\s*(?:\((.*)\))?\s*", re.IGNORECASE | re.DOTALL)
 CHAT_ID_IN_TEXT = re.compile(r"(?<![a-z0-9])(tg|dc)\s*:\s*(\d{1,20})(?!\d)", re.IGNORECASE)
 CHAT_PLATFORMS = {"tg": "Telegram", "dc": "Discord"}
-CHAT_EXAMPLE = "tg:1274797389(@yummytim) 或 dc:515534399828131853(ShiruTV_)"
+CHAT_EXAMPLE = "tg:5550001234(@riverowl) 或 dc:1100000000000000001(PixelFox_)"
 
 
 def parse_chat(piece) -> tuple[str, str] | None:
-    """(identity, display name) of one token, e.g. ("dc:515534399828131853", "ShiruTV_"); None if it is not one."""
+    """(identity, display name) of one token, e.g. ("dc:1100000000000000001", "PixelFox_"); None if it is not one."""
     m = CHAT_TOKEN.fullmatch(str(piece or ""))
     return (f"{m.group(1).lower()}:{m.group(2)}", (m.group(3) or "").strip()) if m else None
 

@@ -20,7 +20,7 @@ def test_commands_are_whole_messages():
     assert mobile.parse_command("/template") == ("template", "")
     assert mobile.parse_command("模板") == ("template", "")
     assert mobile.parse_command("/AI") == ("ai", "")
-    assert mobile.parse_command("/status@KOLMail_bot") == ("status", "")
+    assert mobile.parse_command("/status@Example_bot") == ("status", "")
     assert mobile.parse_command("/holiday 10-25 11-02") == ("holiday", "10-25 11-02")
     assert mobile.parse_command("休假 12月24日") == ("holiday", "12月24日")
     assert mobile.parse_command("模板 语气再热情点") is None   # a comment on a draft, not a command

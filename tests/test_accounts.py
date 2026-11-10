@@ -487,7 +487,7 @@ def logged_out(client, monkeypatch):
 def test_without_a_mailbox_the_page_gets_the_login_screen_and_nothing_else(logged_out, monkeypatch):
     c, _, _, _ = logged_out
     s = c.get("/api/status").json()
-    assert s["login_needed"] and s["accounts"] == [] and s["login"]["domain"] == "example.com"
+    assert s["login_needed"] and s["accounts"] == [] and "domain" not in s["login"]
     assert run_guard("/api/messages", "") == 409 and run_guard("/api/sheet", "") == 409
     assert run_guard("/api/status", "") == "" and run_guard("/api/accounts/add", "") == ""
     assert run_guard("/api/pet", "") == "" and run_guard("/api/skin", "") == ""
@@ -499,7 +499,7 @@ def test_signing_in_makes_the_first_mailbox_the_primary_one(logged_out):
     assert "署名" in c.post("/api/accounts/add", json=body).json()["error"] and not cli.calls  # who signs the mail?
     d = c.post("/api/accounts/add", json={**body, "full_name": "Alex Li"}).json()
     (_, name, address, host, _), = cli.calls
-    assert d == {"restarting": True, "added": name, "warning": None} and restarts and app.restart_pending
+    assert d == {"restarting": True, "added": name, "warning": None, "found": None} and restarts and app.restart_pending
     assert (address, host) == ("alex.li@example.com", "imap.example.com")  # the company's servers, from the installer
     assert saved[("mail", "account_name")] == name and saved[("mail", "address")] == "alex.li@example.com"
     assert saved[("mail", "label")] == "工作" and saved[("identity", "name")] == "Alex Li"

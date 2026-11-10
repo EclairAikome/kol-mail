@@ -69,6 +69,7 @@ import onboarding  # noqa: E402
 import tgsetup  # noqa: E402
 import mailserver  # noqa: E402
 import mailmove  # noqa: E402
+import mailfind  # noqa: E402
 import signature  # noqa: E402
 import folders  # noqa: E402
 from sheet import popogrid  # noqa: E402  (a POPO 在线表格 as the KOL sheet)
@@ -931,7 +932,7 @@ marked_read = PerAccount(dict)    # (mailbox, uid) opened here -> when the serve
 background: set[asyncio.Task] = set()
 
 # The company mailbox had these on Amazon WorkMail, and files deals into three folders of its own. Every other mailbox
-# (Alibaba Mail, where the company mailbox is since 2026-11-04, 163, QQ, Gmail...) names its special folders its own
+# (Alibaba Mail, 163, QQ, Gmail...) names its special folders its own
 # way: they are recognised from the server's flags, else by the usual names; the deal folders are only used where
 # they exist.
 DEAL_BOXES = ("纯固薪", "CPS+固薪", "纯CPS")
@@ -4868,11 +4869,9 @@ async def page_index(request: Request):
 
 async def api_status(request: Request):
     if LOGGED_OUT:  # the login screen: no mailbox to report on
-        preset = company_preset()
         return JSONResponse({"login_needed": True, "version": config.version(), "dev": DEV,
                              "feedback_ready": feedback_ready(), "accounts": [], "account": "",
-                             "login": {"domain": preset["domain"] if preset else "", "full_name": IDENTITY["name"] or "",
-                                       "frozen": accounts_frozen()}})
+                             "login": {"full_name": IDENTITY["name"] or "", "frozen": accounts_frozen()}})
     cfg = load_autoreply_config()
     autoreply_info = None
     if cfg:
@@ -4885,6 +4884,7 @@ async def api_status(request: Request):
                          "feedback_ready": feedback_ready(), "setup_needed": not SETUP_DONE,
                          "sheet": {"mode": SHEET_MODE, "needs_map": SHEET_MODE == "mapped" and not sheet_enabled()},
                          "self_address": self_address(), "version": config.version(), "pid": os.getpid(), "dev": DEV,
+                         "signature": SIGNATURE,
                          "telegram_error": tg_error,
                          "mail_error": mail.error or bg.error, "autoreply": autoreply_info,
                          "unread_counts": unread_counts(), "flagged_count": flagged_count(),
@@ -4932,16 +4932,25 @@ looks = skin.Skin(DATA)
 signing = signature.Signature(DATA)
 
 
-def mail_args(text: str, files: list[str] | None = None) -> dict:
+def mail_args(text: str, files: list[str] | None = None, pictures: dict[str, tuple[Path, Path]] | None = None) -> dict:
     """send_email arguments for a reply's text and its own attachments: HTML in the chosen font with the handwritten
-    name and the banner (signature.py) when the patched server runs, plain text otherwise or when that fails."""
+    name and the banner (signature.py) when the patched server runs, plain text otherwise or when that fails.
+    pictures: the ones the text has "[image: N]" lines for, label -> (the uploaded file, its copy named for inline
+    sending, see placed_pictures). They show inside the text of an HTML mail; a mail that has to go as plain text
+    carries them as attachments, and their lines then name the files."""
+    pictures = pictures or {}
+    names = {label: original.name for label, (original, _) in pictures.items()}
     out = {"body": text}
     if HTML_MAIL:
         try:
-            out = signing.outgoing(text, SIGNATURE)
+            out = signing.outgoing(text, SIGNATURE, {label: copy for label, (_, copy) in pictures.items()}, names)
         except OSError as e:  # a picture that cannot be read never stops a reply: it goes as plain text
             log("signature pictures left out", err_text(e))
-    attachments = [*out.pop("attachments", []), *(files or [])]
+    files = list(files or [])
+    if pictures and not out.get("html"):
+        out = {"body": signature.text_version(text, names)}
+        files += [str(original) for original, _ in pictures.values()]
+    attachments = [*out.pop("attachments", []), *files]
     return {**out, **({"attachments": attachments} if attachments else {})}
 
 
@@ -5168,8 +5177,8 @@ async def remember_company_servers():
 
 
 # ---------------------------------------------------------------- a password the mail server stopped taking
-# The company reset every mailbox password on 2026-11-02: from then on each call failed with mcp-email-server's
-# generic "provider_failure", and colleagues had to re-run the installer to store the new one. Now a mailbox whose
+# A password changed on the server (an administrator's reset, say) makes each call fail with mcp-email-server's
+# generic "provider_failure", and used to need the installer again to store the new one. Now a mailbox whose
 # scan fails gets one login test; when the server refuses the password, nothing logs in with it any more (a run
 # of failed logins can get a mailbox locked) and the page asks for the new one.
 
@@ -5455,7 +5464,9 @@ async def api_accounts(request: Request):
 async def api_accounts_add(request: Request):
     """Add a mailbox: store it in mcp-email-server (the password goes to the system's credential store), test
     receiving and sending, and keep it only when receiving works. On the login screen (no mailbox yet) the one
-    added becomes the primary mailbox, and the app restarts to set everything up for it."""
+    added becomes the primary mailbox, and the app restarts to set everything up for it.
+    The address and the password are all it needs: servers nobody typed and no preset knows are looked for
+    (mailfind.py), before the password goes anywhere."""
     global restart_pending
     body = await request.json()
     if not isinstance(body, dict):
@@ -5482,8 +5493,21 @@ async def api_accounts_add(request: Request):
             return bad("这个邮箱已经在 KOL Mail 里了")
         if len(ACCOUNTS) >= accounts.MAX_ACCOUNTS:
             return bad(f"最多同时放 {accounts.MAX_ACCOUNTS} 个邮箱")
+        found = None  # the servers, when they were looked for and found
         try:
-            servers = accounts.servers_for(address, body, await known_servers(address))
+            try:
+                servers = accounts.servers_for(address, body, await known_servers(address))
+            except accounts.AccountError as e:
+                if e.code != "servers_unknown":
+                    raise
+                servers = found = await mailfind.discover(address)
+                log("mail servers found by", found["source"], found["imap_host"], found["smtp_host"])
+                seen = f"{found['imap_host']} {found['smtp_host']}"
+                if mailfind.needs_ok(found, address) and body.get("servers_ok") != seen:
+                    # Named by an autoconfig file or database entry, and not under the address's own domain: the
+                    # user sees where the password would go before it goes anywhere, and asks again to go on.
+                    return JSONResponse({"confirm": {"imap_host": found["imap_host"], "smtp_host": found["smtp_host"],
+                                                     "token": seen}})
             taken = await mail_cli.names() | {a.name for a in ACCOUNTS}
             for attempt in range(3):  # a name used once stays reserved there even after removal
                 name = accounts.name_for(address, taken)
@@ -5509,9 +5533,10 @@ async def api_accounts_add(request: Request):
             except accounts.AccountError as e:
                 log("mailbox rollback failed", name, err_text(e))
                 leftover = f"（另外，没能从邮件组件里删掉刚存的这个邮箱：{e}。请告诉维护者）"
+            where = f"（自动找到的收信服务器是 {found['imap_host']}）" if found else ""
             if accounts.password_problem(receiving):
-                return bad(f"邮箱服务器没接受这个密码。{PASSWORD_HINT}（{receiving}）{leftover}")
-            return bad(f"连不上收信服务器，邮箱没有加上：{receiving}{leftover}")
+                return bad(f"邮箱服务器没接受这个密码。{PASSWORD_HINT}（{receiving}）{where}{leftover}")
+            return bad(f"连不上收信服务器，邮箱没有加上：{receiving}{where}{leftover}")
         sending = await mail_cli.test(name, "outgoing")
         if LOGGED_OUT:  # the first mailbox is the primary one
             changes = [(["mail", "account_name"], name), (["mail", "address"], address), (["mail", "label"], label)]
@@ -5527,13 +5552,16 @@ async def api_accounts_add(request: Request):
         else:
             save_accounts(ACCOUNTS + [accounts.Account(name, address, label, False)])
     warning = f"收信正常，但发信测试没通过，回信可能发不出去：{sending}" if sending else None
+    if sending and found:
+        warning += f"（自动找到的发信服务器是 {found['smtp_host']}）"
+    shown = {"imap_host": found["imap_host"], "smtp_host": found["smtp_host"]} if found else None
     if LOGGED_OUT:
         log("signed in", name)
         spawn(restart_when_idle("for the first mailbox"), "restart after signing in")
-        return JSONResponse({"restarting": True, "added": name, "warning": warning})
+        return JSONResponse({"restarting": True, "added": name, "warning": warning, "found": shown})
     spawn(reload_mail_sessions(), "reconnect after adding a mailbox")
     log("mailbox added", name)
-    return JSONResponse({"accounts": accounts_summary(), "added": name, "warning": warning})
+    return JSONResponse({"accounts": accounts_summary(), "added": name, "warning": warning, "found": shown})
 
 
 async def api_accounts_remove(request: Request):
@@ -6024,7 +6052,12 @@ REPLY_PREFIX = re.compile(
     r"^\s*(?:(?:\[[^\]]{1,30}\]\s*)|(?:(?:re|res|risp|fw|fwd|aw|wg|rv|r|i|sv|vs|tr|antw|odp|ynt|réf|enc|"
     r"回复|答复|回覆|轉寄|转发)\s*(?:\[\d+\]|\(\d+\))?\s*[:：]\s*))+",
     re.IGNORECASE)
-THREAD_MAX = 20
+# A conversation lists every one of its mails. Bodies cost one IMAP login each, so only the latest THREAD_EAGER come
+# with the conversation; the earlier ones come as stubs (who, when, a preview from what is cached) and the page
+# folds them away and asks for one (/api/thread/message) when it is opened. Before 0.10 a conversation showed its
+# latest 20 mails and silently left the rest out.
+THREAD_EAGER = 20
+THREAD_LIMIT = 500       # mails of one conversation listed at most; the page says so when there are more
 INDEX_SIZE = 100         # messages per metadata page (the server's maximum); each refresh reads the newest page only
 INDEX_FRESH = 900        # seconds an index may be used before a click refreshes it live (bg refreshes it every scan)
 INDEX_PARALLEL = 2       # live index fetches at once; five parallel IMAP logins made the provider fail some of them
@@ -6378,7 +6411,8 @@ def thread_when(member: tuple[str, dict]) -> datetime:
 
 def thread_others(mailbox: str, email_id: str, opened: str, subject: str,
                   candidates: list[tuple[str, dict]]) -> list[tuple[str, dict]]:
-    """The other messages of the opened one's conversation, oldest first, at most THREAD_MAX - 1 of the latest."""
+    """The other messages of the opened one's conversation, oldest first: all of them (api_thread lists the latest
+    THREAD_LIMIT - 1)."""
     seen, others = {opened}, []
     for box, meta in candidates:
         ident = message_identity(box, meta)
@@ -6388,7 +6422,17 @@ def thread_others(mailbox: str, email_id: str, opened: str, subject: str,
         seen.add(ident)
         others.append((box, meta))
     others.sort(key=thread_when)
-    return others[-(THREAD_MAX - 1):]
+    return others
+
+
+def member_key(member: tuple[str, dict]) -> tuple[str, str]:
+    return member[0], str(member[1]["email_id"])
+
+
+def eager_members(members: list[tuple[str, dict]], mailbox: str, email_id: str) -> list[tuple[str, dict]]:
+    """The members whose bodies come with the conversation: the latest THREAD_EAGER and the opened one."""
+    latest = {member_key(m) for m in members[-THREAD_EAGER:]} | {(mailbox, str(email_id))}
+    return [m for m in members if member_key(m) in latest]
 
 
 async def thread_candidates(meta: dict) -> list[tuple[str, dict]]:
@@ -6421,9 +6465,66 @@ def warm_thread(mailbox: str, email_id: str, meta: dict):
 
     async def run():
         candidates = await thread_candidates(meta)
-        await thread_bodies(thread_others(mailbox, email_id, message_identity(mailbox, meta),
-                                          norm_subject(meta.get("subject")), candidates))
+        others = thread_others(mailbox, email_id, message_identity(mailbox, meta),
+                               norm_subject(meta.get("subject")), candidates)
+        await thread_bodies(others[-THREAD_EAGER:])  # what the conversation opens with, not its whole history
     spawn(coalesced(("thread warm", mailbox, email_id), run), "warm thread")
+
+
+def thread_entry(box: str, full: dict, opened: bool = False) -> dict:
+    """One mail of a conversation as the page shows it, its translation queued when it has none yet. unread: as it
+    was when the conversation was opened (api_thread then marks it read): the page never folds such a mail away."""
+    own = sender_address(full.get("sender")) == self_address()
+    mid = full.get("message_id")
+    row = cache.get(mid) if mid else None
+    if row and row["status"] in ("done", "skipped") and row.get("body_hash") \
+            and row["body_hash"] != body_hash(full.get("body", "")):
+        row = None  # same Message-ID, different content: never show another email's translation
+    if mid and not own and not is_skippable(full) and (not row or row["status"] == "failed"
+                                                         or (opened and mid in queued)):
+        enqueue(mid, box, full["email_id"], urgent=opened)
+        row = cache.get(mid)
+    return {"mailbox": box, "email_id": str(full["email_id"]), "message_id": mid, "own": own,
+            "sender": full.get("sender"), "recipients": full.get("recipients"), "date": shown_date(full),
+            "subject": full.get("subject"), "body": full.get("body", ""),
+            "attachments": [a for a in full.get("attachments") or []
+                            if not (own and mailserver.is_signature_picture(a))],  # our signature's pictures
+            "translation": row, "opened": opened, "flagged": is_flagged(box, full["email_id"]),
+            "unread": not own and is_unread(box, full["email_id"])}
+
+
+def thread_stub(box: str, meta: dict) -> dict:
+    """An earlier mail of a long conversation, without its body: what the folded row shows. The preview is the
+    cached Chinese when there is one; the body, the translation and the attachments come when the row is opened."""
+    mid = meta.get("message_id")
+    row = cache.get(mid) if mid else None
+    preview = (row.get("body_zh") or "") if row and row["status"] == "done" else ""
+    own = sender_address(meta.get("sender")) == self_address()
+    return {"mailbox": box, "email_id": str(meta["email_id"]), "message_id": mid, "stub": True, "own": own,
+            "sender": meta.get("sender"), "recipients": meta.get("recipients"), "date": shown_date(meta),
+            "subject": meta.get("subject"), "body": "", "preview": " ".join(preview.split())[:160],
+            "attachments": [], "translation": None, "opened": False, "flagged": is_flagged(box, meta["email_id"]),
+            "unread": not own and is_unread(box, meta["email_id"])}
+
+
+def translated(meta: dict) -> bool:
+    """A mail whose translation is there already (or that needs none): showing it whole costs no AI call."""
+    row = cache.get(meta.get("message_id")) if meta.get("message_id") else None
+    return bool(row) and row["status"] in ("done", "skipped")
+
+
+async def api_thread_message(request: Request):
+    """One earlier mail of a conversation, opened in its folded part: its body, translation and attachments."""
+    mailbox = request.query_params.get("mailbox", "")
+    email_id = request.query_params.get("id", "")
+    if not (mailbox and email_id.isdigit()):
+        return bad("缺少邮件编号")
+    full = await load_body_slot(mailbox, email_id)
+    entry = thread_entry(mailbox, full, opened=True)  # the owner is looking at it now: translated first
+    entry["opened"] = False
+    if not entry["own"] and is_unread(mailbox, email_id):
+        spawn(mark_read_later(mailbox, email_id), "mark read")
+    return JSONResponse({"message": entry})
 
 
 async def api_thread(request: Request):
@@ -6465,44 +6566,44 @@ async def api_thread(request: Request):
             candidates = []
         others = thread_others(mailbox, email_id, opened, subject, candidates)
 
+    truncated = len(others) > THREAD_LIMIT - 1  # a conversation longer than what is listed: the page says so
+    others = others[-(THREAD_LIMIT - 1):]
     members = sorted(others + [(mailbox, msg)], key=thread_when)  # the opened message is always kept
-    if quick and any("body" not in meta and (box, str(meta["email_id"])) not in bodies for box, meta in members):
+    eager = eager_members(members, mailbox, email_id)
+    if quick and any("body" not in meta and (box, str(meta["email_id"])) not in bodies for box, meta in eager):
         # The indexes are there but some bodies are not (the bg prefetch hasn't reached them yet): the same
         # answer as above, the opened mail now and the rest on the second request.
         partial, members = True, [(mailbox, msg)]
+        eager = members
     if partial:
         warm_thread(mailbox, email_id, msg)  # joins the one started above, if any
 
-    fetched = await thread_bodies(members)  # side by side on the search session, not one by one on ui
+    fetched = await thread_bodies(eager)  # side by side on the search session, not one by one on ui
+    wanted = {member_key(m) for m in eager}
 
     out = []
     for box, meta in members:
-        full = meta if "body" in meta else fetched.get((box, str(meta["email_id"])))
-        if full is None:
-            folder_index.pop(box, None)  # moved meanwhile; that folder's index is rebuilt on the next open/scan
-            continue
-        own = sender_address(full.get("sender")) == self_address()
-        mid = full.get("message_id")
-        row = cache.get(mid) if mid else None
-        if row and row["status"] in ("done", "skipped") and row.get("body_hash") \
-                and row["body_hash"] != body_hash(full.get("body", "")):
-            row = None  # same Message-ID, different content: never show another email's translation
-        is_opened = box == mailbox and str(full["email_id"]) == email_id
-        if mid and not own and not is_skippable(full) and (not row or row["status"] == "failed"
-                                                             or (is_opened and mid in queued)):
-            enqueue(mid, box, full["email_id"], urgent=is_opened)
-            row = cache.get(mid)
-        out.append({"mailbox": box, "email_id": str(full["email_id"]), "message_id": mid, "own": own,
-                    "sender": full.get("sender"), "recipients": full.get("recipients"), "date": shown_date(full),
-                    "subject": full.get("subject"), "body": full.get("body", ""),
-                    "attachments": [a for a in full.get("attachments") or []
-                                    if not (own and mailserver.is_signature_picture(a))],  # our signature's pictures
-                    "translation": row, "opened": is_opened, "flagged": is_flagged(box, full["email_id"])})
+        key = member_key((box, meta))
+        if key in wanted:
+            full = meta if "body" in meta else fetched.get(key)
+            if full is None:
+                folder_index.pop(box, None)  # moved meanwhile; that folder's index is rebuilt on the next open/scan
+                continue
+        else:
+            # An earlier mail comes whole only when that costs nothing: its body cached and its translation made.
+            # Otherwise it is a stub, and neither a login nor an AI call is spent on a mail nobody may open.
+            full = bodies.get(key)
+            if full is None or not (sender_address(full.get("sender")) == self_address() or translated(full)):
+                out.append(thread_stub(box, meta))
+                continue
+        out.append(thread_entry(box, full, opened=box == mailbox and str(full["email_id"]) == email_id))
     if not msg.get("sender") or sender_address(msg.get("sender")) != self_address():
         spawn(mark_read_later(mailbox, email_id), "mark read")
-    others = collections.defaultdict(list)  # the whole conversation is on screen: its unread KOL mails too
+    # The mails that came whole are on the page, the unread ones as rows of their own (the page never folds an
+    # unread mail away): they are read now. A stub is not: it is marked when it is opened (api_thread_message).
+    others = collections.defaultdict(list)
     for m in out:
-        if not m["own"] and not m["opened"] and is_unread(m["mailbox"], m["email_id"]):
+        if m["unread"] and not m["opened"] and not m.get("stub"):
             others[m["mailbox"]].append(m["email_id"])
     for box, ids in others.items():
         spawn(mark_read_many(box, ids), "mark read")
@@ -6516,7 +6617,7 @@ async def api_thread(request: Request):
         target = next((m for m in reversed(out) if not m["own"] and not is_skippable(m)), None)
     # Channel links: what this person wrote, in this conversation and any other cached email from them
     # (no extra IMAP). Our own emails are left out, so a link we mention never shows up as theirs.
-    texts = [m["body"] for m in out if not m["own"] and not is_skippable(m)]
+    texts = [m["body"] for m in out if not m["own"] and not is_skippable(m) and m["body"]]
     kol_address = who
     if kol_address:
         texts += [bodies[(box, str(meta["email_id"]))].get("body", "") for box, meta in candidates
@@ -6526,6 +6627,7 @@ async def api_thread(request: Request):
     # Any message of the conversation can be answered: the page fills To and Cc from its sender and recipients,
     # leaving out our own address ("me").
     return JSONResponse({"messages": out, "subject": msg.get("subject"), "partial": partial, "me": self_address(),
+                         "truncated": truncated and not partial,
                          "channels": known_channels(kol_address, texts), "kol_address": kol_address,
                          "kol_name": display_name(kol_msg) if kol_msg else "",
                          "reply_target": {"mailbox": target["mailbox"], "email_id": target["email_id"],
@@ -7837,6 +7939,10 @@ async def write_draft(ctx: dict, *, mode: str = "draft", strategy: dict | None =
     result = await run_claude(system, user_message(boundary, parts),
                               replyflow.COMPOSE_SCHEMA if compose else replyflow.DRAFT_SCHEMA, DRAFT_MODEL, timeout=300)
     reply, warnings = clean_reply(result["reply_body"], channel)
+    lost = replyflow.lost_pictures(previous, reply) if previous else []
+    if lost:  # the model is told to keep these lines; when it did not, the owner must know before sending
+        warnings.append("⚠️ 改稿后正文里没有 " + "、".join(f"[image: {n}]" for n in lost)
+                        + " 这一行了。不是你要去掉的话，在要放图的地方单独一行补上它；确实不要这张图，在下面把它去掉")
     out = {"reply_language": result.get("reply_language", ""), "reply_body": reply,
            "notes_zh": result.get("notes_zh", ""),
            "needs_approval_zh": replyflow.approval_with_materials(result.get("needs_approval_zh", ""), ctx),
@@ -7879,11 +7985,12 @@ async def side_by_side(text: str) -> dict:
     if todo:
         for role in (TRANSLATE_MODEL, DRAFT_MODEL):  # a second, stronger try when the first answer fails the check
             boundary = secrets.token_hex(8)
-            user = section(boundary, "PARAGRAPHS", json.dumps([paragraphs[i] for i in todo], ensure_ascii=False))
-            system = replyflow.BACKTRANSLATE_SYSTEM.replace("{boundary}", boundary)
+            user = user_message(boundary, [section(boundary, "PARAGRAPHS",
+                                                   json.dumps([paragraphs[i] for i in todo], ensure_ascii=False))])
             call_kind("backtranslate")
             try:
-                result = await run_claude(system, user, replyflow.PARAGRAPHS_SCHEMA, role, timeout=180)
+                result = await run_claude(replyflow.BACKTRANSLATE_SYSTEM, user, replyflow.PARAGRAPHS_SCHEMA, role,
+                                          timeout=180)
                 zh = [str(x) for x in result.get("zh") or []]
             except ClaudeUnavailable:
                 raise
@@ -7932,11 +8039,11 @@ async def owner_check(owner: list[str], body: str, zh: str,
     carry out yet), judged by a model that is shown the owner's words, the draft and its Chinese, and the flags.
     The owner's word is final: a rule they overrode is never rewritten back."""
     boundary = secrets.token_hex(8)
-    system = replyflow.OWNER_CHECK_SYSTEM.replace("{owner}", OWNER).replace("{boundary}", boundary)
+    system = replyflow.OWNER_CHECK_SYSTEM.replace("{owner}", OWNER)
     items = [{"id": v.rule, "rule": v.title_zh, "evidence": v.evidence} for v in flags]
-    user = "\n\n".join([section(boundary, "OWNER_INSTRUCTIONS", json.dumps(owner, ensure_ascii=False)),
-                        section(boundary, "DRAFT", body), section(boundary, "DRAFT_ZH", zh),
-                        section(boundary, "FLAGS", json.dumps(items, ensure_ascii=False))])
+    user = user_message(boundary, [section(boundary, "OWNER_INSTRUCTIONS", json.dumps(owner, ensure_ascii=False)),
+                                   section(boundary, "DRAFT", body), section(boundary, "DRAFT_ZH", zh),
+                                   section(boundary, "FLAGS", json.dumps(items, ensure_ascii=False))])
     call_kind("owner_check")
     result = await run_claude(system, user, replyflow.OWNER_CHECK_SCHEMA, DRAFT_MODEL, timeout=180)
     return replyflow.owner_verdict(result, {v.rule for v in flags})
@@ -8104,10 +8211,10 @@ ZH_EDIT_MAX = 30  # paragraphs changed in one go
 async def rewrite_paragraphs(text: str, edits: list[dict], language: str) -> list[str]:
     """The paragraphs of edits rewritten in the email's language to say their zh_after (replyflow.ZH_EDIT_SYSTEM)."""
     boundary = secrets.token_hex(8)
-    system = replyflow.ZH_EDIT_SYSTEM.replace("{owner}", OWNER).replace("{boundary}", boundary)
+    system = replyflow.ZH_EDIT_SYSTEM.replace("{owner}", OWNER)
     items = [{k: e[k] for k in ("original", "zh_before", "zh_after")} for e in edits]
-    user = "\n\n".join([section(boundary, "EMAIL", text), section(boundary, "LANGUAGE", language),
-                        section(boundary, "EDITS", json.dumps(items, ensure_ascii=False))])
+    user = user_message(boundary, [section(boundary, "EMAIL", text), section(boundary, "LANGUAGE", language),
+                                   section(boundary, "EDITS", json.dumps(items, ensure_ascii=False))])
     call_kind("zhedit")
     result = await run_claude(system, user, replyflow.ZH_EDIT_SCHEMA, DRAFT_MODEL, timeout=240)
     new = [strip_hidden(str(p)).strip() for p in llm.scrub(result.get("paragraphs") or [])]
@@ -8267,12 +8374,81 @@ async def api_reply_upload(request: Request):
         if len(data) > outgoing.MAX_FILE:
             return bad(limit)
     outbox.cleanup()  # cheap: drops uploads of drafts abandoned more than a week ago
+    inline = request.headers.get("x-inline") == "1"  # a picture for the text of the mail, not an attachment
+    if inline and not signature.is_picture(outgoing.clean_name(name), bytes(data[:16])):
+        return bad("正文里只能插入 PNG、JPG 或 GIF 图片（别的格式请用“添加附件”）")
     try:
         info = await asyncio.to_thread(outbox.add, name, bytes(data))
     except outgoing.AttachmentError as e:
         return bad(str(e))
-    log("attachment added", info["name"], info["size"])
-    return JSONResponse(info)
+    log("picture for the text added" if inline else "attachment added", info["name"], info["size"])
+    return JSONResponse({**info, "inline": inline})
+
+
+def reply_files(body: dict, text: str) -> tuple[list[Path], dict[str, Path], set[str]]:
+    """(the attachments, the pictures inside the text by label, every upload id) of a send request. The text and
+    the pictures must agree exactly: every "[image: N]" line has its picture and every picture its one line, so a
+    mail never goes out with a line that was meant to be a picture, or with a picture nobody placed."""
+    attached = body.get("attachments") or []
+    inline = body.get("inline") or {}
+    if not isinstance(attached, list) or not all(isinstance(i, str) for i in attached) or not isinstance(inline, dict) \
+            or not all(isinstance(k, str) and re.fullmatch(r"[0-9]{1,2}", k) and isinstance(v, str)
+                       for k, v in inline.items()):
+        raise outgoing.AttachmentError("附件参数不对")
+    if len(inline) > signature.MAX_BODY_PICTURES:
+        raise outgoing.AttachmentError(f"正文里最多放 {signature.MAX_BODY_PICTURES} 张图片")
+    ids = [*attached, *inline.values()]
+    if len(set(ids)) != len(ids):
+        raise outgoing.AttachmentError("同一个文件不能既是附件又是正文图片")
+    paths = outbox.resolve(ids)  # the limits count attachments and pictures together
+    placed = dict(zip(inline, paths[len(attached):]))
+    lines = signature.picture_labels(text)
+    twice = sorted({n for n in lines if lines.count(n) > 1}, key=int)
+    missing = [n for n in dict.fromkeys(lines) if n not in placed]
+    unused = [n for n in placed if n not in lines]
+    if twice:
+        raise outgoing.AttachmentError(f"正文里 [image: {twice[0]}] 出现了不止一次，一张图片只能放在一处")
+    if missing:
+        raise outgoing.AttachmentError(f"正文里的 [image: {missing[0]}] 没有对应的图片（图片去掉了，或者草稿是重新打开的）："
+                                       "删掉这一行，或者重新插入图片")
+    if unused:
+        raise outgoing.AttachmentError(f"图片 {unused[0]} 没有放进正文：正文里要有单独一行 [image: {unused[0]}]，"
+                                       "或者把这张图去掉")
+    for label, path in placed.items():
+        with path.open("rb") as f:
+            if not signature.is_picture(path.name, f.read(16)):
+                raise outgoing.AttachmentError(f"图片 {label} 不是 PNG、JPG 或 GIF，不能放进正文")
+    return paths[:len(attached)], placed, set(ids)
+
+
+def placed_pictures(placed: dict[str, Path]) -> tuple[dict[str, tuple[Path, Path]], Path | None]:
+    """The text's pictures copied under the names the mail server sends inline (kolmail-inline-body<N>.<ext>), in a
+    folder of their own that the caller removes once the mail is out. ({label: (upload, copy)}, that folder)."""
+    if not placed:
+        return {}, None
+    folder = outbox.root / f"send-{secrets.token_hex(8)}"
+    folder.mkdir(parents=True)
+    out = {}
+    for label, path in placed.items():
+        copy = folder / f"{mailserver.INLINE_PREFIX}body{label}{path.suffix.lower()}"
+        shutil.copyfile(path, copy)
+        out[label] = (path, copy)
+    return out, folder
+
+
+async def api_reply_preview(request: Request):
+    """The HTML a reply would go out as, for the page to show before sending: the chosen font, the signature's
+    pictures from /signature/, and each picture of the text as src "kolmail-body:<N>", which the page swaps for the
+    picture it holds."""
+    body = await request.json()
+    text = strip_hidden(str(body.get("body") or "").replace("\r\n", "\n")).strip()
+    names = body.get("names") if isinstance(body.get("names"), dict) else {}
+    s = signing.load()
+    sizes = {k: signing.shown(k) for k in signing.pictures(s)}
+    sources = {k: f"/signature/{k}.png?v={size['version']}" for k, size in sizes.items() if size}
+    placed = {str(k): {"src": f"kolmail-body:{k}", "alt": chats.plain(v, 120), "width": None}
+              for k, v in list(names.items())[:signature.MAX_BODY_PICTURES] if re.fullmatch(r"[0-9]{1,2}", str(k))}
+    return JSONResponse({"html": signature.render(text, SIGNATURE, s, sources, sizes, placed), "html_ok": HTML_MAIL})
 
 
 sending_ids: set[str] = set()  # attachments of a send in progress: never removed under it
@@ -8306,18 +8482,25 @@ async def api_send(request: Request):
     if len(to) + len(cc) + len(bcc) > COMPOSE_MAX_RECIPIENTS:
         return bad(f"收件人、抄送、密送加起来最多 {COMPOSE_MAX_RECIPIENTS} 个")
     try:
-        attachments = outbox.resolve(body.get("attachments") or [])
+        attachments, placed, ids = reply_files(body, text)
     except (outgoing.AttachmentError, OSError) as e:
         return bad(str(e))
-    ids = {str(i) for i in body.get("attachments") or []}
     if ids & sending_ids:
         return bad("这些附件正在随另一封信发送")
     sending_ids.update(ids)
+    folder = None
     try:
+        try:  # before anything is sent: a failure here went nowhere
+            pictures, folder = await asyncio.to_thread(placed_pictures, placed)
+        except OSError as e:
+            return bad(f"正文图片准备失败，没有发出：{err_text(e)}")
         with feed.working("sending"):
-            return await send_reply(body, mailbox, email_id, Recipients(to, cc, bcc), subject, text, attachments)
+            return await send_reply(body, mailbox, email_id, Recipients(to, cc, bcc), subject, text, attachments,
+                                    pictures)
     finally:
         sending_ids.difference_update(ids)
+        if folder:
+            shutil.rmtree(folder, ignore_errors=True)
 
 
 @dataclasses.dataclass
@@ -8331,8 +8514,19 @@ class Recipients:
         return self.to + self.cc + self.bcc
 
 
+def sent_uploads(body: dict) -> list[str]:
+    """The upload ids a sent mail used (attachments and the pictures in its text): removed once it is out."""
+    inline = body.get("inline") if isinstance(body.get("inline"), dict) else {}
+    return [str(i) for i in [*(body.get("attachments") or []), *inline.values()]]
+
+
+def files_note(attachments: list, pictures: dict | None) -> str:
+    parts = ([f"附件 {len(attachments)} 个"] if attachments else []) + ([f"正文图片 {len(pictures)} 张"] if pictures else [])
+    return f"（{'，'.join(parts)}）" if parts else ""
+
+
 async def send_reply(body: dict, mailbox: str, email_id: str, who: Recipients, subject: str, text: str,
-                     attachments: list):
+                     attachments: list, pictures: dict[str, tuple[Path, Path]] | None = None):
     if DEV:
         return bad("开发模式不发送邮件")
     try:
@@ -8359,8 +8553,9 @@ async def send_reply(body: dict, mailbox: str, email_id: str, who: Recipients, s
     account = current_account.get()
     refs = " ".join(x for x in [msg.get("references"), msg.get("message_id")] if x)
     try:
-        extra = {"timeout": 420} if attachments else {}
-        result = await mail.send(recipients=who.to, subject=subject, **mail_args(text, [str(p) for p in attachments]),
+        extra = {"timeout": 420} if attachments or pictures else {}
+        result = await mail.send(recipients=who.to, subject=subject,
+                                 **mail_args(text, [str(p) for p in attachments], pictures),
                                  **({"cc": who.cc} if who.cc else {}), **({"bcc": who.bcc} if who.bcc else {}),
                                  in_reply_to=msg.get("message_id"), references=refs or None, **extra)
     except MailError as e:
@@ -8378,14 +8573,14 @@ async def send_reply(body: dict, mailbox: str, email_id: str, who: Recipients, s
         f"(no Sent copy: {result[:200]})" if warning else "")
     try:  # the mail is out: bookkeeping problems below must never look like a failed send (and invite a resend)
         cache.drop_draft(account, key)  # sent: the saved draft must not come back as unsent work
-        for item in body.get("attachments") or []:
-            outbox.remove(str(item))
+        for item in sent_uploads(body):
+            outbox.remove(item)
         sent_changed()  # reopening the conversation must show this reply, or it invites a second send
         # body_zh is the verified side-by-side Chinese of exactly this text (the page sends it only then)
         zh = body.get("body_zh")
         zh = strip_hidden(zh).strip() if isinstance(zh, str) else ""
-        note = f"（附件 {len(attachments)} 个）" if attachments else ""
-        company = (CFG["mail"].get("company_domain") or "").lower()
+        note = files_note(attachments, pictures)
+        company = autoreply.own_domain(CFG["mail"].get("company_domain") or "", ACCOUNTS[0].address)
         if is_primary() and not (company and filed.endswith(company)):  # KOL总表: primary mailbox, no colleagues
             # One row, the conversation's; the Message-ID only for a mail to one person, as for a new email.
             sheet_guard("记录回信", sheet_after_send, filed, subject, "我方回信" + note + "：" + gist(zh or text), "",
@@ -8413,21 +8608,28 @@ async def api_compose_send(request: Request):
     if len(to) + len(cc) > COMPOSE_MAX_RECIPIENTS:
         return bad(f"收件人加抄送最多 {COMPOSE_MAX_RECIPIENTS} 个")
     try:
-        attachments = outbox.resolve(body.get("attachments") or [])
+        attachments, placed, ids = reply_files(body, text)
     except (outgoing.AttachmentError, OSError) as e:
         return bad(str(e))
-    ids = {str(i) for i in body.get("attachments") or []}
     if ids & sending_ids:
         return bad("这些附件正在随另一封信发送")
     sending_ids.update(ids)
+    folder = None
     try:
+        try:  # before anything is sent: a failure here went nowhere
+            pictures, folder = await asyncio.to_thread(placed_pictures, placed)
+        except OSError as e:
+            return bad(f"正文图片准备失败，没有发出：{err_text(e)}")
         with feed.working("sending"):
-            return await send_new(body, to, cc, subject, text, attachments)
+            return await send_new(body, to, cc, subject, text, attachments, pictures)
     finally:
         sending_ids.difference_update(ids)
+        if folder:
+            shutil.rmtree(folder, ignore_errors=True)
 
 
-async def send_new(body: dict, to: list[str], cc: list[str], subject: str, text: str, attachments: list):
+async def send_new(body: dict, to: list[str], cc: list[str], subject: str, text: str, attachments: list,
+                   pictures: dict[str, tuple[Path, Path]] | None = None):
     if DEV:
         return bad("开发模式不发送邮件")
     if text_hash(text) not in checked_texts:
@@ -8440,8 +8642,9 @@ async def send_new(body: dict, to: list[str], cc: list[str], subject: str, text:
         close_cases_for("email", address)  # a phone case still open for them is answered by this mail
     account = current_account.get()
     try:
-        extra = {"timeout": 420} if attachments else {}
-        result = await mail.send(recipients=to, subject=subject, **mail_args(text, [str(p) for p in attachments]),
+        extra = {"timeout": 420} if attachments or pictures else {}
+        result = await mail.send(recipients=to, subject=subject,
+                                 **mail_args(text, [str(p) for p in attachments], pictures),
                                  **({"cc": cc} if cc else {}), **extra)
     except MailError as e:
         log("send outcome unknown (new mail)", ",".join(to), err_text(e))
@@ -8457,15 +8660,15 @@ async def send_new(body: dict, to: list[str], cc: list[str], subject: str, text:
         f"(no Sent copy: {result[:200]})" if warning else "")
     try:  # the mail is out: bookkeeping problems below must never look like a failed send (and invite a resend)
         cache.drop_draft(account, COMPOSE_KEY)
-        for item in body.get("attachments") or []:
-            outbox.remove(str(item))
+        for item in sent_uploads(body):
+            outbox.remove(item)
         sent_changed()
         zh = body.get("body_zh")
         zh = strip_hidden(zh).strip() if isinstance(zh, str) else ""
-        note = f"（附件 {len(attachments)} 个）" if attachments else ""
+        note = files_note(attachments, pictures)
         # KOL总表 follows the primary mailbox only, and only the person the mail was written for (the first To, whose
         # history the draft read): an agent, a colleague or a vendor next to them on To or Cc gets no row of their own.
-        company = (CFG["mail"].get("company_domain") or "").lower()
+        company = autoreply.own_domain(CFG["mail"].get("company_domain") or "", ACCOUNTS[0].address)
         address = to[0]
         if is_primary() and not (company and address.endswith(company)):
             if SHEET_MODE == "legacy" and len(to) == 1 and sheet_enabled():
@@ -8487,7 +8690,8 @@ async def send_new(body: dict, to: list[str], cc: list[str], subject: str, text:
 # The owner's private chats with KOLs, kept in chats.py. Telegram comes in through this app's own login (tg): each
 # burst telegram_loop waits for, plus a look at the most recent private chats every TG_SYNC_EVERY seconds, which also
 # catches what the owner typed in the Telegram app. Discord comes from the browser extension (extension/discord),
-# which posts the DM the owner has open. Every message of a chat linked to a KOL总表 row goes to 沟通记录 like a mail
+# which posts what Discord's page holds: the DM on screen, and every DM's new messages while a Discord tab is open
+# (ext_feed). Every message of a chat linked to a KOL总表 row goes to 沟通记录 like a mail
 # (sheet_post) and to 私信记录, the transcript the triage task reads to judge stage and intent. A reply is drafted
 # like a mail reply (checked_draft, side_by_side) and only goes out once its Chinese side-by-side was verified:
 # Telegram replies are sent from here, Discord replies wait in a queue until the extension puts them into Discord's
@@ -8505,6 +8709,13 @@ CHAT_SEND_GAP = (2.5, 4.5)  # seconds between the parts of one Telegram reply, v
 EXT_TOKEN_FILE = DATA / "ext_token"
 EXT_ORIGINS = ("chrome-extension://", "moz-extension://", "extension://")
 EXT_MAX_MESSAGES = 80
+EXT_FEED_CONVS = 20       # DMs in one feed call of the extension
+EXT_FEED_MESSAGES = 100   # messages of one DM in it
+EXT_FEED_CHANNELS = 100   # DMs named in its snapshot
+CHAT_PAGE = 40            # messages of a chat the page shows at first; older ones come a page at a time
+CHAT_PAGE_MAX = 300
+DISCORD_AUTO = "discord_auto_history"  # CHATS kv: "1" when the owner let the extension load unopened DMs
+DISCORD_LOADED = "dc_loaded:"          # CHATS kv prefix + channel: the DM's newest message id when Discord loaded it
 DISCORD_ID = chats.DISCORD_ID
 CHAT_SENT_KEEP = 3600    # seconds a reply sent (or maybe sent) is remembered, so the same text never goes twice
 POPO_EVERY = timedelta(hours=2)  # the owner's rule (2026-10-29): POPO follows KOL总表 every two working hours
@@ -8745,9 +8956,11 @@ async def chat_translate(key: str, msgs: list[dict]) -> int:
     for i in range(0, len(todo), CHAT_TRANSLATE_BATCH):
         part = todo[i:i + CHAT_TRANSLATE_BATCH]
         boundary = secrets.token_hex(8)
-        system = replyflow.BACKTRANSLATE_SYSTEM.replace("{boundary}", boundary)
-        user = section(boundary, "PARAGRAPHS", json.dumps([m["text"][:2000] for m in part], ensure_ascii=False))
-        result = await run_claude(system, user, replyflow.PARAGRAPHS_SCHEMA, TRANSLATE_MODEL, timeout=180)
+        user = user_message(boundary, [section(boundary, "PARAGRAPHS", json.dumps([m["text"][:2000] for m in part],
+                                                                                    ensure_ascii=False))])
+        call_kind("chat_translate")
+        result = await run_claude(replyflow.BACKTRANSLATE_SYSTEM, user, replyflow.PARAGRAPHS_SCHEMA, TRANSLATE_MODEL,
+                                  timeout=180)
         zh = [str(x) for x in llm.scrub(result.get("zh") or [])]
         if len(zh) != len(part):
             log("chat translation dropped: wrong count", key, len(zh), len(part))
@@ -8865,9 +9078,18 @@ async def api_chat_conv(request: Request):
     conv = CHATS.conv(key)
     if not conv:
         return bad("找不到这个会话", 404)
+    try:
+        limit = min(CHAT_PAGE_MAX, max(1, int(request.query_params.get("limit") or CHAT_PAGE)))
+    except ValueError:
+        return bad("limit 不对")
+    before = request.query_params.get("before") or None
+    if before is not None:  # an earlier stretch of the chat: nothing else changes
+        return JSONResponse({"messages": [msg_view(m) for m in CHATS.messages(key, limit, before=str(before)[:40])],
+                             "total": CHATS.count(key)})
     CHATS.seen(key)
     conv["preview"] = ""
-    return JSONResponse({"conv": conv_view(conv), "messages": [msg_view(m) for m in CHATS.messages(key, 150)],
+    return JSONResponse({"conv": conv_view(conv), "messages": [msg_view(m) for m in CHATS.messages(key, limit)],
+                         "total": CHATS.count(key),
                          "queue": CHATS.pending(key) if conv["channel"] == "discord" else []})
 
 
@@ -8880,7 +9102,7 @@ async def api_chat_translate(request: Request):
     except (ReplyRefused, ClaudeError) as e:
         return reply_error(e)
     return JSONResponse({"ok": True, "translated": done,
-                         "messages": [msg_view(m) for m in CHATS.messages(key, 150)]})
+                         "messages": [msg_view(m) for m in CHATS.messages(key, 60)]})
 
 
 async def api_chat_sync(request: Request):
@@ -9235,16 +9457,29 @@ def save_ext_token(token: str):
     os.replace(tmp, EXT_TOKEN_FILE)
 
 
+def discord_auto() -> bool:
+    """Whether the extension may ask Discord's page to load the DMs nobody opened (设置 → 私信渠道). Off until the
+    owner switches it on: it makes the page ask Discord's servers on its own, which reading alone never does."""
+    return CHATS.get_kv(DISCORD_AUTO) == "1"
+
+
 async def api_chat_ext(request: Request):
-    if request.method == "POST":  # 重新生成: the old key stops working at once
-        token = secrets.token_hex(16)
+    if request.method == "POST":
         try:
-            save_ext_token(token)
-        except OSError as e:
-            return bad(f"新令牌存不进去，旧令牌还有效：{err_text(e)}", 500)
-        ext_token_cache[:] = [token]
-    return JSONResponse({"token": ext_token(), "seen": state.get("ext_seen"), "port": PORT,
-                         "folder": str(BASE / "extension" / "discord")})
+            body = await request.json()
+        except ValueError:
+            body = {}
+        if isinstance(body, dict) and isinstance(body.get("auto"), bool):
+            CHATS.set_kv(DISCORD_AUTO, "1" if body["auto"] else "0")
+        else:  # 重新生成: the old key stops working at once
+            token = secrets.token_hex(16)
+            try:
+                save_ext_token(token)
+            except OSError as e:
+                return bad(f"新令牌存不进去，旧令牌还有效：{err_text(e)}", 500)
+            ext_token_cache[:] = [token]
+    return JSONResponse({"token": ext_token(), "seen": state.get("ext_seen"), "port": PORT, "auto": discord_auto(),
+                         "feed": state.get("ext_feed"), "folder": str(BASE / "extension" / "discord")})
 
 
 async def ext_json(request: Request) -> dict:
@@ -9278,19 +9513,14 @@ async def ext_hello(request: Request):
     return JSONResponse({"ok": True, "version": config.version()})
 
 
-async def ext_sync(request: Request):
-    """The DM the owner has open in Discord, as the extension reads it off the page."""
-    try:
-        body = await ext_json(request)
-        key = ext_channel(body)
-    except ReplyRefused as e:
-        return bad(str(e))
-    peer = body.get("peer") if isinstance(body.get("peer"), dict) else {}
+def ext_messages(items, limit: int, page: bool = False) -> list[dict]:
+    """The extension's messages as chats.py stores them; anything malformed is left out. page: read from Discord's
+    own data (ext_feed), which is marked so that a reading off the screen never replaces it."""
     msgs = []
-    for m in (body.get("messages") or [])[-EXT_MAX_MESSAGES:] if isinstance(body.get("messages"), list) else []:
+    for m in items[-limit:] if isinstance(items, list) else []:
         if not isinstance(m, dict) or not DISCORD_ID.match(str(m.get("id") or "")) or not chats.parse_time(m.get("at")):
             continue
-        extra = {}
+        extra = {"src": "page"} if page else {}
         atts = [{"name": chats.plain(a.get("name"), 120), "url": str(a.get("url") or "")[:500]}
                 for a in (m.get("attachments") or [])[:10] if isinstance(a, dict)] \
             if isinstance(m.get("attachments"), list) else []
@@ -9300,6 +9530,11 @@ async def ext_sync(request: Request):
             extra["reply_to"] = chats.plain(m.get("reply_to"), 300)
         msgs.append({"id": str(m["id"]), "at": m["at"], "out": m.get("out") is True, "author": m.get("author"),
                      "text": str(m.get("text") or "")[:chats.TEXT_MAX], "extra": extra})
+    return msgs
+
+
+def ext_store(key: str, peer: dict, msgs: list[dict]) -> int:
+    """A Discord DM's peer and messages into chats.py; returns how many messages were new."""
     pid = str(peer.get("id") or "")
     CHATS.upsert_conv(key, peer_id=pid if DISCORD_ID.match(pid) else None, peer_name=peer.get("name"),
                       username=peer.get("username"))
@@ -9307,6 +9542,68 @@ async def ext_sync(request: Request):
     chat_autolink(key)
     if new:
         spawn(chat_record(key), "记录私信")
+    return len(new)
+
+
+async def ext_feed(request: Request):
+    """What the extension's page script reads from Discord's own data while a Discord tab is open: the messages of
+    any DM (new ones as they arrive, a DM's recent ones when Discord loads it), and a snapshot of which DMs there
+    are with the id of each one's newest message. The answer names the DMs whose recent messages Discord's page
+    has not loaded for us yet, or that got a message since which is not here ("want"); the extension has Discord's
+    page load those only when the owner switched that on ("auto"). A DM handed over as loaded is remembered with
+    its newest message id: that message may be one we never keep (a call, a pin), and without the note such a DM
+    would be asked for again on every page load."""
+    try:
+        body = await ext_json(request)
+    except ReplyRefused as e:
+        return bad(str(e))
+    convs = body.get("convs") if isinstance(body.get("convs"), list) else []
+    channels = body.get("channels") if isinstance(body.get("channels"), list) else []
+    if len(convs) > EXT_FEED_CONVS or len(channels) > EXT_FEED_CHANNELS:
+        return bad("一次交来的私信太多")
+    added = 0
+    for c in convs:
+        channel = str(c.get("channel_id") or "") if isinstance(c, dict) else ""
+        if not DISCORD_ID.match(channel):
+            continue
+        msgs = ext_messages(c.get("messages"), EXT_FEED_MESSAGES, page=True)
+        if msgs:  # a DM shows up in 私信 once it has something to show
+            added += ext_store(f"dc:{channel}", c.get("peer") if isinstance(c.get("peer"), dict) else {}, msgs)
+        last = str(c.get("last") or "")
+        if c.get("loaded") is True and DISCORD_ID.match(last):
+            CHATS.set_kv(DISCORD_LOADED + channel, last)
+    auto, want = discord_auto(), []
+    for c in channels:
+        channel = str(c.get("channel_id") or "") if isinstance(c, dict) else ""
+        last = str(c.get("last") or "") if isinstance(c, dict) else ""
+        if not (auto and DISCORD_ID.match(channel) and DISCORD_ID.match(last)):
+            continue
+        conv = CHATS.conv(f"dc:{channel}")
+        if conv and conv["ignored"]:
+            continue
+        loaded = CHATS.get_kv(DISCORD_LOADED + channel)
+        if loaded == last:
+            continue  # loaded when this was its newest message: there is nothing newer to fetch
+        newest = CHATS.newest_id(f"dc:{channel}") if conv else None
+        if loaded is None or newest is None or not newest.isdigit() or int(newest) < int(last):
+            want.append(channel)
+    state["ext_feed"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    if added:
+        log("discord feed", f"{added} new message(s) in {len(convs)} chat(s)")
+    return JSONResponse({"ok": True, "added": added, "auto": auto, "want": want})
+
+
+async def ext_sync(request: Request):
+    """The DM the owner has open in Discord, as the extension reads it off the page."""
+    try:
+        body = await ext_json(request)
+        key = ext_channel(body)
+    except ReplyRefused as e:
+        return bad(str(e))
+    peer = body.get("peer") if isinstance(body.get("peer"), dict) else {}
+    msgs = ext_messages(body.get("messages"), EXT_MAX_MESSAGES)
+    known = CHATS.from_page(key, [m["id"] for m in msgs])  # Discord's own data for a message stays as it is
+    new = ext_store(key, peer, [m for m in msgs if m["id"] not in known])
     conv = CHATS.conv(key)
     linked = conv_view(conv)["linked"]
     suggest = []
@@ -9315,7 +9612,7 @@ async def ext_sync(request: Request):
             spawn(refresh_chat_rows(), "读 KOL总表")  # never wait on Excel here: the suggestions come next sync
         suggest = [{"id": r["id"], "kol": r["kol"]} for r in chats.suggest(conv, chat_rows_cache["rows"])]
     return JSONResponse({"ok": True, "conv": {"key": key, "linked": linked and {"id": linked["id"], "kol": linked["kol"]},
-                                              "suggest": suggest, "added": len(new)}, "queue": ext_items(key)})
+                                              "suggest": suggest, "added": new}, "queue": ext_items(key)})
 
 
 async def ext_queue(request: Request):
@@ -9530,6 +9827,7 @@ routes = [
     Route("/api/messages", api_messages),
     Route("/api/message", api_message),
     Route("/api/thread", api_thread),
+    Route("/api/thread/message", api_thread_message),
     Route("/api/search", api_search),
     Route("/api/channels", api_channels, methods=["POST"]),
     Route("/api/attachment", api_attachment),
@@ -9546,6 +9844,7 @@ routes = [
     Route("/api/reply/save", api_reply_save, methods=["POST"]),
     Route("/api/reply/discard", api_reply_discard, methods=["POST"]),
     Route("/api/reply/upload", api_reply_upload, methods=["POST"]),
+    Route("/api/reply/preview", api_reply_preview, methods=["POST"]),
     Route("/api/reply/unupload", api_reply_unupload, methods=["POST"]),
     Route("/api/feedback", api_feedback, methods=["POST"]),
     Route("/api/selfcheck", api_selfcheck, methods=["POST"]),
@@ -9592,6 +9891,7 @@ routes = [
     Route("/api/chat/ext", api_chat_ext, methods=["GET", "POST"]),
     Route("/ext/discord/hello", ext_hello, methods=["POST"]),
     Route("/ext/discord/sync", ext_sync, methods=["POST"]),
+    Route("/ext/discord/feed", ext_feed, methods=["POST"]),
     Route("/ext/discord/queue", ext_queue, methods=["POST"]),
     Route("/ext/discord/queue/update", ext_queue_update, methods=["POST"]),
     *tgsetup.routes(on_change=telegram_changed, get_me=lambda: tg.call("get_me", timeout=20), log=log),

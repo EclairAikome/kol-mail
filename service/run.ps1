@@ -21,7 +21,28 @@ function Test-PortBusy([int]$port) {
     [bool](Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
 }
 
+# A desktop shortcut made by an installer from before 0.10 shows the gear of a .cmd file. Give it KOL Mail's icon
+# once the icon is here (an update brings it), touching only a shortcut that points at this copy's start-kol-mail.cmd
+# and has no icon of its own yet. Never in the way of starting.
+function Update-ShortcutIcon {
+    try {
+        $icon = Join-Path $app 'static\kolmail.ico'
+        $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'KOL Mail.lnk'
+        if (-not ((Test-Path $icon) -and (Test-Path $lnk))) { return }
+        $shell = New-Object -ComObject WScript.Shell
+        $s = $shell.CreateShortcut($lnk)
+        if ($s.TargetPath -ne (Join-Path $app 'start-kol-mail.cmd')) { return }
+        if ($s.IconLocation -and -not $s.IconLocation.StartsWith(',')) { return }
+        $s.IconLocation = "$icon,0"
+        $s.WindowStyle = 7
+        $s.Save()
+    } catch {
+        try { Add-Content -Encoding UTF8 $log "[$(Get-Date -Format s)] desktop shortcut icon not set: $($_.Exception.Message)" } catch {}
+    }
+}
+
 Set-Location $app
+Update-ShortcutIcon
 while ($true) {
     if ((Test-Path $log) -and (Get-Item $log).Length -gt 5MB) {
         Move-Item -Force $log "$log.1"

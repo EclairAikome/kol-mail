@@ -11,7 +11,9 @@ const vm = require("node:vm");
 const TOKEN = "test-token";
 const CH = "300000000000000003";
 const OTHER = "300000000000000004";
-const dmSender = (ch) => ({ id: "ext", tab: { id: 1 }, url: `https://discord.com/channels/@me/${ch}`, origin: "https://discord.com" });
+// tab.url: where the tab is now (Chrome gives it with the discord.com host permission); url: where the page was loaded
+const dmSender = (ch, loadedOn) => ({ id: "ext", tab: { id: 1, url: `https://discord.com/channels/@me/${ch}` },
+  url: `https://discord.com/channels/@me/${loadedOn || ch}`, origin: "https://discord.com" });
 const DISCORD = dmSender(CH);
 const POPUP = { id: "ext", url: "chrome-extension://ext/popup.html" };
 const plain = (x) => JSON.parse(JSON.stringify(x)); // results come from another realm
@@ -35,6 +37,10 @@ const server = http.createServer((req, res) => {
       return send(200, { ok: true, conv: { key: "dc:1", linked: null, suggest: [], added: 0 }, queue: [] });
     }
     if (op === "queue") return send(200, { items: [] });
+    if (op === "feed") {
+      if (mode === "feed500") return send(500, { error: "数据库忙" });
+      return send(200, { ok: true, added: b.convs.reduce((n, c) => n + c.messages.length, 0), auto: true, want: [OTHER] });
+    }
     if (op === "queue/update") {
       if (mode === "update404") return send(404, { error: "没有这条" });
       if (mode === "update500") return send(500, { error: "数据库忙" });
@@ -95,10 +101,19 @@ let port;
 test.before(() => new Promise((r) => server.listen(0, "127.0.0.1", () => { port = server.address().port; r(); })));
 test.after(() => new Promise((r) => server.close(r)));
 
-test("manifest: only storage and the 127.0.0.1 host permission", () => {
+test("manifest: storage, KOL Mail on 127.0.0.1 and the Discord pages it runs on, nothing else", () => {
   const m = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "manifest.json"), "utf8"));
   assert.deepEqual(m.permissions, ["storage"]);
-  assert.deepEqual(m.host_permissions, ["http://127.0.0.1/*"]);
+  const discord = ["https://discord.com/*", "https://ptb.discord.com/*", "https://canary.discord.com/*"];
+  assert.deepEqual(m.host_permissions, ["http://127.0.0.1/*", ...discord]);  // discord: for the tab's address only
+  for (const cs of m.content_scripts) assert.deepEqual(cs.matches, discord);
+  assert.deepEqual(m.content_scripts.map((cs) => [cs.js.join(), cs.world || "ISOLATED"]),
+    [["content.js", "ISOLATED"], ["page.js", "MAIN"]]);
+});
+
+test("background.js itself asks nothing of Discord", () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8");
+  assert.deepEqual(src.match(/fetch\(`[^`]*`/g), ["fetch(`http://127.0.0.1:${port}/ext/discord/${op}`"]);
 });
 
 test("storage.local is closed to content scripts", async () => {
@@ -136,7 +151,7 @@ test("who may ask for what", async () => {
   assert.equal(await bg.send({ type: "kol", op: "sync", payload }, { id: "other-extension", url: "chrome-extension://other/x.html" }), "NO-RESPONSE");
   assert.equal((await bg.send({ type: "kol", op: "sync", payload }, POPUP)).ok, false); // the popup only tests the connection
   assert.equal((await bg.send({ type: "kol", op: "sync", payload: Object.assign({}, payload, { channel_id: "../x" }) }, DISCORD)).ok, false);
-  assert.equal((await bg.send({ type: "kol", op: "boom", payload: {} }, DISCORD)).ok, false); // only the four ops
+  assert.equal((await bg.send({ type: "kol", op: "boom", payload: {} }, DISCORD)).ok, false); // only the known ops
   assert.equal((await bg.send({ type: "kol", op: "queue/update", payload: {} }, DISCORD)).ok, false); // goes through "update"
   const tooMany = Object.assign({}, payload, { messages: new Array(51).fill({}) });
   assert.equal((await bg.send({ type: "kol", op: "sync", payload: tooMany }, DISCORD)).ok, false);
@@ -145,7 +160,10 @@ test("who may ask for what", async () => {
 test("a page on another DM (or a server channel) cannot act for this one", async () => {
   const bg = load({ token: TOKEN, port });
   const payload = { channel_id: CH, peer: { id: null, name: "PixelFox_", username: null }, me: { id: null, name: "Mira" }, messages: [] };
-  const elsewhere = [dmSender(OTHER), { id: "ext", tab: { id: 1 }, url: "https://discord.com/channels/1/2", origin: "https://discord.com" }];
+  const server = "https://discord.com/channels/1/2";
+  const elsewhere = [dmSender(OTHER), { id: "ext", tab: { id: 1, url: server }, url: server, origin: "https://discord.com" },
+    dmSender(OTHER, CH),  // loaded on this DM, on another one by now
+    { id: "ext", tab: { id: 1 }, url: `https://discord.com/channels/@me/${OTHER}`, origin: "https://discord.com" }];  // no tab address
   const before = seen.length;
   for (const s of elsewhere) {
     assert.equal((await bg.send({ type: "kol", op: "sync", payload }, s)).ok, false);
@@ -157,6 +175,61 @@ test("a page on another DM (or a server channel) cannot act for this one", async
   }
   assert.equal(seen.length, before); // nothing reached KOL Mail
   assert.equal((await bg.send({ type: "kol", op: "queue", payload: { channel_id: CH } }, DISCORD)).ok, true);
+});
+
+test("a DM switched to inside Discord's page works without a reload", async () => {
+  // Discord changes DMs without loading a page: the tab's address follows, sender.url stays the first one.
+  // Going by sender.url, every DM after the first got "扩展内部出错，刷新页面再试" until the page was reloaded.
+  const bg = load({ token: TOKEN, port });
+  const switched = dmSender(CH, OTHER);
+  const fromFriends = Object.assign(dmSender(CH), { url: "https://discord.com/channels/@me" });
+  const payload = { channel_id: CH, peer: { id: null, name: "PixelFox_", username: null }, me: { id: null, name: "Mira" }, messages: [] };
+  for (const s of [switched, fromFriends]) {
+    assert.equal((await bg.send({ type: "kol", op: "sync", payload }, s)).ok, true);
+    assert.equal((await bg.send({ type: "kol", op: "queue", payload: { channel_id: CH } }, s)).ok, true);
+    assert.equal((await bg.send({ type: "state_set", channel_id: CH, data: { filledIds: [] } }, s)).ok, true);
+    assert.equal((await bg.send({ type: "state_get", channel_id: CH }, s)).ok, true);
+    assert.equal(plain(await bg.send({ type: "claim", channel_id: CH, item_id: "q77" + s.url.length }, s)).ok, true);
+  }
+  // an install not reloaded since before 0.10 has no tab address: the page's own address still counts
+  const old = { id: "ext", tab: { id: 1 }, url: `https://discord.com/channels/@me/${CH}`, origin: "https://discord.com" };
+  assert.equal((await bg.send({ type: "kol", op: "sync", payload }, old)).ok, true);
+  const r = await bg.send({ type: "kol", op: "sync", payload }, dmSender(OTHER, CH));
+  assert.deepEqual([r.ok, r.code], [false, "elsewhere"]);  // told apart from a real fault: the panel shows no error
+});
+
+test("feed: every DM's messages, from a Discord page wherever it is", async () => {
+  const bg = load({ token: TOKEN, port });
+  const msg = (id) => ({ id, at: "2026-11-10T08:00:00Z", author_id: "2", author: "PixelFox_", out: false, text: "hi", attachments: [], reply_to: null });
+  const conv = (ch, n) => ({ channel_id: ch, peer: { id: "2", name: "PixelFox_", username: "pixelfox_" }, last: "9", messages: Array.from({ length: n }, (_, i) => msg(String(500000 + i))) });
+  const me = { id: "1", name: "Mira" };
+  const friends = { id: "ext", tab: { id: 1, url: "https://discord.com/channels/@me" }, url: "https://discord.com/channels/@me", origin: "https://discord.com" };
+  const before = seen.length;
+  const r = plain(await bg.send({ type: "kol", op: "feed", payload: { me, convs: [conv(CH, 2), conv(OTHER, 1)], channels: [conv(OTHER, 0)], extra: "dropped" } }, friends));
+  assert.deepEqual(r, { ok: true, data: { ok: true, added: 3, auto: true, want: [OTHER] } });
+  assert.deepEqual(Object.keys(seen.at(-1).body).sort(), ["channels", "convs", "me"]);  // only what the contract names
+  assert.equal(seen.length, before + 1);
+  const refused = [
+    [{ me, convs: [conv("../x", 1)] }, friends],
+    [{ me, convs: [conv(CH, 101)] }, friends],
+    [{ me, convs: Array.from({ length: 21 }, () => conv(CH, 0)) }, friends],
+    [{ me, convs: [], channels: Array.from({ length: 101 }, () => conv(CH, 0)) }, friends],
+    [{ me, convs: "x" }, friends],
+    [{ convs: [] }, friends],
+    [{ me, convs: [{ channel_id: CH, messages: [] }] }, friends],  // no peer
+    [{ me, convs: [conv(CH, 1)] }, POPUP],                         // only a Discord page reads Discord
+  ];
+  for (const [payload, sender] of refused) assert.equal((await bg.send({ type: "kol", op: "feed", payload }, sender)).ok, false);
+  assert.equal(await bg.send({ type: "kol", op: "feed", payload: { me, convs: [conv(CH, 1)] } },
+    { id: "ext", tab: { id: 2, url: "https://evil.example/" }, url: "https://evil.example/", origin: "https://evil.example" }), "NO-RESPONSE");
+  assert.equal(seen.length, before + 1);
+  mode = "feed500";
+  try {
+    const down = plain(await bg.send({ type: "kol", op: "feed", payload: { me, convs: [conv(CH, 1)] } }, friends));
+    assert.deepEqual([down.ok, down.code, down.status], [false, "server", 500]);  // the content script keeps it and retries
+  } finally {
+    mode = "ok";
+  }
 });
 
 test("an answer that is not an outage is final: the outbox never sticks (stuck.js)", async () => {

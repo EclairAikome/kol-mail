@@ -5,8 +5,9 @@
 1. Copies every git-tracked file (never data/, never anything untracked) into the clone of the public repo.
 2. Scans the copy for anything private: the patterns in data/publish-denylist.txt (one regex per line; the list
    itself stays out of git because it names the private strings), plus built-in checks for tokens, webhooks,
-   Windows user folders, e-mail addresses that are not example ones and binary files (PNG pictures are allowed when
-   they hold nothing but the picture: no text, EXIF or other metadata chunks). Any hit stops the release.
+   Windows user folders, e-mail addresses that are not example ones and binary files (PNG pictures, and an .ico
+   made of them, are allowed when they hold nothing but the picture: no text, EXIF or other metadata chunks). Any
+   hit stops the release.
 3. Writes MANIFEST.json (SHA-256 of every file) and MANIFEST.sig, signed with data/release-signing-key.pem. The
    updater on colleagues' machines only installs releases whose signature matches the pinned public key.
 4. Commits as "Release vX.Y.Z" (version from VERSION) with the given author and, with --push, pushes and tags it.
@@ -88,6 +89,39 @@ def png_problem(raw: bytes) -> str | None:
     return "没有结尾块"
 
 
+def ico_problem(raw: bytes) -> str | None:
+    """Why this .ico may not go public, or None. Its pictures must lie one after the other right behind the
+    directory, with nothing between or after them, and each must be a PNG that passes png_problem: a bitmap
+    picture has room for anything behind its pixels. The directory's own spare fields must be plain too."""
+    import struct
+    if len(raw) < 6:
+        return "不是 ICO"
+    reserved, kind, count = struct.unpack("<HHH", raw[:6])
+    if reserved != 0 or kind != 1 or not 0 < count <= 32 or len(raw) < 6 + 16 * count:
+        return "不是 ICO"
+    entries = []
+    for i in range(count):
+        _w, _h, _colors, spare, planes, bits, size, offset = struct.unpack("<BBBBHHII", raw[6 + 16 * i:22 + 16 * i])
+        if spare != 0 or planes > 1 or bits not in (0, 1, 4, 8, 24, 32):
+            return "目录里有不该有的数据"
+        entries.append((offset, size))
+    entries.sort()
+    pos = 6 + 16 * count
+    for offset, size in entries:
+        if offset != pos:
+            return "图片之间夹着别的数据"
+        picture = raw[offset:offset + size]
+        if len(picture) != size or size < 40:
+            return "文件被截断了"
+        if not picture.startswith(b"\x89PNG"):
+            return "里面有一张不是 PNG 的图片（位图后面能藏东西），用 PNG 重新生成"
+        problem = png_problem(picture)
+        if problem:
+            return f"里面的 PNG {problem}"
+        pos = offset + size
+    return None if pos == len(raw) else "图片结尾后面还藏着别的数据"
+
+
 def tracked() -> list[str]:
     out = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True).stdout
     return [p for p in out.decode("utf-8").split("\0") if p and not p.startswith("data/")]
@@ -105,6 +139,12 @@ def scan(base: Path, files: list[str]) -> list[str]:
         if path.suffix.lower() == ".png":
             raw = path.read_bytes()
             problem = png_problem(raw) or (f"超过 {MAX_PNG // 1024 // 1024} MB" if len(raw) > MAX_PNG else None)
+            if problem:
+                hits.append(f"{rel}: {problem}")
+            continue
+        if path.suffix.lower() == ".ico":
+            raw = path.read_bytes()
+            problem = ico_problem(raw) or (f"超过 {MAX_PNG // 1024 // 1024} MB" if len(raw) > MAX_PNG else None)
             if problem:
                 hits.append(f"{rel}: {problem}")
             continue

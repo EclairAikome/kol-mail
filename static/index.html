@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KOL Mail</title>
+<link rel="icon" href="/static/kolmail.ico">
 <style>
   /* Colours come from a preset (data-skin) in its light or dark form (data-scheme, set by the script from the
      外观 setting or the system). Large surfaces use the --surface/--card names, which turn translucent over a
@@ -57,14 +58,17 @@
   :root[data-wall] #wall { display: block; }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
-  body { background: var(--bg); color: var(--text); font: 14px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
-  header { height: 44px; display: flex; align-items: center; gap: 16px; padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--surface);
+  /* A column: the header on top (as tall as its buttons need, they wrap in a narrow window), the panes below it.
+     --header-h is the header's height as the script measures it, for what is laid over the panes (私信, the toast). */
+  body { background: var(--bg); color: var(--text); font: 14px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    display: flex; flex-direction: column; }
+  header { min-height: 44px; flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 5px 16px; border-bottom: 1px solid var(--line); background: var(--surface);
     position: relative; z-index: 10; }  /* above the panes: the mailbox menu drops down over them */
   header h1 { font-size: 15px; margin: 0; white-space: nowrap; }
   header button.act { white-space: nowrap; flex: none; }
-  #status { color: var(--muted); font-size: 12px; margin-left: auto; min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #status { color: var(--muted); font-size: 12px; margin-left: auto; min-width: 60px; flex: 1 1 120px; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .acctbar { flex: none; }
-  #searchForm { display: flex; gap: 6px; flex: 0 1 420px; min-width: 200px; }
+  #searchForm { display: flex; gap: 6px; flex: 0 1 420px; min-width: 150px; }
   #searchForm input { flex: 1; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; }
   .badge.box { background: var(--line); color: var(--muted); }
   .channels { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 12px; font-size: 13px; }
@@ -81,14 +85,14 @@
   .channels .savelink input { width: 340px; padding: 2px 8px; font-size: 13px; }
   .channels .savelink input[hidden], .channels .savelink button[hidden] { display: none; }
   #status.err { color: var(--bad); }
-  main { display: grid; grid-template-columns: 170px 380px 1fr; height: calc(100% - 44px); }
+  main { display: grid; grid-template-columns: 170px 380px minmax(0, 1fr); flex: 1 1 auto; min-height: 0; }
   nav, #list, #reader { overflow: auto; }
   nav { border-right: 1px solid var(--line); background: var(--surface); padding: 8px 0; }
   nav button { display: block; width: 100%; text-align: left; border: 0; background: none; color: var(--text); padding: 7px 14px; cursor: pointer; font: inherit; }
   nav button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
   #list { border-right: 1px solid var(--line); }
   .listbar { position: sticky; top: 0; background: var(--surface-bg); padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); display: flex; gap: 10px; align-items: center; }
-  .row { padding: 9px 12px; border-bottom: 1px solid var(--line); cursor: pointer; background: var(--row-bg); }
+  .row { padding: 9px 12px; border-bottom: 1px solid var(--line); cursor: pointer; background: var(--row-bg); transition: background-color .1s; }
   .row:hover { background: var(--accent-soft); }
   .row.on { box-shadow: inset 3px 0 0 var(--accent); }
   .row .top { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--muted); }
@@ -120,9 +124,17 @@
   .reply { margin-top: 18px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
   textarea { width: 100%; min-height: 90px; resize: vertical; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
   .btns { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; align-items: center; }
-  button.act { border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 6px; padding: 5px 12px; cursor: pointer; font: inherit; }
+  button.act { border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 6px; padding: 5px 12px; cursor: pointer; font: inherit; transition: border-color .12s, background-color .12s, filter .12s; }
+  button.act:hover:not(:disabled) { border-color: var(--accent); }
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  button.primary:hover:not(:disabled) { filter: brightness(1.08); }
   button:disabled { opacity: .5; cursor: default; }
+  button.act:focus-visible, nav button:focus-visible, details.msg > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  textarea:focus, input[type=text]:focus, input[type=search]:focus, .readbar select:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+  * { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+  dialog::backdrop { background: rgba(0, 0, 0, .35); }
+  h2 { overflow-wrap: anywhere; }
+  #backBtn, [data-f="backBtn"] { display: none; }
   .draft { display: none; margin-top: 10px; }
   .draft label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
   input[type=text] { width: 100%; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
@@ -132,12 +144,27 @@
   details.msg { border: 1px solid var(--line); border-radius: 8px; background: var(--card); margin-bottom: 10px; }
   details.msg > summary { list-style: none; cursor: pointer; padding: 9px 14px; display: flex; gap: 10px; align-items: baseline; }
   details.msg > summary::-webkit-details-marker { display: none; }
-  details.msg > summary .who { font-weight: 600; white-space: nowrap; }
+  details.msg > summary { border-radius: 8px; transition: background-color .12s; }
+  details.msg > summary:hover { background: var(--accent-soft); }
+  details.msg[open] > summary { border-radius: 8px 8px 0 0; }
+  details.msg > summary .who { font-weight: 600; white-space: nowrap; max-width: 40%; overflow: hidden; text-overflow: ellipsis; }
   details.msg > summary .when { color: var(--muted); font-size: 12px; white-space: nowrap; margin-left: auto; }
   details.msg > summary .preview { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
   details.msg[open] > summary .preview { display: none; }
   details.msg.own > summary .who { color: var(--accent); }
   details.msg .inner { padding: 0 14px 12px; }
+  /* the earlier mails of a long conversation, folded into one line that says how many they are */
+  details.older { border: 1px dashed var(--line); border-radius: 8px; margin-bottom: 10px; }
+  details.older > summary { list-style: none; cursor: pointer; padding: 8px 14px; display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; color: var(--muted); font-size: 13px; border-radius: 8px; }
+  details.older > summary::-webkit-details-marker { display: none; }
+  details.older > summary::before { content: "▸"; }
+  details.older[open] > summary::before { content: "▾"; }
+  details.older > summary:hover { background: var(--accent-soft); }
+  details.older > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  details.older > summary b { color: var(--text); font-weight: 600; }
+  details.older > .list { padding: 4px 10px 0; }
+  details.older > summary i { font-style: normal; color: var(--accent); font-weight: 600; }
+  details.msg.unread > summary .who::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-right: 6px; vertical-align: 1px; }
   details.msg .cols .pane { border: 0; padding: 0; background: none; }
   details.msg .cols .pane.zhpane { background: var(--card-zh); padding: 8px 10px; border-radius: 6px; }
   .atts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
@@ -194,7 +221,7 @@
   #folderMenu .note { padding: 4px 14px; font-size: 12px; max-width: 240px; }
   #folderDlg input[hidden], #folderDlg select[hidden] { display: none; }
   #folderDlg button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
-  #toast { position: fixed; top: 54px; left: 50%; transform: translateX(-50%); z-index: 50; background: var(--text); color: var(--bg); padding: 7px 16px; border-radius: 18px; font-size: 13px; box-shadow: 0 4px 14px rgba(0,0,0,.2); }
+  #toast { position: fixed; top: calc(var(--header-h, 44px) + 10px); left: 50%; transform: translateX(-50%); z-index: 50; background: var(--text); color: var(--bg); padding: 7px 16px; border-radius: 18px; font-size: 13px; box-shadow: 0 4px 14px rgba(0,0,0,.2); }
   #toast[hidden] { display: none; }
   /* the Chinese of a translated paragraph can be corrected in place (applyZhEdits) */
   table.pairs textarea.zhedit { display: block; width: 100%; min-height: 0; border: 1px dashed transparent; background: transparent; padding: 0 2px; resize: none; overflow: hidden; font: inherit; color: inherit; border-radius: 4px; }
@@ -214,7 +241,7 @@
   .compose .grid2 select { justify-self: start; }
   .compose > label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
   dialog.small:not([open]) { display: none; }
-  dialog.small { width: min(560px, 92vw); border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); }
+  dialog.small { width: min(560px, 92vw); max-height: 92vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); box-shadow: 0 18px 50px rgba(0, 0, 0, .22); }
   dialog.small h3 { margin: 0 0 8px; font-size: 15px; }
   #version { cursor: pointer; border-bottom: 1px dotted var(--muted); }
   #version:hover, #version:focus-visible { color: var(--accent); border-bottom-color: var(--accent); outline: none; }
@@ -330,7 +357,48 @@
   .outatt button:hover { color: var(--bad); }
   .outatt.busy { opacity: .6; }
   .reply.dragging { outline: 2px dashed var(--accent); outline-offset: 4px; }
-  @media (max-width: 1100px) { .cols { grid-template-columns: 1fr; } main { grid-template-columns: 140px 300px 1fr; } }
+  .outatt .tag { font-size: 11px; color: var(--accent); border: 1px solid var(--accent); border-radius: 8px; padding: 0 6px; white-space: nowrap; }
+  .bodybar { margin: 6px 0 0; }
+  .mailpreview { border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; overflow: hidden; }
+  .mailpreview[hidden] { display: none; }
+  .mailpreview .pvhead { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 5px 10px; background: var(--bg); border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+  .mailpreview .pvhead .act { padding: 1px 10px; font-size: 12px; }
+  .mailpreview iframe { display: block; width: 100%; height: 380px; border: 0; background: #fff; }
+  /* Window sizes. Wide: more room for the list, and the reading column stops growing where lines get too long to
+     read. Medium: the original and its Chinese under each other. Narrow (half a laptop screen, a phone-sized
+     window): one pane at a time, the folders as a strip on top, the list, and a mail opened over it with a way back. */
+  #reader > div { max-width: 1560px; }
+  @media (min-width: 1700px) { main { grid-template-columns: 200px 440px minmax(0, 1fr); } #reader { padding: 18px 28px 40px; } }
+  @media (max-width: 1300px) { header { gap: 6px 8px; padding: 5px 10px; } header button.act { padding: 4px 9px; } }
+  @media (max-width: 1100px) { .cols { grid-template-columns: 1fr; } main { grid-template-columns: 140px 300px minmax(0, 1fr); } }
+  @media (max-width: 900px) {
+    main { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+    nav { border-right: 0; border-bottom: 1px solid var(--line); padding: 4px 6px; display: flex; align-items: center; overflow-x: auto; overflow-y: hidden; }
+    nav #folders { display: flex; gap: 2px; }
+    nav .fold { flex: none; }
+    nav .fold button.box { width: auto; padding: 5px 26px 5px 10px !important; border-radius: 6px; }
+    nav .fold button.more { top: 1px; opacity: 1; }
+    nav #newFolderBtn { flex: none; margin: 0 8px; white-space: nowrap; }
+    #list { border-right: 0; }
+    body.reading #list, body:not(.reading) #reader { display: none; }
+    [data-f="backBtn"] { display: inline-block; }
+    #reader { padding: 12px 12px 40px; }
+    .channels .savelink input { width: min(340px, 70vw); }
+    #status { order: 10; flex-basis: 100%; text-align: left; margin-left: 0; }  /* a line of its own, under the buttons */
+    nav button .n { float: none; margin-left: 4px; }
+    .compose .grid2, .reply .rcpt { grid-template-columns: 48px minmax(0, 1fr); }
+    table.pairs td { padding: 5px 6px; }
+    #fbBtn { padding: 5px 12px; }
+  }
+  @media (max-width: 560px) {
+    header h1 { display: none; }
+    #searchForm { flex: 1 1 100%; order: 5; }
+    details.msg > summary { flex-wrap: wrap; }
+    details.msg > summary .when { margin-left: 0; }
+    table.pairs, table.pairs tbody, table.pairs tr, table.pairs td { display: block; width: 100%; }  /* the Chinese under its paragraph */
+    table.pairs tr { border-top: 1px solid var(--line); }
+    table.pairs td { border-top: 0; }
+  }
 </style>
 <script>
 // The last look this browser saw, set before the page draws so it never flashes the default colours. The full
@@ -414,7 +482,7 @@ try {
   <p class="note err" id="mailHtmlOff" hidden>这台电脑的邮件组件不是配套版本，回信暂时还按纯文字发出，下面的设置等更新后生效。</p>
   <div class="row2"><label>正文字体 <select id="mailFont"></select></label></div>
   <label class="blk"><input type="checkbox" id="mailNameOn"> 签名里加手写体名字</label>
-  <div class="row2"><input type="text" id="mailNameText" maxlength="40" placeholder="名字，比如 Eclair" style="width:12em">
+  <div class="row2"><input type="text" id="mailNameText" maxlength="40" placeholder="名字，比如 Jordan" style="width:12em">
     <label>字体 <select id="mailNameFont"></select></label></div>
   <canvas id="mailNameCanvas" class="signame" hidden></canvas>
   <label class="blk"><input type="checkbox" id="mailBannerOn"> 签名最后附上 banner</label>
@@ -506,7 +574,7 @@ try {
   <input type="text" id="acctEmail" placeholder="邮箱地址，比如 name@163.com" autocomplete="off" maxlength="254">
   <div class="row2"><input type="password" id="acctPw" placeholder="密码或授权码" autocomplete="new-password" maxlength="512">
     <input type="text" id="acctLabel" placeholder="备注名，可不填（比如“个人”）" maxlength="40"></div>
-  <details id="acctServers"><summary class="note">服务器设置（常见邮箱和公司同域名的邮箱不用填）</summary>
+  <details id="acctServers"><summary class="note">手动填写服务器（一般不用，KOL Mail 会按邮箱地址自己找）</summary>
     <div class="row2"><span>收信 IMAP</span><input type="text" id="acctImap" placeholder="imap.example.com">
       <input type="number" id="acctImapPort" placeholder="993" min="1" max="65535">
       <select id="acctImapSec"><option value="ssl">SSL</option><option value="starttls">STARTTLS</option></select></div>
@@ -522,7 +590,7 @@ try {
   <h3>邮箱密码要重新输入</h3>
   <p class="note" id="pwAgainText"></p>
   <input type="password" id="pwAgain" placeholder="现在的邮箱密码" autocomplete="new-password" maxlength="512">
-  <p class="note" style="margin:6px 0 0">公司邮箱填阿里云邮箱网页上登录用的密码；163、126、QQ 邮箱填网页版“设置”里生成的授权码。密码只存在这台电脑的系统凭据管理器（Mac 上是钥匙串）里。</p>
+  <p class="note" style="margin:6px 0 0">公司邮箱一般填网页上登录用的密码；163、126、QQ 邮箱填网页版“设置”里生成的授权码。密码只存在这台电脑的系统凭据管理器（Mac 上是钥匙串）里。</p>
   <div class="row2"><button class="act primary" id="pwAgainGo" type="button">保存并测试</button>
     <button class="act" id="pwAgainLater" type="button">稍后</button><span class="note" id="pwAgainNote"></span></div>
 </dialog>
@@ -579,16 +647,16 @@ try {
 <div id="loginView" hidden>
   <form id="loginForm" novalidate>
     <h1>KOL Mail</h1>
-    <p class="note lead">登录你的工作邮箱。KOL 的来信会自动翻成中文，回信由 AI 起草、你确认后才发出。</p>
+    <p class="note lead">用完整的邮箱地址和密码登录，收发信服务器会自动找到。KOL 的来信会自动翻成中文，回信由 AI 起草、你确认后才发出。</p>
     <label class="blk" for="loginEmail">邮箱地址</label>
-    <input type="text" id="loginEmail" autocomplete="off" maxlength="254" spellcheck="false">
+    <input type="text" id="loginEmail" autocomplete="off" maxlength="254" spellcheck="false" placeholder="完整的邮箱地址，比如 name@example.com">
     <label class="blk" for="loginPw">密码或授权码</label>
     <input type="password" id="loginPw" autocomplete="new-password" maxlength="512">
     <div id="loginNameRow">
       <label class="blk" for="loginName">对外署名（英文名）</label>
       <input type="text" id="loginName" maxlength="60" placeholder="比如 Alex Li，收信人会在你的邮箱地址旁边看到">
     </div>
-    <details id="loginServers"><summary class="note">服务器设置（公司邮箱和 163、126、QQ、Gmail 等常见邮箱不用填）</summary>
+    <details id="loginServers"><summary class="note">手动填写服务器（一般不用，KOL Mail 会按邮箱地址自己找）</summary>
       <div class="row2"><span>收信 IMAP</span><input type="text" id="loginImap" placeholder="imap.example.com">
         <input type="number" id="loginImapPort" placeholder="993" min="1" max="65535">
         <select id="loginImapSec"><option value="ssl">SSL</option><option value="starttls">STARTTLS</option></select></div>
@@ -638,6 +706,7 @@ try {
 <template id="readerTpl">
   <h2 data-f="subject"></h2>
   <div class="readbar">
+    <button class="act" data-f="backBtn" type="button" title="回到邮件列表">← 列表</button>
     <button class="act" data-f="flagBtn" type="button" title="标记这封邮件，回头再处理；Outlook 和网页邮箱里也看得到">⚑ 标记</button>
     <select data-f="moveSel" title="把这个会话在当前文件夹里的邮件移到别的文件夹"><option value="">移动到…</option></select>
   </div>
@@ -667,6 +736,11 @@ try {
     <div class="draft" data-f="draft">
       <label>主题</label><input type="text" data-f="rsubject">
       <label>回复正文（<span data-f="rlang"></span>，可直接修改）</label><textarea data-f="rbody" style="min-height:200px"></textarea>
+      <div class="btns bodybar"><button class="act" data-f="imgBtn" type="button" title="把图片放进正文里光标所在的位置，对方打开邮件就能直接看到，不用点附件">插入图片</button><input type="file" accept="image/png,image/jpeg,image/gif" multiple hidden data-f="imgInput">
+        <button class="act" data-f="previewBtn" type="button" title="按发出去的样子排一遍：字体、签名、正文里的图片">预览</button>
+        <span class="note" data-f="imgNote">图片会放在光标所在的位置，正文里显示成一行 [image: 1]；截图在正文框里 Ctrl+V 也是插进正文</span></div>
+      <div class="mailpreview" data-f="pvbox" hidden><div class="pvhead"><span data-f="previewNote">对方收到的样子</span><button class="act" data-f="previewClose" type="button">收起</button></div>
+        <iframe sandbox="allow-same-origin" title="邮件预览" data-f="previewFrame"></iframe></div>
       <div class="pairsbar"><label>中文对照（逐段回译实际要发出的正文；右边的中文可以直接改）</label>
         <button class="act" data-f="pairsBtn">更新对照</button>
         <button class="act primary" data-f="zhApplyBtn" hidden title="AI 只改你动过中文的那几段原文，其他段一个字不动，改完重新回译核对">按改过的中文改原文</button>
@@ -677,9 +751,9 @@ try {
       <label>修改意见（写给 AI，比如“语气再热情点”“去掉第二段”“价格改成 150 美元两条”）</label>
       <textarea data-f="feedback" style="min-height:60px"></textarea>
       <div class="btns"><button class="act" data-f="reviseBtn">按意见修改</button><span class="note" data-f="reviseNote"></span></div>
-      <label>附件（可以点按钮选，也可以把文件拖进回复区，截图直接在正文框里 Ctrl+V 粘贴）</label>
+      <label>附件（点按钮选，或者把文件拖进回复区；要让图片直接显示在正文里，用上面的“插入图片”）</label>
       <div class="btns"><button class="act" data-f="attachBtn">添加附件</button><input type="file" multiple hidden data-f="attachInput">
-        <span class="note" data-f="attachNote">加起来最多 15 MB，最多 10 个</span></div>
+        <span class="note" data-f="attachNote">附件和正文图片加起来最多 15 MB、10 个</span></div>
       <div class="outatts" data-f="outatts"></div>
       <div class="btns"><button class="act primary" data-f="sendBtn">确认无误，发送</button><span class="note" data-f="sendNote"></span></div>
     </div>
@@ -687,6 +761,7 @@ try {
 </template>
 
 <template id="composeTpl">
+  <div class="readbar"><button class="act" data-f="backBtn" type="button" title="回到邮件列表">← 列表</button></div>
   <h2>写邮件 <span class="note" data-f="savedNote" style="font-weight:normal;font-size:12px"></span></h2>
   <div class="reply compose" data-f="replybox">
     <div class="grid2">
@@ -705,6 +780,11 @@ try {
     </div>
     <div class="draft" data-f="draft">
       <label>正文（<span data-f="rlang"></span>，可直接修改）</label><textarea data-f="rbody" style="min-height:200px"></textarea>
+      <div class="btns bodybar"><button class="act" data-f="imgBtn" type="button" title="把图片放进正文里光标所在的位置，对方打开邮件就能直接看到，不用点附件">插入图片</button><input type="file" accept="image/png,image/jpeg,image/gif" multiple hidden data-f="imgInput">
+        <button class="act" data-f="previewBtn" type="button" title="按发出去的样子排一遍：字体、签名、正文里的图片">预览</button>
+        <span class="note" data-f="imgNote">图片会放在光标所在的位置，正文里显示成一行 [image: 1]；截图在正文框里 Ctrl+V 也是插进正文</span></div>
+      <div class="mailpreview" data-f="pvbox" hidden><div class="pvhead"><span data-f="previewNote">对方收到的样子</span><button class="act" data-f="previewClose" type="button">收起</button></div>
+        <iframe sandbox="allow-same-origin" title="邮件预览" data-f="previewFrame"></iframe></div>
       <div class="pairsbar"><label>中文对照（逐段回译实际要发出的正文；右边的中文可以直接改）</label>
         <button class="act" data-f="pairsBtn">更新对照</button>
         <button class="act primary" data-f="zhApplyBtn" hidden title="AI 只改你动过中文的那几段原文，其他段一个字不动，改完重新回译核对">按改过的中文改原文</button>
@@ -715,9 +795,9 @@ try {
       <label>修改意见（写给 AI，比如“语气再热情点”“去掉第二段”“价格改成 150 美元两条”）</label>
       <textarea data-f="feedback" style="min-height:60px"></textarea>
       <div class="btns"><button class="act" data-f="reviseBtn">按意见修改</button><span class="note" data-f="reviseNote"></span></div>
-      <label>附件（可以点按钮选，也可以把文件拖进这里，截图直接在正文框里 Ctrl+V 粘贴）</label>
+      <label>附件（点按钮选，或者把文件拖进这里；要让图片直接显示在正文里，用上面的“插入图片”）</label>
       <div class="btns"><button class="act" data-f="attachBtn">添加附件</button><input type="file" multiple hidden data-f="attachInput">
-        <span class="note" data-f="attachNote">加起来最多 15 MB，最多 10 个</span></div>
+        <span class="note" data-f="attachNote">附件和正文图片加起来最多 15 MB、10 个</span></div>
       <div class="outatts" data-f="outatts"></div>
       <div class="btns"><button class="act primary" data-f="sendBtn">确认无误，发送</button><span class="note" data-f="sendNote"></span></div>
     </div>
@@ -768,6 +848,7 @@ async function loadStatus() {
     if (asked !== st.account) return;
     showUnreadCounts(s.unread_counts || {});
     showFlagCount(s.flagged_count);
+    st.signature = s.signature || "";
     if (st.unreadRev !== undefined && s.unread_rev !== st.unreadRev && !st.loadingMore) {
       // Unread or flag state changed (new mail, read or flagged elsewhere or here): repaint from the server cache.
       if (!st.search && st.page === 1) loadList(false, "cached", true).catch(() => {});  // search rows keep their flags
@@ -1035,6 +1116,7 @@ async function moveMails(mailbox, ids, target) {
     $("#reader").textContent = "";
     const empty = document.createElement("div"); empty.className = "empty"; empty.textContent = `这个会话已移到“${folderLabel(target)}”`;
     $("#reader").append(empty);
+    showList();
   }
   if (st.search) await runSearch(st.search.q);
   else await loadList(false, "live");
@@ -1242,18 +1324,50 @@ $("#acctAdd").onclick = safe(async () => {
     imap_host: $("#acctImap").value.trim(), imap_port: Number($("#acctImapPort").value) || undefined, imap_security: $("#acctImapSec").value,
     smtp_host: $("#acctSmtp").value.trim(), smtp_port: Number($("#acctSmtpPort").value) || undefined, smtp_security: $("#acctSmtpSec").value });
   if (!body.email || !body.password) { note.className = "note err"; note.textContent = "邮箱地址和密码（授权码）都要填"; return; }
-  btn.disabled = true; note.className = "note"; note.textContent = "正在连接邮箱服务器，测试收信和发信，可能要一两分钟…";
+  if (!FULL_ADDRESS.test(body.email)) { note.className = "note err"; note.textContent = "请填写完整的邮箱地址，比如 name@example.com"; return; }
+  btn.disabled = true; note.className = "note"; note.textContent = "正在查找并连接邮箱服务器，测试收信和发信，可能要一两分钟…";
+  let keepPassword = false;
   try {
-    const d = await post("/api/accounts/add", body);
+    const d = await post("/api/accounts/add", withServersOk(body));
+    if (d.confirm) {  // nothing was sent yet: the password stays in its box for the second click
+      st.serversOk = { email: body.email, token: d.confirm.token }; keepPassword = true;
+      note.textContent = confirmText(d.confirm, "添加并测试");
+      return;
+    }
     $("#acctPw").value = ""; $("#acctEmail").value = ""; $("#acctLabel").value = "";
-    note.className = d.warning ? "note err" : "note"; note.textContent = d.warning || "加好了，点左上角的邮箱名可以切换过去";
+    note.className = d.warning ? "note err" : "note";
+    note.textContent = d.warning || ((d.found ? `自动找到了服务器 ${d.found.imap_host}，` : "") + "加好了，点左上角的邮箱名可以切换过去");
     showAccountList(d.accounts); renderAccounts(d.accounts);
-  } catch (e) { note.className = "note err"; note.textContent = e.message; }
-  finally { btn.disabled = false; $("#acctPw").value = ""; }
+  } catch (e) {
+    note.className = "note err"; note.textContent = e.message;
+    if (SERVERS_BY_HAND.test(e.message)) $("#acctServers").open = true;
+  }
+  finally { btn.disabled = false; if (!keepPassword) $("#acctPw").value = ""; }
 });
+
+// In a narrow window one pane shows at a time (the styles at max-width 900px): the list, or what was opened from it.
+// In a wide one the class changes nothing.
+const listHidden = () => getComputedStyle($("#list")).display === "none";
+function showReader() {
+  if (!listHidden()) st.listScroll = $("#list").scrollTop;  // where the list is left, whenever it can be seen
+  document.body.classList.add("reading");
+}
+function showList() {
+  if (!document.body.classList.contains("reading")) return;
+  const hidden = listHidden();
+  document.body.classList.remove("reading");
+  if (hidden) $("#list").scrollTop = st.listScroll || 0;  // back where it was left; a wide window never moves it
+}
+// The header's height, for what is laid over the panes below it (it grows when its buttons wrap).
+(() => {
+  const header = $("header"), set = () => document.documentElement.style.setProperty("--header-h", header.offsetHeight + "px");
+  if (window.ResizeObserver) new ResizeObserver(set).observe(header);
+  window.addEventListener("resize", set); set();
+})();
 
 // Highlight at once, paint the server's cached list, then refresh it quietly in the background.
 async function showFolder(f) {
+  showList();
   if (st.search) { st.search = null; $("#q").value = ""; }
   st.mailbox = f; st.page = 1;
   $("#moreNote").textContent = ""; $("#more").disabled = false; $("#more").textContent = "加载更多";
@@ -1470,6 +1584,7 @@ function fillMoveSelect(ctx) {
 async function runSearch(q) {
   q = q.trim();
   if (!q) { if (st.search) await showFolder(st.mailbox); return; }
+  showList();
   const search = { q, results: [], done: false };
   st.search = search; st.listSeq++;
   document.querySelectorAll("#folders button").forEach(b => b.classList.remove("on"));
@@ -1720,8 +1835,12 @@ function saveButton(ctx, m, name, shown) {
 async function openMessage(id, rowEl, mailbox) {
   document.querySelectorAll(".row.on").forEach(r => r.classList.remove("on"));
   if (rowEl) { rowEl.classList.add("on"); rowEl.classList.remove("unread"); }  // opening reads the whole conversation
-  if (st.current) { clearInterval(st.current.poll); st.current.urls.forEach(u => URL.revokeObjectURL(u)); }
+  if (st.current) {
+    clearInterval(st.current.poll); st.current.urls.forEach(u => URL.revokeObjectURL(u));
+    (st.current.outAtts || []).forEach(a => a.url && URL.revokeObjectURL(a.url));
+  }
   st.current = null;
+  showReader();
   const reader = $("#reader"); reader.textContent = "";
   const view = document.createElement("div");
   const loading = document.createElement("div"); loading.className = "empty"; loading.textContent = "载入中…";
@@ -1730,7 +1849,12 @@ async function openMessage(id, rowEl, mailbox) {
   let data;
   // Right after a restart the server answers with the opened mail alone ("partial"), and the rest follows.
   try { data = await api(path + "&quick=1"); }
-  catch (e) { loading.textContent = e.message; return; }
+  catch (e) {
+    loading.textContent = e.message + " ";
+    const back = document.createElement("button"); back.className = "act"; back.dataset.f = "backBtn"; back.textContent = "← 列表";
+    back.onclick = showList; loading.append(back);
+    return;
+  }
   if (!loading.isConnected) return;  // another conversation was opened meanwhile
   // Everything below is bound to this conversation. A reply answers one of its messages (the one clicked in the list,
   // or any other picked with its 回复 / 回复全部 buttons), to whoever is in 收件人, 抄送 and 密送.
@@ -1749,6 +1873,7 @@ async function openMessage(id, rowEl, mailbox) {
   field(view, "rbody").oninput = () => markStale(ctx);
   field(view, "sendBtn").onclick = () => send(ctx);
   field(view, "flagBtn").onclick = () => safe(toggleReaderFlag)(ctx);
+  field(view, "backBtn").onclick = showList;
   for (const f of ["notes", "rsubject", "rbody", "feedback"]) field(view, f).addEventListener("input", () => saveSoon(ctx));
   for (const f of ["rto", "rcc", "rbcc"]) field(view, f).addEventListener("input", () => { ctx.rcptEdited = true; saveSoon(ctx); });
   setupAttachments(ctx);
@@ -1761,6 +1886,77 @@ async function openMessage(id, rowEl, mailbox) {
     return;
   }
   if (st.current === ctx) renderThread(ctx, full);
+}
+
+// A long conversation shows its latest FOLD_KEEP mails as rows and folds the earlier ones into one block that says
+// how many there are and from when to when: nothing is left out, and a hundred mails are not a wall to scroll
+// through. The server sends the earlier ones as stubs (who, when, a preview); a stub's body, translation and
+// attachments are fetched when its row is opened.
+const FOLD_KEEP = 6;
+const FOLD_MIN = 3;  // fewer earlier mails than this are simply shown
+
+function fmtDay(s) {
+  const d = new Date(s); if (isNaN(d)) return "";
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleDateString("zh-CN", sameYear ? { month: "numeric", day: "numeric" } : { year: "numeric", month: "numeric", day: "numeric" });
+}
+
+// What a card shows of its mail; called again when a stub's mail has been fetched.
+function fillCard(ctx, card) {
+  const m = card.msg;
+  field(card, "who").textContent = m.own ? "我方" : senderName(m.sender);
+  field(card, "when").textContent = fmtDate(m.date) + (m.attachments.length ? ` · 附件 ${m.attachments.length}` : "");
+  field(card, "preview").textContent = m.stub ? (m.preview || "（点开载入这封邮件）") : previewText(m);
+  field(card, "from").textContent = m.sender || "";
+  field(card, "to").textContent = (m.recipients || []).join(", ");
+  const one = field(card, "replyOne"), all = field(card, "replyAll");
+  if (m.own) { one.textContent = "跟进这封"; one.title = "接着我方这封写：收件人是它的收件人"; all.hidden = true; }
+  else all.hidden = !replyRecipients(ctx, m, true).cc.length;  // nobody else on it: 回复 says it all
+  const body = field(card, "body");
+  if (m.stub) { body.className = "note"; body.textContent = "点开后载入这封邮件…"; return; }
+  body.className = "body"; body.textContent = m.body || "";
+  if (renderTranslation(card, m.translation, m.own)) ctx.cards.set(m.message_id, card);
+}
+
+async function loadStub(ctx, card) {
+  const m = card.msg;
+  if (!m.stub || m.loading) return;
+  m.loading = true;
+  const body = field(card, "body"); body.className = "note"; body.textContent = "正在载入这封邮件…";
+  try {
+    const d = await api(`/api/thread/message?mailbox=${encodeURIComponent(m.mailbox)}&id=${m.email_id}`);
+    if (st.current !== ctx || !card.isConnected) return;
+    // the same object the conversation and the reply box hold; opened now, so read (the server marked it)
+    Object.assign(m, d.message, { stub: false, unread: false });
+    card.classList.remove("unread");
+    const fold = card.closest("details.older"); if (fold && fold.recount) fold.recount();
+    fillCard(ctx, card);
+    if (card.open) renderAttachments(ctx, m, field(card, "atts"));
+    if (ctx.cards.size) startPoll(ctx);
+  } catch (e) {
+    if (card.isConnected) { body.className = "note err"; body.textContent = `载入失败：${e.message}。收起再点开可以重试。`; }
+  } finally { m.loading = false; }
+}
+
+function buildCard(ctx, m) {
+  const card = $("#msgTpl").content.firstElementChild.cloneNode(true);
+  card.msg = m;
+  if (m.own) card.classList.add("own");
+  if (m.unread) card.classList.add("unread");
+  field(card, "replyOne").onclick = ev => { ev.preventDefault(); setTarget(ctx, m, false); };
+  field(card, "replyAll").onclick = ev => { ev.preventDefault(); setTarget(ctx, m, true); };
+  card.addEventListener("toggle", () => {
+    if (!card.open) return;
+    if (m.stub) loadStub(ctx, card); else renderAttachments(ctx, m, field(card, "atts"));
+  });
+  field(card, "retranslate").onclick = safe(async (ev) => {
+    ev.preventDefault();
+    if (m.stub) return;
+    await post("/api/retranslate", { mailbox: m.mailbox, email_id: m.email_id, message_id: m.message_id });
+    renderTranslation(card, { status: "pending" }); ctx.cards.set(m.message_id, card); startPoll(ctx);
+  });
+  fillCard(ctx, card);
+  return card;
 }
 
 // Fills the message cards; called again when a partial answer is followed by the whole conversation.
@@ -1784,38 +1980,53 @@ function renderThread(ctx, data) {
   fillMoveSelect(ctx);
   const kols = msgs.filter(m => !m.own).length, ours = msgs.length - kols;
   field(view, "threadmeta").textContent = data.partial ? "正在载入本会话的其他邮件…"
-    : msgs.length > 1 ? `本会话共 ${msgs.length} 封：对方 ${kols} 封，我方 ${ours} 封` : "";
+    : msgs.length > 1 ? `本会话共 ${msgs.length} 封：对方 ${kols} 封，我方 ${ours} 封`
+      + (data.truncated ? `（会话太长，这里只列出最近 ${msgs.length} 封，更早的请到邮箱里看）` : "") : "";
   renderChannels(field(view, "channels"), data.channels, data.kol_name, data.kol_address);
   const list = field(view, "msgs"); list.textContent = "";
-  msgs.forEach((m, i) => {
-    const card = $("#msgTpl").content.firstElementChild.cloneNode(true);
-    if (m.own) card.classList.add("own");
-    field(card, "who").textContent = m.own ? "我方" : senderName(m.sender);
-    field(card, "when").textContent = fmtDate(m.date) + (m.attachments.length ? ` · 附件 ${m.attachments.length}` : "");
-    field(card, "preview").textContent = previewText(m);
-    field(card, "from").textContent = m.sender || "";
-    field(card, "to").textContent = (m.recipients || []).join(", ");
-    field(card, "body").textContent = m.body || "";
-    const one = field(card, "replyOne"), all = field(card, "replyAll");
-    if (m.own) { one.textContent = "跟进这封"; one.title = "接着我方这封写：收件人是它的收件人"; all.hidden = true; }
-    else all.hidden = !replyRecipients(ctx, m, true).cc.length;  // nobody else on it: 回复 says it all
-    one.onclick = ev => { ev.preventDefault(); setTarget(ctx, m, false); };
-    all.onclick = ev => { ev.preventDefault(); setTarget(ctx, m, true); };
-    const atts = field(card, "atts");
-    card.addEventListener("toggle", () => { if (card.open) renderAttachments(ctx, m, atts); });
-    if (i === msgs.length - 1 || (m.email_id === ctx.email_id && m.mailbox === ctx.mailbox)) card.open = true;
-    card.msg = m;
-    if (renderTranslation(card, m.translation, m.own)) ctx.cards.set(m.message_id, card);
-    field(card, "retranslate").onclick = safe(async (ev) => {
-      ev.preventDefault();
-      await post("/api/retranslate", { mailbox: m.mailbox, email_id: m.email_id, message_id: m.message_id });
-      renderTranslation(card, { status: "pending" }); ctx.cards.set(m.message_id, card); startPoll(ctx);
-    });
-    list.append(card);
-    if (card.open) renderAttachments(ctx, m, atts);
+  const answered = m => m.email_id === ctx.email_id && m.mailbox === ctx.mailbox;
+  const cards = msgs.map(m => buildCard(ctx, m));
+  let folded = msgs.length - FOLD_KEEP >= FOLD_MIN ? msgs.length - FOLD_KEEP : 0;
+  // An unread mail that came with the conversation is never folded away: the server counts it as read because it
+  // is shown. (An unread stub stays unread until it is opened; the fold says how many there are.)
+  const firstUnread = msgs.findIndex(m => m.unread && !m.stub);
+  if (firstUnread >= 0 && firstUnread < folded) folded = firstUnread >= FOLD_MIN ? firstUnread : 0;
+  if (folded) {
+    const older = msgs.slice(0, folded), theirs = older.filter(m => !m.own).length;
+    const fold = document.createElement("details"); fold.className = "older";
+    const sum = document.createElement("summary"), head = document.createElement("b"), tail = document.createElement("span"),
+      waiting = document.createElement("i");
+    head.textContent = `更早的 ${older.length} 封往来`;
+    const days = [fmtDay(older[0].date), fmtDay(older[older.length - 1].date)].filter(Boolean);
+    const span = days.length === 2 && days[0] !== days[1] ? `${days[0]} 至 ${days[1]}` : days[0] || "";
+    const say = () => {
+      tail.textContent = `${span ? span + " · " : ""}对方 ${theirs} 封，我方 ${older.length - theirs} 封 · ${fold.open ? "点一下收起" : "点一下展开"}`;
+      const unread = older.filter(m => m.unread).length;
+      waiting.textContent = unread ? `其中 ${unread} 封还没读` : "";
+    };
+    sum.append(head, tail, waiting);
+    const inner = document.createElement("div"); inner.className = "list"; inner.append(...cards.slice(0, folded));
+    fold.append(sum, inner);
+    // open when the mail being read or answered is in it, or when it was open before the conversation was redrawn
+    fold.open = !!ctx.foldOpen || older.some(m => m.opened || answered(m));
+    fold.addEventListener("toggle", () => { ctx.foldOpen = fold.open; say(); });
+    fold.recount = say;  // loadStub: one of its mails was just read
+    say();
+    list.append(fold);
+  }
+  list.append(...cards.slice(folded));
+  let focus = null;
+  cards.forEach((card, i) => {
+    const m = card.msg;
+    if (i === msgs.length - 1 || m.opened || answered(m)) {
+      card.open = true;
+      if (m.stub) loadStub(ctx, card); else renderAttachments(ctx, m, field(card, "atts"));
+      if (m.opened && i < folded) focus = card;
+    }
   });
   markTarget(ctx);
-  const last = list.lastElementChild; if (last) last.scrollIntoView({ block: "nearest" });
+  // the mail that was clicked when it sits among the earlier ones (a search hit, say), else the latest
+  const shown = focus || list.lastElementChild; if (shown) shown.scrollIntoView({ block: "nearest" });
   if (ctx.cards.size) startPoll(ctx);
 }
 
@@ -1851,6 +2062,8 @@ function setTarget(ctx, m, all, auto) {
     field(v, "strategies").style.display = "none"; ctx.strategy = null; ctx.strategyFor = "";
   }
   const card = [...v.querySelectorAll("details.msg")].find(c => c.msg === m);
+  const fold = card && card.closest("details.older");
+  if (fold && !fold.open) fold.open = true;
   if (card && !card.open && !m.own) card.open = true;  // a picked message is opened so it can be read
   saveSoon(ctx); field(v, "replybox").scrollIntoView({ block: "start", behavior: "smooth" });
 }
@@ -2264,8 +2477,11 @@ async function send(ctx) {
   if (ctx.compose && !subjectChecked(ctx)) return refuse("主题改过了，先点“更新对照”核对主题的中文");
   const preview = body.length > 300 ? body.slice(0, 300) + "…" : body;
   if ((ctx.outAtts || []).some(a => !a.id)) return refuse("附件还在上传，等一下再发");
-  const atts = (ctx.outAtts || []).map(a => a.name);
-  const attLine = atts.length ? `\n附件：${atts.join("、")}` : "";
+  const wrong = pictureProblem(ctx);
+  if (wrong) return refuse(wrong);
+  const atts = (ctx.outAtts || []).filter(a => !a.inline).map(a => a.name);
+  const pics = (ctx.outAtts || []).filter(a => a.inline);
+  const attLine = (atts.length ? `\n附件：${atts.join("、")}` : "") + (pics.length ? `\n正文里的图片：${pics.length} 张` : "");
   const ccLine = (cc ? `\n抄送：${cc}` : "") + (bcc ? `\n密送：${bcc}` : "");
   const targetLine = !ctx.compose && ctx.targetLabel ? `\n${ctx.targetLabel}` : "";
   const warnings = [ctx.uncertain ? "⚠️ 这封信上次发送结果不确定，可能已经发出过一次，先到“已发送”里确认" : "",
@@ -2280,20 +2496,22 @@ async function send(ctx) {
   ctx.sendingNow = true; renderOutAtts(ctx); field(v, "attachBtn").disabled = true;
   note.className = "note"; note.textContent = "发送中…";
   try {
-    const attachments = (ctx.outAtts || []).map(a => a.id);
+    const attachments = (ctx.outAtts || []).filter(a => !a.inline).map(a => a.id);
+    const inline = Object.fromEntries(pics.map(a => [a.inline, a.id]));
     const learn = { ...learnFields(ctx, false), feedback_log: ctx.feedbackLog || [], notes: field(v, "notes").value,
                     language: field(v, "rlang").textContent };
-    const r = ctx.compose ? await post("/api/compose/send", { to, cc, subject, body, body_zh: ctx.pairs.zh, attachments, ...learn })
+    const r = ctx.compose ? await post("/api/compose/send", { to, cc, subject, body, body_zh: ctx.pairs.zh, attachments, inline, ...learn })
       : await post("/api/send", { mailbox: ctx.mailbox, email_id: ctx.email_id, to, cc, bcc, draft_key: ctx.kolAddress,
-                                  subject, body, body_zh: ctx.pairs.zh, attachments, ...learn });
+                                  subject, body, body_zh: ctx.pairs.zh, attachments, inline, ...learn });
     note.textContent = `已发送给 ${[].concat(r.to).join("、")}` + (r.cc && r.cc.length ? `，抄送 ${r.cc.join("、")}` : "") +
                        (r.bcc && r.bcc.length ? `，密送 ${r.bcc.join("、")}` : "") +
-                       (atts.length ? `，带 ${atts.length} 个附件` : "") +
+                       (atts.length ? `，带 ${atts.length} 个附件` : "") + (pics.length ? `，正文里 ${pics.length} 张图片` : "") +
                        (r.warning ? `。${r.warning}。` : "，副本在“已发送”里。");
     if (r.warning) note.className = "note err";
     discardDraft(ctx);  // the server dropped it already; this catches a save that was still on its way
     ctx.outAtts.forEach(a => a.url && URL.revokeObjectURL(a.url));
     ctx.outAtts = [];
+    field(v, "pvbox").hidden = true;
   } catch (e) {
     note.className = "note err";
     // Possibly delivered: the server said so, or its answer never came back (a lost connection, a restart: no
@@ -2327,7 +2545,8 @@ function composeFields(ctx) {
 function openCompose() {
   const c = st.current;
   // the one being written, or the one being sent right now (a new view would bring its saved draft back)
-  if (c && c.compose && (!c.sent || c.sendingNow) && $("#reader").contains(c.view)) { field(c.view, "cto").focus(); return; }
+  if (c && c.compose && (!c.sent || c.sendingNow) && $("#reader").contains(c.view)) { showReader(); field(c.view, "cto").focus(); return; }
+  showReader();
   document.querySelectorAll(".row.on").forEach(r => r.classList.remove("on"));
   if (c) { clearInterval(c.poll); (c.urls || []).forEach(u => URL.revokeObjectURL(u)); (c.outAtts || []).forEach(a => a.url && URL.revokeObjectURL(a.url)); }
   const view = document.createElement("div");
@@ -2344,6 +2563,7 @@ function openCompose() {
   field(view, "zhApplyBtn").onclick = () => applyZhEdits(ctx);
   field(view, "rbody").oninput = () => markStale(ctx);
   field(view, "sendBtn").onclick = () => send(ctx);
+  field(view, "backBtn").onclick = showList;
   for (const f of ["notes", "rsubject", "rbody", "feedback", "cto", "ccc"]) field(view, f).addEventListener("input", () => saveSoon(ctx));
   lang.onchange = () => saveSoon(ctx);
   field(view, "cto").addEventListener("change", () => { ctx.token = null; });  // another person: their history is read again
@@ -2453,7 +2673,7 @@ window.addEventListener("hashchange", safe(openFromHash));
 
 // ---------------------------------------------------------------- the login screen (first use, or every mailbox logged out)
 // The mailbox added here becomes the primary one; KOL Mail restarts once to set everything up for it.
-function guessName(email) {  // eclair -> Eclair, john.doe -> John Doe, as the installer used to suggest
+function guessName(email) {  // jordan -> Jordan, john.doe -> John Doe, as the installer used to suggest
   return email.split("@")[0].split(/[._-]+/).filter(Boolean).map(w => w[0].toUpperCase() + w.slice(1)).join(" ");
 }
 function showLogin(info) {
@@ -2461,8 +2681,6 @@ function showLogin(info) {
   st.loginShown = true; st.loginInfo = info;
   document.body.classList.add("login");
   $("#loginView").hidden = false;
-  const domain = info.domain || "";
-  $("#loginEmail").placeholder = domain ? `你的工作邮箱，比如 name@${domain}（只填 @ 前面的部分也行）` : "你的邮箱地址";
   if (info.full_name) { $("#loginName").value = info.full_name; $("#loginName").dataset.typed = "1"; }  // the last one's
   if (info.frozen) { $("#loginNote").className = "note err"; $("#loginNote").textContent = info.frozen; $("#loginBtn").disabled = true; }
   $("#loginEmail").focus();
@@ -2474,52 +2692,149 @@ function showLogin(info) {
 }
 $("#loginEmail").addEventListener("input", () => {
   const name = $("#loginName");
-  if (!name.dataset.typed) name.value = guessName(fullAddress($("#loginEmail").value.trim()));
+  if (!name.dataset.typed) name.value = guessName($("#loginEmail").value.trim());
 });
 $("#loginName").addEventListener("input", () => { $("#loginName").dataset.typed = "1"; });
-function fullAddress(v) { const d = st.loginInfo && st.loginInfo.domain; return v && d && !v.includes("@") ? `${v}@${d}` : v; }
+const FULL_ADDRESS = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;  // the whole address: its domain is how the servers are found
+const SERVERS_BY_HAND = /手动填写服务器|服务器地址不对|连不上收信服务器/;  // errors that the manual server fields may solve
+// Servers found outside the address's own domain are shown first; the same request sent again, with what was shown,
+// is the user's go-ahead (st.serversOk: { email, token }).
+function confirmText(c, button) {
+  return `按这个邮箱的公开配置，收信服务器是 ${c.imap_host}，发信服务器是 ${c.smtp_host}。确认这是你的邮箱服务商，再点一次“${button}”，密码才会发过去。`;
+}
+function withServersOk(body) {
+  if (st.serversOk && st.serversOk.email === body.email) body.servers_ok = st.serversOk.token;
+  return body;
+}
 $("#loginForm").onsubmit = safe(async e => {
   e.preventDefault();
   const note = $("#loginNote"), btn = $("#loginBtn");
-  const body = { email: fullAddress($("#loginEmail").value.trim()), password: $("#loginPw").value,
+  const body = { email: $("#loginEmail").value.trim(), password: $("#loginPw").value,
     full_name: $("#loginName").value.trim() };
   if ($("#loginImap").value.trim()) Object.assign(body, {
     imap_host: $("#loginImap").value.trim(), imap_port: Number($("#loginImapPort").value) || undefined, imap_security: $("#loginImapSec").value,
     smtp_host: $("#loginSmtp").value.trim(), smtp_port: Number($("#loginSmtpPort").value) || undefined, smtp_security: $("#loginSmtpSec").value });
   if (!body.email || !body.password) { note.className = "note err"; note.textContent = "邮箱地址和密码（授权码）都要填"; return; }
+  if (!FULL_ADDRESS.test(body.email)) {
+    note.className = "note err"; note.textContent = "请填写完整的邮箱地址，比如 name@example.com"; $("#loginEmail").focus(); return;
+  }
   if (!body.full_name) { note.className = "note err"; note.textContent = "请填写对外署名（英文名）"; $("#loginName").focus(); return; }
-  btn.disabled = true; st.signingIn = true; note.className = "note"; note.textContent = "正在连接邮箱服务器，测试收信和发信，可能要一两分钟…";
+  btn.disabled = true; st.signingIn = true; note.className = "note"; note.textContent = "正在查找并连接邮箱服务器，测试收信和发信，可能要一两分钟…";
   let d;
-  try { d = await post("/api/accounts/add", body); }
+  try { d = await post("/api/accounts/add", withServersOk(body)); }
   catch (err) {
     note.className = "note err"; note.textContent = err.message; btn.disabled = false; st.signingIn = false;
-    if (/不认识这个邮箱的服务器|服务器地址不对|连不上收信服务器/.test(err.message)) $("#loginServers").open = true;
+    if (SERVERS_BY_HAND.test(err.message)) $("#loginServers").open = true;
+    return;
+  }
+  if (d.confirm) {  // nothing was sent yet: the password stays in its box for the second click
+    st.serversOk = { email: body.email, token: d.confirm.token };
+    note.className = "note"; note.textContent = confirmText(d.confirm, "登录"); btn.disabled = false; st.signingIn = false;
     return;
   }
   $("#loginPw").value = "";
   note.className = d.warning ? "note err" : "note";
-  note.textContent = (d.warning ? d.warning + "。" : "") + "登录成功！KOL Mail 正在为这个邮箱启动，大约半分钟，好了会自动进去…";
+  note.textContent = (d.warning ? d.warning + "。" : "") + (d.found ? `自动找到了服务器 ${d.found.imap_host}。` : "")
+    + "登录成功！KOL Mail 正在为这个邮箱启动，大约半分钟，好了会自动进去…";
   await waitForRestart(note);
 });
 
 // ---------------------------------------------------------------- reply attachments
 const ATT_MAX = 15 * 1024 * 1024, ATT_COUNT = 10;
 
+// ---------------------------------------------------------------- pictures inside the text
+// The text stays plain text (the AI rewrites it, it is back-translated and checked as text). A picture put into it
+// is a line "[image: N]" at that place; the mail that goes out shows picture N there. The page keeps each picture
+// next to its number (ctx.outAtts, inline: "N"), and sending is refused unless every line has its picture and every
+// picture its one line (the server checks the same).
+const PICTURE_LINE = /^[ \t]*\[image: ?([0-9]{1,2})\][ \t]*$/;  // signature.PICTURE_LINE
+const PICTURE_FILE = /\.(png|jpe?g|gif)$/i;
+const PICTURES_MAX = 10;
+const pictureLines = text => (text || "").replace(/\r\n/g, "\n").split("\n").map(l => PICTURE_LINE.exec(l)).filter(Boolean).map(m => m[1]);
+
+function nextPictureLabel(ctx) {
+  const used = new Set([...ctx.outAtts.filter(a => a.inline).map(a => a.inline), ...pictureLines(field(ctx.view, "rbody").value)]);
+  for (let n = 1; n < 100; n++) if (!used.has(String(n))) return String(n);
+  return null;
+}
+
+// "[image: N]" on a line of its own where the caret was, never below the signature; the caret ends up behind it.
+function insertPictureLine(ctx, label) {
+  const ta = field(ctx.view, "rbody"), v = ta.value, sig = (st.signature || "").replace(/\r\n/g, "\n").trim();
+  let at = Math.min(typeof ctx.caret === "number" ? ctx.caret : v.length, v.length);
+  // Never inside a line: behind the line the caret was in (the text may have been edited while the picture was
+  // uploading, and a remembered position could by now sit in the middle of a word). A caret at a line's start stays.
+  if (at > 0 && v[at - 1] !== "\n") { const end = v.indexOf("\n", at); at = end < 0 ? v.length : end; }
+  const s = sig ? v.lastIndexOf(sig) : -1;
+  if (s >= 0 && at > s && v.slice(s).trim() === sig) at = s;
+  const before = v.slice(0, at).replace(/\s+$/, ""), after = v.slice(at).replace(/^\s+/, "");
+  const head = (before ? before + "\n\n" : "") + `[image: ${label}]`;
+  ta.value = head + (after ? "\n\n" + after : "");
+  ctx.caret = head.length;
+  try { ta.setSelectionRange(ctx.caret, ctx.caret); } catch { /* not shown yet */ }
+  markStale(ctx); saveSoon(ctx);
+}
+
+function removePictureLine(ctx, label) {
+  const ta = field(ctx.view, "rbody"), lines = ta.value.split("\n");
+  const i = lines.findIndex(l => { const m = PICTURE_LINE.exec(l); return m && m[1] === label; });
+  if (i < 0) return;
+  lines.splice(i, 1);
+  // the blank lines that stood around it become one; nothing else of the text is touched
+  while (i > 0 && i < lines.length && !lines[i - 1].trim() && !lines[i].trim()) lines.splice(i, 1);
+  ta.value = lines.join("\n"); markStale(ctx); saveSoon(ctx);
+}
+
+// Why this text cannot go out with these pictures, or "" when they agree.
+function pictureProblem(ctx) {
+  const lines = pictureLines(field(ctx.view, "rbody").value), pics = (ctx.outAtts || []).filter(a => a.inline);
+  const have = new Set(pics.map(a => a.inline));
+  const twice = lines.find((n, i) => lines.indexOf(n) !== i);
+  if (twice) return `正文里 [image: ${twice}] 出现了不止一次，一张图片只能放在一处，删掉多余的那一行`;
+  const missing = lines.find(n => !have.has(n));
+  if (missing) return `正文里有一行 [image: ${missing}]，但对应的图片不在了（图片去掉了，或者这是重新打开的草稿）。删掉这一行，或者重新“插入图片”`;
+  const unused = pics.find(a => !lines.includes(a.inline));
+  if (unused) return `图片“${unused.name}”没有放进正文：正文里要有单独一行 [image: ${unused.inline}]。把它补上，或者在下面把这张图去掉`;
+  return "";
+}
+
+async function previewReply(ctx) {
+  const v = ctx.view, box = field(v, "pvbox"), note = field(v, "previewNote");
+  const pics = ctx.outAtts.filter(a => a.inline);
+  const r = await post("/api/reply/preview", { body: field(v, "rbody").value, names: Object.fromEntries(pics.map(a => [a.inline, a.name])) });
+  if (st.current !== ctx) return;
+  let html = r.html;
+  for (const a of pics) if (a.url) html = html.split(`src="kolmail-body:${a.inline}"`).join(`src="${a.url}"`);  // blob: URLs hold no quote
+  field(v, "previewFrame").srcdoc = `<!doctype html><meta charset="utf-8"><body style="margin:12px;background:#fff">${html}</body>`;
+  note.className = r.html_ok ? "" : "stale";
+  note.textContent = r.html_ok ? "对方收到的样子（正文改了以后再点一次“预览”）"
+    : "这台电脑的邮件组件不是配套版本：邮件会按纯文字发出，图片变成附件。重新运行安装命令后才是下面这样";
+  box.hidden = false;
+}
+
 function setupAttachments(ctx) {
-  const v = ctx.view, box = field(v, "replybox"), input = field(v, "attachInput");
+  const v = ctx.view, box = field(v, "replybox"), input = field(v, "attachInput"), imgInput = field(v, "imgInput");
   ctx.outAtts = [];
   field(v, "attachBtn").onclick = () => input.click();
   input.onchange = () => { addFiles(ctx, [...input.files]); input.value = ""; };
-  const pasteTarget = e => {
+  field(v, "imgBtn").onclick = () => { ctx.caret = field(v, "rbody").selectionStart; imgInput.click(); };
+  imgInput.onchange = () => { addFiles(ctx, [...imgInput.files], true); imgInput.value = ""; };
+  field(v, "previewBtn").onclick = safe(() => previewReply(ctx));
+  field(v, "previewClose").onclick = () => { field(v, "pvbox").hidden = true; };
+  const pasted = (e, intoText) => {
     const files = [...(e.clipboardData && e.clipboardData.files || [])];
     // Ordinary text paste. Excel and Word also put a picture of the copied cells next to the text: keep the text.
     if (!files.length || e.clipboardData.getData("text/plain")) return;
     e.preventDefault();
-    addFiles(ctx, files.map((f, i) => f.name && f.name !== "image.png" ? f
-      : new File([f], `截图-${localStamp()}${i ? "-" + i : ""}.png`, { type: f.type })));
+    const named = files.map((f, i) => f.name && f.name !== "image.png" ? f
+      : new File([f], `截图-${localStamp()}${i ? "-" + i : ""}.png`, { type: f.type }));
+    // A screenshot pasted into the text goes where the caret is; anything that is not a picture is an attachment.
+    const inText = intoText && named.every(f => PICTURE_FILE.test(f.name));
+    if (inText) ctx.caret = e.target.selectionStart;
+    addFiles(ctx, named, inText);
   };
-  field(v, "rbody").addEventListener("paste", pasteTarget);
-  field(v, "feedback").addEventListener("paste", pasteTarget);
+  field(v, "rbody").addEventListener("paste", e => pasted(e, true));
+  field(v, "feedback").addEventListener("paste", e => pasted(e, false));
   box.addEventListener("dragover", e => { if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) { e.preventDefault(); box.classList.add("dragging"); } });
   box.addEventListener("dragleave", e => { if (!box.contains(e.relatedTarget)) box.classList.remove("dragging"); });
   box.addEventListener("drop", e => {
@@ -2541,8 +2856,9 @@ function uniqueName(ctx, name) {
   for (let n = 2; ; n++) if (!taken.has(`${stem} (${n})${ext}`)) return `${stem} (${n})${ext}`;
 }
 
-async function addFiles(ctx, files) {
-  const note = field(ctx.view, "attachNote");
+// inText: pictures for the text of the mail ("[image: N]" lines) instead of attachments.
+async function addFiles(ctx, files, inText = false) {
+  const note = field(ctx.view, inText ? "imgNote" : "attachNote");
   note.className = "note";
   if (ctx.sendingNow) { note.className = "note err"; note.textContent = "正在发送，附件不能再改"; return; }
   if (field(ctx.view, "draft").style.display !== "block") {
@@ -2552,19 +2868,28 @@ async function addFiles(ctx, files) {
     if (st.current !== ctx) return;
     const f = new File([original], uniqueName(ctx, original.name || "attachment"), { type: original.type });
     const total = ctx.outAtts.reduce((n, a) => n + a.size, 0);
-    if (ctx.outAtts.length >= ATT_COUNT) { note.className = "note err"; note.textContent = `最多 ${ATT_COUNT} 个附件`; break; }
-    if (f.size > ATT_MAX || total + f.size > ATT_MAX) { note.className = "note err"; note.textContent = `${f.name} 太大了：附件加起来最多 15 MB`; continue; }
-    const item = { name: f.name, size: f.size, image: /^image\//.test(f.type), url: /^image\//.test(f.type) ? URL.createObjectURL(f) : null };
+    if (ctx.outAtts.length >= ATT_COUNT) { note.className = "note err"; note.textContent = `附件和正文图片加起来最多 ${ATT_COUNT} 个`; break; }
+    if (f.size > ATT_MAX || total + f.size > ATT_MAX) { note.className = "note err"; note.textContent = `${f.name} 太大了：附件和正文图片加起来最多 15 MB`; continue; }
+    const label = inText ? nextPictureLabel(ctx) : null;
+    if (inText && !PICTURE_FILE.test(f.name)) { note.className = "note err"; note.textContent = `${f.name} 不能放进正文：正文里只能插入 PNG、JPG 或 GIF 图片，别的请用“添加附件”`; continue; }
+    if (inText && (!label || ctx.outAtts.filter(a => a.inline).length >= PICTURES_MAX)) { note.className = "note err"; note.textContent = `正文里最多放 ${PICTURES_MAX} 张图片`; break; }
+    const item = { name: f.name, size: f.size, image: /^image\//.test(f.type), url: /^image\//.test(f.type) || inText ? URL.createObjectURL(f) : null,
+                   inline: label };
     ctx.outAtts.push(item); renderOutAtts(ctx);
     try {
       const r = await fetch("/api/reply/upload", { method: "POST", body: f,
-        headers: kolHeaders({ "X-File-Name": encodeURIComponent(f.name), "Content-Type": "application/octet-stream" }) });
+        headers: kolHeaders({ "X-File-Name": encodeURIComponent(f.name), "Content-Type": "application/octet-stream", ...(inText ? { "X-Inline": "1" } : {}) }) });
       const data = await r.json().catch(() => ({ error: "响应无法解析" }));
       if (!r.ok) throw new Error(data.error || r.statusText);
       Object.assign(item, { id: data.id, name: data.name, size: data.size });
       if (!ctx.outAtts.includes(item)) post("/api/reply/unupload", { id: data.id }).catch(() => {});  // removed meanwhile
+      else if (inText && st.current === ctx) {
+        insertPictureLine(ctx, label);
+        note.textContent = `图片已放进正文，显示成一行 [image: ${label}]，这一行可以整行挪到别的段落之间；点“预览”看发出去的样子`;
+      }
     } catch (e) {
       ctx.outAtts = ctx.outAtts.filter(a => a !== item);
+      if (item.url) URL.revokeObjectURL(item.url);
       note.className = "note err"; note.textContent = `${f.name} 没加上：${e.message}`;
     }
     renderOutAtts(ctx);
@@ -2576,15 +2901,20 @@ function renderOutAtts(ctx) {
   for (const a of ctx.outAtts) {
     const el = document.createElement("div"); el.className = "outatt" + (a.id ? "" : " busy");
     if (a.url) { const img = document.createElement("img"); img.src = a.url; img.alt = ""; el.append(img); }
+    if (a.inline) {
+      const tag = document.createElement("span"); tag.className = "tag"; tag.textContent = `正文图 ${a.inline}`;
+      tag.title = `在正文里是 [image: ${a.inline}] 那一行`; el.append(tag);
+    }
     const nm = document.createElement("span"); nm.className = "nm"; nm.title = a.name;
     nm.textContent = `${a.name}（${a.size >= 1048576 ? (a.size / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(a.size / 1024)) + " KB"}）` + (a.id ? "" : " 上传中…");
-    const x = document.createElement("button"); x.textContent = "×"; x.title = "去掉这个附件";
+    const x = document.createElement("button"); x.textContent = "×"; x.title = a.inline ? "去掉这张图片（正文里它那一行也一起去掉）" : "去掉这个附件";
     x.disabled = !!ctx.sendingNow;
     x.onclick = () => {
       if (ctx.sendingNow) return;
       ctx.outAtts = ctx.outAtts.filter(b => b !== a);
       if (a.id) post("/api/reply/unupload", { id: a.id }).catch(() => {});
       if (a.url) URL.revokeObjectURL(a.url);
+      if (a.inline) removePictureLine(ctx, a.inline);
       renderOutAtts(ctx);
     };
     el.append(nm, x); box.append(el);
@@ -2758,7 +3088,7 @@ const BANNER_MAX = [440, 160];  // pixels of an uploaded banner (shown at half)
 const NAME_INK = "#1f2a44";
 
 function fontAvailable(name) {
-  const c = document.createElement("canvas").getContext("2d"), probe = "Eclair mmmwwwlli 0123";
+  const c = document.createElement("canvas").getContext("2d"), probe = "Jordan mmmwwwlli 0123";
   return ["monospace", "serif", "sans-serif"].some(fallback => {
     c.font = `40px ${fallback}`; const plain = c.measureText(probe).width;
     c.font = `40px "${name}", ${fallback}`; return c.measureText(probe).width !== plain;

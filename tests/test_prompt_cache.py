@@ -87,16 +87,40 @@ def test_the_hot_path_makes_the_same_calls_as_before(tmp_path, monkeypatch):
     assert len(calls) == 3
 
 
-def test_owner_check_and_back_translation_prompts_are_unchanged():
-    """They were left alone on purpose (their boundary is in the system prompt, but they are short)."""
-    digest = {name: hashlib.sha256(getattr(replyflow, name).encode("utf-8")).hexdigest()[:16]
-              for name in ("OWNER_CHECK_SYSTEM", "BACKTRANSLATE_SYSTEM", "ZH_EDIT_SYSTEM")}
-    assert digest == EXPECTED
-
-
-# the texts as released in v0.8.7: a change here is a decision, not an accident
-EXPECTED = {"OWNER_CHECK_SYSTEM": "51000d8fac609382", "BACKTRANSLATE_SYSTEM": "0d831ef92ecacf29",
-            "ZH_EDIT_SYSTEM": "075dd54cc9a0e7a5"}
+def test_the_short_prompts_stay_the_same_from_call_to_call_too(tmp_path, monkeypatch):
+    """Back-translation, the owner check, the rewrite from corrected Chinese and the chat translation carried their
+    marker code in the system prompt until 0.10. Four days of data/llm_usage.jsonl (2026-11-06 to 11-10) showed what
+    that cost: every one of their 170 calls wrote its whole prompt to the cache (twice the price of plain input) and
+    not one read it. The code now stands in the first line of the user message, as in the long prompts."""
+    learnkit.setup(tmp_path, monkeypatch)
+    calls = fake_model(monkeypatch, [GOOD])
+    monkeypatch.setattr(app, "CHATS", app.chats.Store(tmp_path / "chats.sqlite3"))
+    app.CHATS.upsert_conv("tg:7", peer_id=7)
+    stamp = "2026-11-10T08:00:00+00:00"
+    for n in range(2):
+        asyncio.run(app.side_by_side(f"Hello there, this is paragraph number {n} of the letter."))
+        asyncio.run(app.owner_check(["价格改成 150"], "We can do $150.", "我们可以给 150 美元。", []))
+        app.CHATS.add_messages("tg:7", [{"id": str(n + 1), "at": stamp, "out": False, "author": "x",
+                                          "text": f"What is your budget for video {n}?", "extra": {}}])
+        asyncio.run(app.chat_translate("tg:7", app.CHATS.messages("tg:7")))
+    by_kind = {}
+    for c in calls:
+        by_kind.setdefault(c["kind"], []).append(c)
+    assert sorted(by_kind) == ["backtranslate", "chat_translate", "owner_check"]  # each counted under its own name
+    for kind, pair in by_kind.items():
+        first, second = pair
+        assert first["system"] == second["system"], kind
+        codes = [re.findall(r"<<([0-9a-f]{16}):", c["user"]) for c in pair]
+        assert codes[0] and codes[1] and set(codes[0]) != set(codes[1]), kind  # a new code for every call
+        for c, code in zip(pair, codes):
+            assert code[0] not in c["system"] and "{boundary}" not in c["system"]
+            assert c["user"].startswith(f"Marker code of this message: {code[0]} ")
+    # a mail's back-translation and a chat message's translation are one prompt: one cache entry serves both
+    assert by_kind["backtranslate"][0]["system"] == by_kind["chat_translate"][0]["system"]
+    for name in ("OWNER_CHECK_SYSTEM", "BACKTRANSLATE_SYSTEM", "ZH_EDIT_SYSTEM"):
+        text = getattr(replyflow, name)
+        assert "{boundary}" not in text and "the first line of the user message" in text
+        assert "ignore" in text or "never translate or output it" in text  # injected reminders still named
 
 
 def test_usage_is_logged_by_kind(tmp_path, monkeypatch):

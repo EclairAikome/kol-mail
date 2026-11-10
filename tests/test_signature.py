@@ -18,7 +18,7 @@ import mailserver  # noqa: E402
 import signature  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
-SIG = "Eclair\nMarketing Manager | LootBar\nhttps://lootbar.com/"
+SIG = "Jordan\nMarketing Manager | LootBar\nhttps://lootbar.com/"
 TEXT = "Hi Ana,\n\nThanks! Our guide: https://lootbar.com/affiliate?a=1&b=2\n<b>not bold</b>\n\nBest,\n" + SIG
 
 
@@ -47,13 +47,13 @@ def test_the_html_keeps_the_text_escaped_with_links_in_the_chosen_font():
 
 
 def test_the_handwritten_name_stands_for_the_typed_one_and_the_banner_closes_the_signature():
-    s = signature.clean({"name_on": True, "name_text": "eclair"})
+    s = signature.clean({"name_on": True, "name_text": "jordan"})
     out = signature.render(TEXT, SIG, s, {"name": "cid:name@kolmail", "banner": "cid:banner@kolmail"},
                            {"name": {"width": 90, "height": 40}, "banner": {"width": 200, "height": 43}})
     sig = out[out.index('src="cid:name@kolmail"'):]
-    assert ">Eclair<" not in sig and "Marketing Manager" in sig
+    assert ">Jordan<" not in sig and "Marketing Manager" in sig
     assert sig.index("Marketing Manager") < sig.index('src="cid:banner@kolmail"')
-    assert 'width="90" height="40" alt="eclair"' in out
+    assert 'width="90" height="40" alt="jordan"' in out
 
 
 def test_without_the_signature_at_the_end_the_pictures_still_come_last():
@@ -70,7 +70,7 @@ def test_pictures_settings_and_the_team_banner(signing):
         signing.set_picture("logo", png(2, 2))
     signing.set_picture("name", png(180, 80))
     assert signing.pictures() == {"banner": signature.DEFAULT_BANNER}  # not switched on yet
-    signing.save({"name_on": True, "name_text": "Eclair", "banner_on": False, "versions": {"name": "forged"}})
+    signing.save({"name_on": True, "name_text": "Jordan", "banner_on": False, "versions": {"name": "forged"}})
     assert list(signing.pictures()) == ["name"] and signing.load()["versions"]["name"] != "forged"
     assert signing.shown("name") == {"width": 90, "height": 40, "version": signing.load()["versions"]["name"],
                                      "own": True}
@@ -82,7 +82,7 @@ def test_pictures_settings_and_the_team_banner(signing):
 
 def test_outgoing_carries_the_text_the_html_and_the_inline_files(signing):
     signing.set_picture("name", png(180, 80))
-    signing.save({"name_on": True, "name_text": "Eclair"})
+    signing.save({"name_on": True, "name_text": "Jordan"})
     out = signing.outgoing(TEXT, SIG)
     markup, text = mailserver.split_body(out["body"])
     assert text == TEXT and out["html"] is True and 'src="cid:name@kolmail"' in markup
@@ -105,7 +105,7 @@ def client():
     from mcp_email_server.emails import classic
     assert mailserver.patch(), "mcp-email-server is not the version mailserver.py was made for"
     server = EmailServer(user_name="me@example.org", password="x", host="smtp.example.org", port=465)
-    return classic.EmailClient(server, sender="Eclair <me@example.org>")
+    return classic.EmailClient(server, sender="Jordan <me@example.org>")
 
 
 def parts(msg) -> list[tuple[str, str | None]]:
@@ -114,7 +114,7 @@ def parts(msg) -> list[tuple[str, str | None]]:
 
 def test_a_reply_with_pictures_is_related_with_its_text_alternative(client, signing, tmp_path):
     signing.set_picture("name", png(180, 80))
-    signing.save({"name_on": True, "name_text": "Eclair"})
+    signing.save({"name_on": True, "name_text": "Jordan"})
     out = signing.outgoing(TEXT, SIG)
     doc = tmp_path / "brief.pdf"
     doc.write_bytes(b"%PDF-1.4")
@@ -172,7 +172,7 @@ def local(**extra):
 def test_the_settings_tab_saves_uploads_and_previews(signing, monkeypatch):
     monkeypatch.setattr(app, "LOGGED_OUT", False)
     c = TestClient(app.app, base_url=f"http://127.0.0.1:{app.PORT}")
-    d = c.post("/api/signature", headers=local(), json={"font": "Verdana", "name_text": "Eclair"}).json()
+    d = c.post("/api/signature", headers=local(), json={"font": "Verdana", "name_text": "Jordan"}).json()
     assert d["font"] == "Verdana" and "Arial" in d["fonts"] and d["pictures"]["banner"]["own"] is False
     r = c.post("/api/signature/picture?kind=name", headers=local(**{"Content-Type": "image/png"}), content=png(180, 80))
     assert r.json()["pictures"]["name"]["width"] == 90

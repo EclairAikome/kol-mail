@@ -45,32 +45,32 @@ def test_only_clearly_older_mail_stays_quiet_and_only_for_a_while():
     assert mailmove.is_old_host("imap.mail.eu-west-1.awsapps.com") and not mailmove.is_old_host("awsapps.com.evil.net")
 
 
-TREE = ["Trash", "Draft", "eclair@example.com", "eclair@example.com/CPS+固薪", "eclair@example.com/Deleted Items",
-        "eclair@example.com/Drafts", "eclair@example.com/INBOX", "eclair@example.com/INBOX/Partners",
-        "eclair@example.com/Junk E-mail", "eclair@example.com/Outbox", "eclair@example.com/Sent Items",
-        "eclair@example.com/Trash", "eclair@example.com/纯CPS", "eclair@example.com/纯固薪", "INBOX", "Sent", "Spam"]
+TREE = ["Trash", "Draft", "jordan@example.com", "jordan@example.com/CPS+固薪", "jordan@example.com/Deleted Items",
+        "jordan@example.com/Drafts", "jordan@example.com/INBOX", "jordan@example.com/INBOX/Partners",
+        "jordan@example.com/Junk E-mail", "jordan@example.com/Outbox", "jordan@example.com/Sent Items",
+        "jordan@example.com/Trash", "jordan@example.com/纯CPS", "jordan@example.com/纯固薪", "INBOX", "Sent", "Spam"]
 ROLES = {"sent": "Sent", "drafts": "Draft", "trash": "Trash", "junk": "Spam"}
 
 
 def test_the_moved_tree_goes_back_where_kol_mail_looks():
-    plan = dict(mailmove.fold_plan(TREE, "Eclair@Example.com", "/", ROLES))
-    assert plan == {"eclair@example.com/INBOX": "INBOX", "eclair@example.com/Sent Items": "Sent",
-                    "eclair@example.com/Deleted Items": "Trash",
-                    "eclair@example.com/Trash": "Trash", "eclair@example.com/Junk E-mail": "Spam",
-                    "eclair@example.com/纯固薪": "纯固薪", "eclair@example.com/CPS+固薪": "CPS+固薪",
-                    "eclair@example.com/纯CPS": "纯CPS", "eclair@example.com/INBOX/Partners": "INBOX/Partners"}
-    order = [old for old, _ in mailmove.fold_plan(TREE, "eclair@example.com", "/", ROLES)]
-    assert order.index("eclair@example.com/INBOX") < order.index("eclair@example.com/INBOX/Partners")
+    plan = dict(mailmove.fold_plan(TREE, "Jordan@Example.com", "/", ROLES))
+    assert plan == {"jordan@example.com/INBOX": "INBOX", "jordan@example.com/Sent Items": "Sent",
+                    "jordan@example.com/Deleted Items": "Trash",
+                    "jordan@example.com/Trash": "Trash", "jordan@example.com/Junk E-mail": "Spam",
+                    "jordan@example.com/纯固薪": "纯固薪", "jordan@example.com/CPS+固薪": "CPS+固薪",
+                    "jordan@example.com/纯CPS": "纯CPS", "jordan@example.com/INBOX/Partners": "INBOX/Partners"}
+    order = [old for old, _ in mailmove.fold_plan(TREE, "jordan@example.com", "/", ROLES)]
+    assert order.index("jordan@example.com/INBOX") < order.index("jordan@example.com/INBOX/Partners")
     # the deal folders, then Sent, then INBOX, junk and trash last: a big INBOX never keeps the rest away
-    first = {"eclair@example.com/纯固薪", "eclair@example.com/CPS+固薪", "eclair@example.com/纯CPS"}
-    assert set(order[:3]) == first and order[3] == "eclair@example.com/Sent Items"
-    assert order[4] == "eclair@example.com/INBOX"
-    assert set(order[-3:]) == {"eclair@example.com/Junk E-mail", "eclair@example.com/Deleted Items",
-                               "eclair@example.com/Trash"}
-    assert mailmove.fold_plan(["INBOX", "Sent"], "eclair@example.com", "/", ROLES) == []  # nothing moved over
-    assert mailmove.fold_plan(TREE, "eclair@example.com", "", ROLES) == []  # a flat mailbox has no such tree
-    no_junk = dict(mailmove.fold_plan(TREE, "eclair@example.com", "/", {"sent": "Sent"}))
-    assert "eclair@example.com/Junk E-mail" not in no_junk  # nowhere to put it: left where it is
+    first = {"jordan@example.com/纯固薪", "jordan@example.com/CPS+固薪", "jordan@example.com/纯CPS"}
+    assert set(order[:3]) == first and order[3] == "jordan@example.com/Sent Items"
+    assert order[4] == "jordan@example.com/INBOX"
+    assert set(order[-3:]) == {"jordan@example.com/Junk E-mail", "jordan@example.com/Deleted Items",
+                               "jordan@example.com/Trash"}
+    assert mailmove.fold_plan(["INBOX", "Sent"], "jordan@example.com", "/", ROLES) == []  # nothing moved over
+    assert mailmove.fold_plan(TREE, "jordan@example.com", "", ROLES) == []  # a flat mailbox has no such tree
+    no_junk = dict(mailmove.fold_plan(TREE, "jordan@example.com", "/", {"sent": "Sent"}))
+    assert "jordan@example.com/Junk E-mail" not in no_junk  # nowhere to put it: left where it is
 
 
 # ---------------------------------------------------------------- the mail component's command line
@@ -337,34 +337,34 @@ class FoldServer:
 
 
 def test_the_moved_mail_is_brought_up_and_the_tree_hidden(moving, monkeypatch):
-    me = accounts.Account("eclair", "eclair@example.com", "", True)
+    me = accounts.Account("jordan", "jordan@example.com", "", True)
     monkeypatch.setattr(app, "ACCOUNTS", [me])
-    monkeypatch.setattr(app, "ACCOUNT", "eclair")
-    monkeypatch.setitem(app.CFG["mail"], "server_move", {"at": "2026-11-02T04:09:14+00:00", "accounts": ["eclair"],
+    monkeypatch.setattr(app, "ACCOUNT", "jordan")
+    monkeypatch.setitem(app.CFG["mail"], "server_move", {"at": "2026-11-02T04:09:14+00:00", "accounts": ["jordan"],
                                                          "pending": []})
-    server = FoldServer({"eclair@example.com/INBOX": range(1, 137), "eclair@example.com/纯固薪": range(200, 211),
-                         "eclair@example.com/Sent Items": range(300, 759)})
+    server = FoldServer({"jordan@example.com/INBOX": range(1, 137), "jordan@example.com/纯固薪": range(200, 211),
+                         "jordan@example.com/Sent Items": range(300, 759)})
     monkeypatch.setattr(app, "bg", server)
     monkeypatch.setattr(app, "folders_changed", lambda new=None, old=None: None)
     monkeypatch.setattr(app, "FOLD_PAUSE", 0)
     monkeypatch.setattr(app, "FOLD_MAX", 10_000)
-    app.folder_info.forget("eclair")
+    app.folder_info.forget("jordan")
     try:
-        with app.on_account("eclair"):
+        with app.on_account("jordan"):
             asyncio.run(app.fold_moved_mail())
             assert len(server.mails["INBOX"]) == 136 and len(server.mails["Sent"]) == 459
             assert len(server.mails["纯固薪"]) == 11 and ("create_mailbox", "纯固薪", None) in server.calls
-            assert not server.mails["eclair@example.com/INBOX"]  # moved, never deleted
+            assert not server.mails["jordan@example.com/INBOX"]  # moved, never deleted
             assert not any(c[0] == "create_mailbox" and c[1] in ("INBOX", "Sent") for c in server.calls)
             names = app.folder_info.get("names")
-            assert "纯固薪" in names and not any(n.startswith("eclair@example.com") for n in names)
+            assert "纯固薪" in names and not any(n.startswith("jordan@example.com") for n in names)
             assert app.deal_boxes() == app.DEAL_BOXES  # all three, the empty ones too: the triage files into them
             server.calls.clear()
             asyncio.run(app.fold_moved_mail())  # the next look: only reads
             assert not any(c[0] in ("move_emails", "create_mailbox") for c in server.calls)
             # a folder the server refuses to take mail into is skipped; the rest still go
-            server.mails["eclair@example.com/Junk E-mail"] = [900]
-            server.mails["eclair@example.com/纯CPS"] = [901]
+            server.mails["jordan@example.com/Junk E-mail"] = [900]
+            server.mails["jordan@example.com/纯CPS"] = [901]
             real = server.call
 
             async def refusing(tool, **args):
@@ -373,36 +373,36 @@ def test_the_moved_mail_is_brought_up_and_the_tree_hidden(moving, monkeypatch):
                 return await real(tool, **args)
             server.call = refusing
             asyncio.run(app.fold_moved_mail())
-            assert server.mails["eclair@example.com/Junk E-mail"] == [900] and 901 in server.mails["纯CPS"]
+            assert server.mails["jordan@example.com/Junk E-mail"] == [900] and 901 in server.mails["纯CPS"]
             # a move cut off after the copy: the original is listed again, its copy is already there
             server.call = real
-            server.mails["eclair@example.com/INBOX"] = [5, 999]
+            server.mails["jordan@example.com/INBOX"] = [5, 999]
             asyncio.run(app.fold_moved_mail())
             assert server.mails["INBOX"].count(5) == 1 and 999 in server.mails["INBOX"]
-            assert server.mails["eclair@example.com/INBOX"] == [5]  # left behind, hidden, never copied twice
+            assert server.mails["jordan@example.com/INBOX"] == [5]  # left behind, hidden, never copied twice
     finally:
-        app.folder_info.forget("eclair")
+        app.folder_info.forget("jordan")
 
 
 def test_a_big_old_mailbox_goes_over_several_looks(moving, monkeypatch):
-    me = accounts.Account("eclair", "eclair@example.com", "", True)
+    me = accounts.Account("jordan", "jordan@example.com", "", True)
     monkeypatch.setattr(app, "ACCOUNTS", [me])
-    monkeypatch.setattr(app, "ACCOUNT", "eclair")
-    monkeypatch.setitem(app.CFG["mail"], "server_move", {"at": "x", "accounts": ["eclair"]})
-    server = FoldServer({"eclair@example.com/Sent Items": range(1, 1201)})
+    monkeypatch.setattr(app, "ACCOUNT", "jordan")
+    monkeypatch.setitem(app.CFG["mail"], "server_move", {"at": "x", "accounts": ["jordan"]})
+    server = FoldServer({"jordan@example.com/Sent Items": range(1, 1201)})
     monkeypatch.setattr(app, "bg", server)
     monkeypatch.setattr(app, "folders_changed", lambda new=None, old=None: None)
     monkeypatch.setattr(app, "FOLD_PAUSE", 0)
-    app.folder_info.forget("eclair")
+    app.folder_info.forget("jordan")
     try:
-        with app.on_account("eclair"):
+        with app.on_account("jordan"):
             asyncio.run(app.fold_moved_mail())
             assert len(server.mails["Sent"]) == app.FOLD_MAX  # the rest at the next looks
             asyncio.run(app.fold_moved_mail())
             asyncio.run(app.fold_moved_mail())
-            assert len(server.mails["Sent"]) == 1200 and not server.mails["eclair@example.com/Sent Items"]
+            assert len(server.mails["Sent"]) == 1200 and not server.mails["jordan@example.com/Sent Items"]
     finally:
-        app.folder_info.forget("eclair")
+        app.folder_info.forget("jordan")
 
 
 def test_old_mail_brought_over_is_neither_announced_nor_logged(moving, monkeypatch):

@@ -5,7 +5,7 @@ KOL Mail sends HTML replies whose signature shows a banner and a handwritten nam
 `python mailserver.py stdio` instead of `mcp-email-server stdio` (app.mail_params), this module patches
 EmailClient._create_message_with_attachments before the server starts:
 - attachments named kolmail-inline-<name>.<ext> become inline parts with Content-ID <name@kolmail>, which the HTML
-  shows as <img src="cid:name@kolmail">;
+  shows as <img src="cid:name@kolmail"> (the signature's name and banner, and body<N>: a picture inside the text);
 - an HTML body that starts with <!--kolmail-text:<base64>--> gets that text as its plain-text alternative.
 The mail is then multipart/mixed( multipart/related( multipart/alternative(text, html), pictures ), attachments ),
 the layout mail programs expect for a signature with pictures. Everything else (plain mails, forwards, the copy in
@@ -37,7 +37,8 @@ from email.mime.text import MIMEText
 from pathlib import Path
 
 INLINE_PREFIX = "kolmail-inline-"
-SHOWN_PREFIX = "signature-"  # the file name an inline picture carries in the mail (KOL Mail hides it in Sent)
+SHOWN_PREFIX = "signature-"  # the file name a signature picture carries in the mail (KOL Mail hides it in Sent)
+BODY_PICTURE = re.compile(r"body([0-9]{1,2})")  # an inline file kolmail-inline-body<N>.<ext>: a picture inside the text
 CID_DOMAIN = "kolmail"
 TEXT_MARK = re.compile(r"\A<!--kolmail-text:([A-Za-z0-9+/=]*)-->")
 PINNED = "1.13.1"
@@ -97,7 +98,8 @@ def build(client, body: str, html: bool, attachments: list[str] | None, extra_pa
         client._validate_total_attachment_bytes(total)
         subtype = path.suffix.lower().lstrip(".").replace("jpg", "jpeg") or "png"
         name = inline_name(path)
-        shown = f"{SHOWN_PREFIX}{name}{path.suffix.lower()}"
+        in_text = BODY_PICTURE.fullmatch(name)  # a picture the owner put into the text: it is shown as image<N>
+        shown = f"image{in_text.group(1)}{path.suffix.lower()}" if in_text else f"{SHOWN_PREFIX}{name}{path.suffix.lower()}"
         # The headers Gmail itself writes for a picture in a mail: Gmail on the web shows a part without a file
         # name as an attachment called inline.txt and leaves the picture blank (seen 2026-10-27).
         part = MIMEImage(data, _subtype=subtype, name=shown)

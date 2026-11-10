@@ -1,4 +1,4 @@
-"""The company mailbox moved from Amazon WorkMail to Alibaba Mail (US site) on 2026-11-04.
+"""A company mailbox that moved from Amazon WorkMail to Alibaba Mail (US site).
 
 Every install had WorkMail's servers: in mcp-email-server for each mailbox on the company domain, and in
 settings.json mail.company_servers for the login screen. At start, app.py points both at Alibaba Mail. The company
@@ -9,10 +9,8 @@ The UIDs of the new server mean other messages than the old ones did: a mailbox 
 Its Message-IDs stay, so what was already announced or logged in KOL总表 is still known. Mails brought over from the
 old mailbox later (Alibaba Mail's 邮箱搬家) may come in as new, and an old mailbox has years of mail no notice ever
 saw: for a while after the cutover, a mail whose Date is clearly before it is remembered quietly instead. The
-cutover is the company's (the MX record went to Alibaba Mail; its first mail came at 14:08 Singapore time, while
-WorkMail still got a few until 18:33), not the day a computer got this version: a colleague who updates a week late
-must still hear about the replies that came in meanwhile. (A first try of this move on 2026-11-02 was taken back:
-then only the passwords had been reset, and the MX record still pointed at WorkMail.)"""
+cutover is the day the MX record went to Alibaba Mail, not the day a computer got this version: a colleague who
+updates a week late must still hear about the replies that came in meanwhile."""
 
 from __future__ import annotations
 

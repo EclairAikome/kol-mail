@@ -38,7 +38,7 @@
   document.head.append(el("style", { text: `
     #chatBtn .n { margin-left: 4px; font-size: 11px; font-weight: 600; color: var(--on-accent); background: var(--accent);
       border-radius: 9px; padding: 0 6px; }
-    #chatView { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; z-index: 5; display: grid;
+    #chatView { position: fixed; top: var(--header-h, 44px); left: 0; right: 0; bottom: 0; z-index: 5; display: grid;
       grid-template-columns: 330px 1fr; background: var(--bg); }
     #chatView[hidden] { display: none; }
     #chatView .side { border-right: 1px solid var(--line); overflow: auto; background: var(--surface); }
@@ -58,6 +58,8 @@
     .chat-hits { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 10px; max-height: 220px; overflow: auto; }
     .chat-hits button { text-align: left; }
     .chat-msgs { display: flex; flex-direction: column; gap: 8px; margin: 10px 0 16px; }
+    .chat-older { align-self: center; font-size: 12px; }
+    div.chat-older { color: var(--muted); }
     .bubble { max-width: 78%; border: 1px solid var(--line); border-radius: 10px; padding: 7px 10px; background: var(--card); }
     .bubble.out { align-self: flex-end; background: var(--accent-soft); }
     .bubble .t { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
@@ -70,12 +72,24 @@
     .chat-queue { border: 1px solid var(--warn); color: var(--warn); border-radius: 8px; padding: 8px 10px; margin: 8px 0; font-size: 13px; }
     .chat-setup section { margin-bottom: 16px; }
     .chat-setup .code { user-select: all; font-family: Consolas, monospace; background: var(--panel); border: 1px solid var(--line);
-      border-radius: 4px; padding: 1px 6px; }
+      border-radius: 4px; padding: 1px 6px; overflow-wrap: anywhere; }
+    .chat-setup label.opt-line { display: flex; gap: 8px; align-items: flex-start; margin: 10px 0 2px; font-weight: 600; }
+    @media (max-width: 900px) {
+      #chatView { grid-template-columns: 240px 1fr; }
+      #chatView .conv { padding: 12px 12px 40px; }
+      .bubble { max-width: 92%; }
+    }
+    @media (max-width: 640px) {
+      #chatView { grid-template-columns: 1fr; grid-template-rows: minmax(120px, 34vh) 1fr; }
+      #chatView .side { border-right: 0; border-bottom: 1px solid var(--line); }
+    }
   ` }));
 
   // ---------------------------------------------------------------- the view
 
-  const st = { convs: [], filter: "all", key: null, conv: null, msgs: [], queue: [], ctx: "", newestIn: "",
+  // msgs: the messages of the open chat loaded so far, oldest first (the newest page, plus the earlier ones asked
+  // for with "显示更早的消息"); total: how many the chat has
+  const st = { convs: [], filter: "all", key: null, conv: null, msgs: [], total: 0, queue: [], ctx: "", newestIn: "",
                draft: null, pairs: null, language: "", timer: null, listTimer: null, busy: false, rowsHit: [] };
   const btn = el("button", { class: "act", id: "chatBtn", type: "button", title: "Telegram 和 Discord 私信：按手册起草，写进 KOL 总表" },
     "私信", el("span", { class: "n", hidden: true }));
@@ -155,9 +169,18 @@
 
   // ---------------------------------------------------------------- one conversation
 
+  // Messages by id, oldest first: a refresh brings the newest page, which joins the ones already on the page.
+  function merged(list, fresh = false) {
+    const byId = new Map((fresh ? [] : st.msgs).map(m => [m.id, m]));
+    for (const m of list || []) byId.set(m.id, m);
+    return [...byId.values()].sort((a, b) => a.at < b.at ? -1 : a.at > b.at ? 1
+      : a.id.length - b.id.length || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  }
+  const shape = list => JSON.stringify(list.map(m => [m.id, m.text, m.zh]));
+
   async function openConv(key) {
     if (st.key !== key) Object.assign(st, { key, ctx: "", draft: null, pairs: null, rowsHit: [], feedbackLog: [],
-                                            sendLocked: false });
+                                            sendLocked: false, msgs: [], total: 0 });
     if (location.hash !== "#chat=" + key) history.replaceState(null, "", "#chat=" + key);
     await refreshConv(true);
     for (const r of side.querySelectorAll(".row")) r.classList.remove("on");
@@ -168,9 +191,9 @@
     const key = st.key;
     const d = await call("/api/chat/conv?key=" + encodeURIComponent(key));
     if (key !== st.key) return;
-    const changed = full || d.messages.length !== st.msgs.length ||
-      (d.messages.at(-1) || {}).id !== (st.msgs.at(-1) || {}).id || d.messages.some((m, i) => (st.msgs[i] || {}).zh !== m.zh);
-    Object.assign(st, { conv: d.conv, msgs: d.messages, queue: d.queue });
+    const next = merged(d.messages);
+    const changed = full || shape(next) !== shape(st.msgs) || d.total !== st.total;
+    Object.assign(st, { conv: d.conv, msgs: next, total: d.total || next.length, queue: d.queue });
     if (full || !$c(".chat-msgs", pane)) render();
     else if (changed) { renderMsgs(); renderQueue(); }
     else renderQueue();
@@ -181,8 +204,27 @@
     const key = st.key;
     try {
       const d = await call("/api/chat/translate", { key });
-      if (key === st.key) { st.msgs = d.messages; renderMsgs(); }
+      if (key === st.key) { st.msgs = merged(d.messages); renderMsgs(); }
     } catch (e) { note("翻译失败：" + e.message, true); }
+  }
+
+  // The chat opens on its newest messages; the earlier ones are folded behind one line that says how many there
+  // are and brings them in a stretch at a time, so a long chat is neither cut off nor a wall to scroll through.
+  async function loadOlder() {
+    const key = st.key, first = st.msgs[0];
+    if (!first || st.loadingOlder) return;
+    st.loadingOlder = true;
+    try {
+      const d = await call(`/api/chat/conv?key=${encodeURIComponent(key)}&before=${encodeURIComponent(first.id)}&limit=150`);
+      if (key !== st.key) return;
+      const fromBottom = pane.scrollHeight - pane.scrollTop;
+      st.msgs = merged(d.messages);
+      // nothing older came although the count says there is more: the count was wrong, never an endless button
+      st.total = d.messages.length ? Math.max(d.total || 0, st.msgs.length) : st.msgs.length;
+      renderMsgs(true);
+      pane.scrollTop = pane.scrollHeight - fromBottom;  // what was being read stays where it was
+    } catch (e) { note("更早的消息没读到：" + e.message, true); }
+    finally { st.loadingOlder = false; }
   }
 
   function render() {
@@ -283,11 +325,16 @@
     } catch (e) { if (key === st.key) note(e.message, true); }
   }
 
-  function renderMsgs() {
+  function renderMsgs(keepPlace = false) {
     const box = $c("#chatMsgs", pane);
     if (!box) return;
     const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 80;
-    box.replaceChildren(...kids(...st.msgs.map(m => el("div", { class: "bubble" + (m.out ? " out" : "") },
+    const earlier = Math.max(0, (st.total || 0) - st.msgs.length);
+    box.replaceChildren(...kids(
+      earlier ? el("button", { class: "act chat-older", type: "button", onclick: () => loadOlder() },
+                   `显示更早的消息（还有 ${earlier} 条，共 ${st.total} 条）`)
+        : st.msgs.length > 40 ? el("div", { class: "chat-older", text: `这个会话的 ${st.msgs.length} 条消息都在这里了` }) : null,
+      ...st.msgs.map(m => el("div", { class: "bubble" + (m.out ? " out" : "") },
       el("div", { class: "t", text: `${m.out ? "我" : (m.author || st.conv.name)} · ${when(m.at)}` }),
       m.reply_to ? el("div", { class: "x", text: "回复：" + m.reply_to }) : null,
       el("div", { class: "o", text: m.text || "" }),
@@ -296,7 +343,7 @@
       m.link ? el("div", { class: "x", text: "链接：" + m.link }) : null,
       m.zh && m.zh !== m.text ? el("div", { class: "z", text: m.zh }) : null)),
       st.msgs.length ? null : el("div", { class: "empty", text: "还没有消息" })));
-    if (atBottom || !box.dataset.seen) { pane.scrollTop = pane.scrollHeight; box.dataset.seen = "1"; }
+    if (!keepPlace && (atBottom || !box.dataset.seen)) { pane.scrollTop = pane.scrollHeight; box.dataset.seen = "1"; }
   }
 
   function renderQueue() {
@@ -488,7 +535,7 @@
     const token = el("span", { class: "code", text: d.token });
     box.replaceChildren(...kids(
       el("h4", { text: "Discord 浏览器扩展" }),
-      el("p", { class: "note", text: "Discord 不让程序替你收发私信，所以用一个只在 Discord 网页版里工作的小扩展：它把你打开的私信交给 KOL Mail 记录和起草，你确认的回复由它填进输入框，回车还是你自己按。" }),
+      el("p", { class: "note", text: "Discord 不让程序替你收发私信，所以用一个只在 Discord 网页版里工作的小扩展。Discord 页面开着的时候，每个私信的新消息它都交给 KOL Mail 记录和起草，不用一个个点开；你确认的回复由它填进输入框，回车还是你自己按。" }),
       el("ol", { class: "note" },
         el("li", {}, "Chrome 打开 chrome://extensions ，右上角打开“开发者模式”"),
         el("li", {}, "点“加载已解压的扩展程序”，选这个文件夹：", el("span", { class: "code", text: d.folder })),
@@ -497,7 +544,16 @@
       el("div", { class: "row2" }, el("b", { text: "令牌" }), token,
         el("button", { class: "act", type: "button", onclick: () => navigator.clipboard.writeText(d.token).then(() => note2("已复制"), () => note2("复制失败，手动选中复制")) }, "复制"),
         el("button", { class: "act", type: "button", onclick: async () => { await call("/api/chat/ext", {}); renderSetup(); } }, "重新生成")),
-      el("p", { class: "note", id: "dcNote", text: d.seen ? "扩展上次连上：" + when(d.seen) : "扩展还没连上过" })));
+      el("label", { class: "opt-line" },
+        el("input", { type: "checkbox", id: "dcAuto", checked: d.auto, onchange: async ev => {
+          const on = ev.target.checked;
+          try { await call("/api/chat/ext", { auto: on }); note2(on ? "已打开，下次 Discord 页面同步时开始补读" : "已关闭"); }
+          catch (e) { ev.target.checked = !on; note2(e.message); }
+        } }),
+        el("span", { text: "没点开过的私信，也把最近的聊天记录读进来" })),
+      el("p", { class: "note", text: "关着的时候：新消息照样自动进来，但一个私信以前的聊天记录要等你在 Discord 里点开它才有。打开以后：扩展会让 Discord 页面自己去加载那些没点开的私信，每隔几秒一个，和你手动点开发出的请求一样，只读不发。Discord 的条款不允许用工具自动操作账号，这样读取被处理的可能很小但不是零，所以默认关着，由你决定。" }),
+      el("p", { class: "note", id: "dcNote", text: (d.seen ? "扩展上次连上：" + when(d.seen) : "扩展还没连上过")
+        + (d.feed ? "；上次同步全部私信：" + when(d.feed) : d.seen ? "；还没收到过全部私信的同步（扩展要更新到 0.10：到 chrome://extensions 点它的刷新图标，再刷新 Discord 页面）" : "") })));
     function note2(t) { const n = $c("#dcNote"); if (n) n.textContent = t; }
   }
 

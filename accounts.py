@@ -40,6 +40,13 @@ PROVIDERS = {
     "yahoo.com": ("imap.mail.yahoo.com", 993, "ssl", "smtp.mail.yahoo.com", 465, "ssl"),
 }
 OAUTH_ONLY = ("outlook.com", "hotmail.com", "live.com", "msn.com")
+# Mailboxes anyone can open: an address there says nothing about where its owner works, so its domain is never
+# taken for "the company's" (autoreply.own_domain).
+PUBLIC_DOMAINS = frozenset(PROVIDERS) | frozenset(OAUTH_ONLY) | frozenset((
+    "googlemail.com", "139.com", "189.cn", "sina.cn", "sohu.com", "aliyun.com", "vip.163.com", "vip.qq.com",
+    "yahoo.co.jp", "yahoo.co.uk", "ymail.com", "aol.com", "gmx.com", "gmx.de", "gmx.net", "web.de", "mail.com",
+    "mail.ru", "yandex.ru", "yandex.com", "proton.me", "protonmail.com", "pm.me", "zoho.com", "fastmail.com",
+    "naver.com", "hanmail.net", "daum.net"))
 
 
 ERRORS_ZH = {
@@ -105,7 +112,8 @@ def name_for(address: str, taken: set[str]) -> str:
 
 def servers_for(address: str, given: dict, company: dict | None) -> dict:
     """IMAP/SMTP settings: what the user typed, else a known provider's, else those of the company mailbox when the
-    address is on the same domain. Raises AccountError when none of these applies."""
+    address is on the same domain. Raises AccountError, code servers_unknown, when none of these applies: the
+    caller then looks for them (mailfind.discover)."""
     domain = address.rpartition("@")[2].lower()
     if domain in OAUTH_ONLY:
         raise AccountError("Outlook / Hotmail 邮箱现在只能用微软账号网页登录（OAuth），KOL Mail 暂时接不了")
@@ -124,7 +132,7 @@ def servers_for(address: str, given: dict, company: dict | None) -> dict:
         out = {k: company[k] for k in ("imap_host", "imap_port", "imap_security", "smtp_host", "smtp_port",
                                         "smtp_security")}
     else:
-        raise AccountError("不认识这个邮箱的服务器，请在“服务器设置”里填收信（IMAP）和发信（SMTP）服务器")
+        raise AccountError("不认识这个邮箱的服务器", "servers_unknown")
     for key in ("imap_host", "smtp_host"):
         if not re.fullmatch(r"[A-Za-z0-9.-]{3,253}", out[key] or ""):
             raise AccountError("服务器地址不对，应该像 imap.example.com 这样")

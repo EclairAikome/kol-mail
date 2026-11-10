@@ -107,6 +107,21 @@ def norm_words(text) -> str:
     return re.sub(r"\s+", " ", clean_text(text)).strip().casefold()
 
 
+MARKS = re.compile(r"[*_~`#>|\s\u2022]+")  # what Markdown is written with, and what it is drawn as (a bullet)
+
+
+def same_words(a, b) -> bool:
+    """The same message read two ways: Discord's page shows **bold** as bold and a list as bullets, its own data
+    keeps the marks. Only those marks and spacing are set aside, so a translation made for one reading is kept
+    for the other; any other difference is an edit and loses it: a word, a digit, also a comma that became a
+    point inside a number (1,000 and 1.000) or a full stop that became a question mark."""
+    if (a or "") == (b or ""):
+        return True
+    x, y = (MARKS.sub("", re.sub(r"(?m)^\s*-\s+", "", unicodedata.normalize("NFKC", str(t or "")))).casefold()
+            for t in (a, b))
+    return bool(x) and x == y
+
+
 def peer_token(conv: dict) -> str:
     """What the sheet's 聊天账号 column holds for this chat: the peer's id, plus a name a person recognises."""
     prefix = conv["key"].split(":", 1)[0]
@@ -283,14 +298,19 @@ class Store:
         return self.conv(key)
 
     def convs(self, ignored: bool = False) -> list[dict]:
-        rows = self._all("SELECT * FROM conv WHERE ignored=? ORDER BY COALESCE(last_at, created_at) DESC",
-                         (1 if ignored else 0,))
+        """The chats, the latest first, each with a preview of its newest message. One query for the lot: the page
+        asks for this list every ten seconds, and one query per chat held the lock that long with every chat more."""
+        rows = self._all(
+            "SELECT c.*, m.out AS p_out, m.text AS p_text, m.extra AS p_extra, m.zh AS p_zh, m.id AS p_id "
+            "FROM conv c LEFT JOIN msg m ON m.conv = c.key AND m.rowid = "
+            "(SELECT rowid FROM msg WHERE conv = c.key ORDER BY at DESC, id DESC LIMIT 1) "
+            "WHERE c.ignored=? ORDER BY COALESCE(c.last_at, c.created_at) DESC", (1 if ignored else 0,))
         for r in rows:
+            last = {"text": r.pop("p_text"), "extra": r.pop("p_extra"), "zh": r.pop("p_zh")}
+            out, has = r.pop("p_out"), r.pop("p_id") is not None
             r["unread"] = unread(r)
-            last = self._one("SELECT out, text, extra, zh, at FROM msg WHERE conv=? ORDER BY at DESC, id DESC LIMIT 1",
-                             (r["key"],))
-            r["preview"] = plain((last or {}).get("zh") or (last or {}).get("text") or describe_extra(last or {}), 80)
-            r["preview_out"] = bool(last and last["out"])
+            r["preview"] = plain(last["zh"] or last["text"] or describe_extra(last), 80) if has else ""
+            r["preview_out"] = bool(has and out)
         return rows
 
     def link(self, key: str, kol_id: str | None, kol_name: str, kol_email: str | None):
@@ -336,10 +356,12 @@ class Store:
                                       "author": plain(m.get("author"), 80), "text": text, "extra": extra_obj,
                                       "zh": None, "logged": 0})
                     else:  # edited since, or a transcript / link preview came later: keep the newest; a changed
-                        # text loses the translation of the old words
-                        self.db.execute("UPDATE msg SET zh=CASE WHEN text IS ? THEN zh END, text=?, extra=? "
-                                        "WHERE conv=? AND id=? AND (text IS NOT ? OR extra IS NOT ?)",
-                                        (text, text, extra, key, mid, text, extra))
+                        # text loses the translation of the old words (same_words: not for a mark or a space)
+                        old = self.db.execute("SELECT text, extra, zh FROM msg WHERE conv=? AND id=?",
+                                              (key, mid)).fetchone()
+                        if old and (old[0] != text or old[1] != extra):
+                            self.db.execute("UPDATE msg SET zh=?, text=?, extra=? WHERE conv=? AND id=?",
+                                            (old[2] if same_words(old[0], text) else None, text, extra, key, mid))
                 if added:
                     row = self.db.execute("SELECT MAX(at), MAX(CASE WHEN out=0 THEN at END), "
                                           "MAX(CASE WHEN out=1 THEN at END) FROM msg WHERE conv=?", (key,)).fetchone()
@@ -351,8 +373,17 @@ class Store:
                 raise
         return added
 
-    def messages(self, key: str, limit: int = 80) -> list[dict]:
-        rows = self._all("SELECT * FROM msg WHERE conv=? ORDER BY at DESC, id DESC LIMIT ?", (key, limit))
+    def messages(self, key: str, limit: int = 80, before: str | None = None) -> list[dict]:
+        """The newest `limit` messages, oldest first; with before (a message id), the ones older than that message,
+        which is how the page reaches the start of a long chat a screenful at a time."""
+        if before is None:
+            rows = self._all("SELECT * FROM msg WHERE conv=? ORDER BY at DESC, id DESC LIMIT ?", (key, limit))
+        else:
+            edge = self._one("SELECT at, id FROM msg WHERE conv=? AND id=?", (key, before))
+            if not edge:
+                return []
+            rows = self._all("SELECT * FROM msg WHERE conv=? AND (at < ? OR (at = ? AND id < ?)) "
+                             "ORDER BY at DESC, id DESC LIMIT ?", (key, edge["at"], edge["at"], edge["id"], limit))
         for r in rows:
             r["out"] = bool(r["out"])
             try:
@@ -360,6 +391,26 @@ class Store:
             except ValueError:
                 r["extra"] = {}
         return rows[::-1]
+
+    def count(self, key: str) -> int:
+        return (self._one("SELECT COUNT(*) AS n FROM msg WHERE conv=?", (key,)) or {}).get("n", 0)
+
+    def from_page(self, key: str, ids: list[str]) -> set[str]:
+        """Of these message ids, the ones stored from Discord's own data (extra src "page", see app.ext_feed). What
+        the extension reads off the screen for the same message is the same words drawn another way: it never
+        replaces them, or the two readings would overwrite each other, and the translation, on every sync."""
+        found = set()
+        ids = [str(i) for i in ids][:500]
+        if not ids:
+            return found
+        marks = ",".join("?" * len(ids))
+        for r in self._all(f"SELECT id, extra FROM msg WHERE conv=? AND id IN ({marks})", (key, *ids)):
+            try:
+                if (json.loads(r["extra"] or "{}") or {}).get("src") == "page":
+                    found.add(r["id"])
+            except (ValueError, AttributeError):
+                pass
+        return found
 
     def newest_id(self, key: str) -> str | None:
         row = self._one("SELECT id FROM msg WHERE conv=? ORDER BY at DESC, id DESC LIMIT 1", (key,))

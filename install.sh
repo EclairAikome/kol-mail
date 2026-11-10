@@ -3,10 +3,12 @@
 #
 # 用法（维护者会在 POPO 群里发带参数的完整命令，复制到“终端”里回车）：
 #   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/<owner>/kol-mail/main/install.sh)" -- \
-#       --repo <owner>/kol-mail --imap-host <收信服务器> --smtp-host <发信服务器> --feedback <反馈地址> \
+#       --repo <owner>/kol-mail --feedback <反馈地址> \
 #       --google-client-id <OAuth 客户端 ID> --google-client-secret <客户端密钥>
 # 带了 Google 客户端参数，才会问要不要接 KOL 总表（Mac 上总表是一张 Google 表格），同事也才能在页面的
-# 设置 → KOL 总表 里连自己已有的 Google 表格。公司邮箱的域名用 --domain 改（默认 lootbar.com）。
+# 设置 → KOL 总表 里连自己已有的 Google 表格。
+# 邮箱不在这里配：装好后在网页登录页填完整的邮箱地址和密码，收发信服务器由程序按地址自己找（mailfind.py）。
+# 团队想预设公司邮箱时可以带 --domain、--imap-host、--smtp-host、--company，都不带也能用。
 #
 # 做的事：找到或安装 Python，下载最新版 KOL Mail，装依赖，配置 AI（Claude Code 或 CodeMaker），注册开机自动启动的
 # 后台服务（launchd），在“应用程序”里放一个“KOL Mail”。邮箱在装好后打开的网页登录页里登录。重复运行是安全的，
@@ -15,7 +17,7 @@
 set -eo pipefail
 
 REPO=""; FEEDBACK=""; IMAP_HOST=""; SMTP_HOST=""; PIP_INDEX=""; MIRROR=""; SOURCE=""; GCLIENT_ID=""; GCLIENT_SECRET=""
-DOMAIN="lootbar.com"
+DOMAIN=""
 DIR="$HOME/Library/Application Support/kol-mail"
 # 维护者测试用（云主机上无人值守安装）：不提问，用下面的参数和默认值
 YES=0; ASK_EMAIL=""; ASK_NAME=""; ASK_COMPANY=""; ASK_BACKEND=""; PASSWORD_STDIN=0; NO_OPEN=0
@@ -43,9 +45,11 @@ while [ $# -gt 0 ]; do
         *) echo "不认识的参数：$1" >&2; exit 2 ;;
     esac
 done
-# 公司邮箱 2026-11-04 从 Amazon WorkMail 换到了阿里云邮箱美国站：旧安装命令里的 WorkMail 服务器换成阿里云的
+# 旧安装命令里写明的 WorkMail 服务器换成阿里云的（那个公司邮箱后来换了）
 case "$IMAP_HOST" in *.awsapps.com) IMAP_HOST="imap.us.alibabacloud.com" ;; esac
 case "$SMTP_HOST" in *.awsapps.com) SMTP_HOST="smtp.us.alibabacloud.com" ;; esac
+# 只有命令里给的服务器才记成“公司邮箱的服务器”；后面按某个邮箱地址找到的不算
+PRESET_IMAP="$IMAP_HOST"; PRESET_SMTP="$SMTP_HOST"
 
 LABEL="local.kolmail"
 APP="$DIR/app"
@@ -257,10 +261,32 @@ else
     done
     ACCOUNTS="$("$MCP" account list 2>&1 || true)"
     if ! printf '%s\n' "$ACCOUNTS" | grep -Eq "(^|[^A-Za-z0-9_-])$ACCOUNT([^A-Za-z0-9_-]|$)"; then
-        [ -z "$IMAP_HOST" ] && { ask "收信服务器（IMAP）" ""; IMAP_HOST="$REPLY"; }
-        [ -z "$SMTP_HOST" ] && { ask "发信服务器（SMTP）" ""; SMTP_HOST="$REPLY"; }
+        SERVER_ARGS=()
+        if [ -z "$IMAP_HOST" ] && [ -z "$SMTP_HOST" ]; then
+            # 按邮箱地址找收发信服务器（程序自带的 mailfind.py：MX 记录、autoconfig、常见主机名）
+            say "  正在按邮箱地址查找收发信服务器…"
+            if FOUND="$("$PY" "$APP/mailfind.py" "$EMAIL" 2>/dev/null)" && [ -n "$FOUND" ]; then
+                FIELDS="$(printf '%s' "$FOUND" | "$PY" -I -c 'import json, sys
+d = json.loads(sys.stdin.read().strip().splitlines()[-1])
+for k in ("imap_host", "imap_port", "imap_security", "smtp_host", "smtp_port", "smtp_security"):
+    print(d[k])' 2>/dev/null || true)"
+                if [ -n "$FIELDS" ]; then
+                    { IFS= read -r IMAP_HOST; IFS= read -r F_IMAP_PORT; IFS= read -r F_IMAP_SEC
+                      IFS= read -r SMTP_HOST; IFS= read -r F_SMTP_PORT; IFS= read -r F_SMTP_SEC; } <<< "$FIELDS"
+                    SERVER_ARGS=(--imap-port "$F_IMAP_PORT" --smtp-port "$F_SMTP_PORT")
+                    if [ "$F_IMAP_SEC" = starttls ]; then SERVER_ARGS+=(--no-imap-ssl --imap-starttls); else SERVER_ARGS+=(--imap-ssl --no-imap-starttls); fi
+                    if [ "$F_SMTP_SEC" = starttls ]; then SERVER_ARGS+=(--no-smtp-ssl --smtp-starttls); else SERVER_ARGS+=(--smtp-ssl --no-smtp-starttls); fi
+                    say "  找到了：收信 $IMAP_HOST，发信 $SMTP_HOST"
+                fi
+            fi
+        fi
+        if [ -z "$IMAP_HOST" ] || [ -z "$SMTP_HOST" ]; then
+            [ "$YES" = 1 ] && die "没能按邮箱地址找到收发信服务器：无人值守安装请加 --imap-host 和 --smtp-host"
+            [ -z "$IMAP_HOST" ] && { ask "没能自动找到服务器。请填邮箱服务商给的收信服务器（IMAP）" ""; IMAP_HOST="$REPLY"; }
+            [ -z "$SMTP_HOST" ] && { ask "发信服务器（SMTP）" ""; SMTP_HOST="$REPLY"; }
+        fi
         ADD=(account add "$ACCOUNT" --email "$EMAIL" --full-name "$FULLNAME" --imap-host "$IMAP_HOST" --smtp-host "$SMTP_HOST"
-             --imap-user "$EMAIL" --smtp-user "$EMAIL")
+             --imap-user "$EMAIL" --smtp-user "$EMAIL" ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"})
         if [ "$PASSWORD_STDIN" = 1 ]; then
             "$MCP" "${ADD[@]}" --password-stdin || die "添加邮箱失败"
         else
@@ -338,10 +364,10 @@ fi
 say "[6/8] 写设置…"
 export KM_ACCOUNT="$ACCOUNT" KM_EMAIL="$EMAIL" KM_MCP="$MCP" KM_BACKEND="$BACKEND" KM_NAME="$FULLNAME"
 export KM_CLAUDE="$CLAUDE" KM_CM="$CM" KM_REPO="$REPO" KM_MIRROR="$MIRROR" KM_FEEDBACK="$FEEDBACK"
-export KM_DOMAIN="$DOMAIN" KM_IMAP="$IMAP_HOST" KM_SMTP="$SMTP_HOST" KM_GCLIENT_ID="$GCLIENT_ID" KM_GCLIENT_SECRET="$GCLIENT_SECRET"
+export KM_DOMAIN="$DOMAIN" KM_IMAP="$PRESET_IMAP" KM_SMTP="$PRESET_SMTP" KM_GCLIENT_ID="$GCLIENT_ID" KM_GCLIENT_SECRET="$GCLIENT_SECRET"
 export KM_TITLE="" KM_COMPANY="" KM_EXTRA="" KM_SITE="" KM_PLAYBOOK="" KM_KNOWLEDGE="" KM_RECORD="" KM_COMPANY_ONLY=""
 # web login: no signature questions here, but the drafts still need the company's name (as -Company on Windows)
-[ "$WEB_LOGIN" = 1 ] && [ -z "$(old identity.company)" ] && KM_COMPANY_ONLY="${ASK_COMPANY:-LootBar}"
+[ "$WEB_LOGIN" = 1 ] && [ -z "$(old identity.company)" ] && KM_COMPANY_ONLY="$ASK_COMPANY"
 if [ -z "$(old identity.signature)" ] && [ "$WEB_LOGIN" != 1 ]; then  # web login: the page asks for the signature
     ask "职位（英文）" "Marketing Manager"; KM_TITLE="$REPLY"
     KM_COMPANY="$ASK_COMPANY"

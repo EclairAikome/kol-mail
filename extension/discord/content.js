@@ -3,7 +3,9 @@
  *
  * Reads the DM the owner has open, hands it to the background service worker (the only part that
  * talks to KOL Mail), and puts KOL Mail's approved replies into Discord's input box. It never sends
- * anything to Discord: no Enter key, no send button, no API calls, no token. The owner presses Enter.
+ * anything to Discord: no Enter key, no send button, no token. The owner presses Enter.
+ * It also passes on what page.js reads from Discord's own data inside the page: the messages of every DM,
+ * opened or not ("feed" below).
  *
  * Three layers:
  *   Core  pure functions on plain values; tested with node (test/core.test.js)
@@ -750,6 +752,8 @@
     clearInterval(S.timers.tick);
     clearTimeout(S.timers.sync);
     clearTimeout(S.timers.sent);
+    clearTimeout(F.timer);
+    clearTimeout(F.loadTimer);
     if (S.observer) S.observer.disconnect();
     try { render(); } catch (e) { /* page is going away */ }
   }
@@ -813,7 +817,7 @@
       setConn(true);
       if (d.conv && typeof d.conv === "object") S.conv = d.conv;
       if (Array.isArray(d.queue)) { setItems(d.queue); S.lastQueueAt = Date.now(); }
-    } else if (r.code !== "dead") {
+    } else if (r.code !== "dead" && r.code !== "elsewhere") {
       setConn(false, r.error);
     }
     render();
@@ -870,7 +874,7 @@
     if (r.ok) {
       setConn(true);
       setItems(r.data && r.data.items);
-    } else if (r.code !== "dead") {
+    } else if (r.code !== "dead" && r.code !== "elsewhere") {
       setConn(false, r.error);
     }
     render();
@@ -881,7 +885,7 @@
   /** Status change for KOL Mail. The background retries it until KOL Mail has it. */
   async function sendUpdate(ch, itemId, status) {
     const r = await ask({ type: "update", channel_id: ch, item_id: itemId, status });
-    if (S.ch === ch && r.code !== "dead") {
+    if (S.ch === ch && r.code !== "dead" && r.code !== "elsewhere") {
       if (r.ok) setConn(true); else setConn(false, r.error);
       render();
     }
@@ -928,7 +932,7 @@
         const c = await ask({ type: "claim", channel_id: ch, item_id: item.id });
         if (!stillHere(ch)) return;
         if (!c.ok) {
-          if (c.code !== "dead") { setConn(false, c.error); render(); }
+          if (c.code !== "dead" && c.code !== "elsewhere") { setConn(false, c.error); render(); }
           return; // KOL Mail unreachable: try again on the next poll
         }
         setConn(true);
@@ -1022,6 +1026,142 @@
       try { ok = document.execCommand("copy"); } catch (e2) { ok = false; }
       ta.remove();
       return ok;
+    }
+  }
+
+  // ---- feed: what page.js reads from Discord's own data, for every DM, opened or not
+  // page.js runs inside Discord's page and may not talk to the extension; it posts to the window, and this
+  // script passes it on to the background. The page's messages are data like the page itself: checked for shape
+  // here and again by the background and by KOL Mail. KOL Mail answers with the DMs whose newest message it does
+  // not hold; when the owner switched that on there ("auto"), page.js is asked to load them, a few seconds apart.
+
+  const FEED_TAG = "kolmail-dc";
+  const FEED_CONVS = 20;
+  const FEED_MESSAGES = 100;
+  const FEED_CHARS = 300000;         // text of one feed call
+  const FEED_HOLD = 80;              // DMs kept while KOL Mail is not running
+  const FEED_RETRY_MS = 15000;
+  const LOAD_GAP_MS = [5000, 9000];  // between two DMs loaded for KOL Mail, varied
+  const LOAD_MAX = 40;               // DMs loaded per page
+
+  const F = { me: null, convs: new Map(), channels: null, timer: 0, sending: false, ready: false, canLoad: false,
+              want: [], asked: new Set(), loadTimer: 0 };
+
+  const feedNamed = (c) => !!c && typeof c === "object" && /^\d{5,25}$/.test(String(c.channel_id || "")) &&
+    !!c.peer && typeof c.peer === "object";
+
+  const cut = (v, n) => (v == null ? "" : String(v).slice(0, n));
+
+  /** A message as the feed contract has it and no bigger: the page may hand over anything. */
+  function feedMessage(m) {
+    if (!m || typeof m !== "object" || !/^\d{5,25}$/.test(String(m.id || ""))) return null;
+    const attachments = (Array.isArray(m.attachments) ? m.attachments : []).slice(0, 10)
+      .filter((a) => a && typeof a === "object").map((a) => ({ name: cut(a.name, 120), url: cut(a.url, 500) }));
+    return { id: String(m.id), at: cut(m.at, 40), author_id: cut(m.author_id, 25), author: cut(m.author, 80),
+      out: m.out === true, text: cut(m.text, 4000), attachments, reply_to: m.reply_to ? cut(m.reply_to, 300) : null };
+  }
+
+  const feedPeer = (p) => ({ id: cut(p.id, 25), name: cut(p.name, 80), username: cut(p.username, 40) });
+
+  /** Keep a DM's messages until they are sent: one per id (the later one wins), the newest FEED_MESSAGES. */
+  function holdConv(c) {
+    if (!feedNamed(c) || !Array.isArray(c.messages)) return;
+    const id = String(c.channel_id);
+    const old = F.convs.get(id);
+    const byId = new Map(old ? old.messages.map((m) => [m.id, m]) : []);
+    for (const raw of c.messages.slice(-FEED_MESSAGES)) {
+      const m = feedMessage(raw);
+      if (m) byId.set(m.id, m);
+    }
+    const messages = Array.from(byId.values()).sort((x, y) => cmpId(x.id, y.id)).slice(-FEED_MESSAGES);
+    F.convs.delete(id);
+    F.convs.set(id, { channel_id: id, peer: feedPeer(c.peer), last: c.last ? cut(c.last, 25) : null, messages,
+      loaded: c.loaded === true || !!(old && old.loaded) });
+    while (F.convs.size > FEED_HOLD) F.convs.delete(F.convs.keys().next().value);
+  }
+
+  function onPageMessage(e) {
+    if (e.source !== window || e.origin !== location.origin || S.dead) return;
+    const d = e.data;
+    if (!d || typeof d !== "object" || d.source !== FEED_TAG || d.from !== "page") return;
+    const data = d.data && typeof d.data === "object" ? d.data : {};
+    if (d.kind === "ready") {
+      F.ready = data.ok === true;
+      F.canLoad = data.can_load === true;
+      render();
+      return;
+    }
+    if (data.me && typeof data.me === "object") F.me = { id: String(data.me.id || ""), name: String(data.me.name || "") };
+    if (d.kind === "feed" && Array.isArray(data.convs)) {
+      for (const c of data.convs) holdConv(c);
+    } else if (d.kind === "channels" && Array.isArray(data.channels)) {
+      F.channels = data.channels.filter(feedNamed).slice(0, 100)
+        .map((c) => ({ channel_id: String(c.channel_id), peer: feedPeer(c.peer), last: c.last ? cut(c.last, 25) : null }));
+    } else {
+      return;
+    }
+    scheduleFeed(600);
+  }
+
+  function scheduleFeed(ms) {
+    if (F.timer || S.dead) return;
+    F.timer = setTimeout(sendFeed, ms);
+  }
+
+  async function sendFeed() {
+    F.timer = 0;
+    if (F.sending || S.dead || !F.me) return;
+    const batch = [];
+    let chars = 0;
+    for (const c of F.convs.values()) {
+      const size = c.messages.reduce((n, m) => n + String(m.text || "").length + 200, 0);
+      if (batch.length && (batch.length >= FEED_CONVS || chars + size > FEED_CHARS)) break;
+      batch.push(c);
+      chars += size;
+    }
+    const channels = F.channels;
+    if (!batch.length && !channels) return;
+    for (const c of batch) F.convs.delete(c.channel_id);
+    F.channels = null;
+    F.sending = true;
+    const r = await ask({ type: "kol", op: "feed", payload: { me: F.me, convs: batch, channels: channels || [] } });
+    F.sending = false;
+    if (S.dead || r.code === "dead") return;
+    if (!r.ok) {
+      // KOL Mail is not running, or its answer is an outage: what was read is kept and tried again. A refusal
+      // of the content itself (4xx) would be refused again: dropped.
+      if (r.code === "offline" || r.code === "auth" || r.code === "ext" || (r.code === "server" && r.status >= 500)) {
+        const newer = Array.from(F.convs.values());
+        F.convs.clear();
+        for (const c of [...batch, ...newer]) holdConv(c);
+        if (!F.channels) F.channels = channels;
+        scheduleFeed(FEED_RETRY_MS);
+      }
+      return;
+    }
+    const d = r.data || {};
+    if (d.auto === true && Array.isArray(d.want)) wantLoads(d.want);
+    if (F.convs.size || F.channels) scheduleFeed(300);
+  }
+
+  function wantLoads(ids) {
+    if (!F.canLoad) return;
+    for (const raw of ids) {
+      const id = String(raw);
+      if (/^\d{5,25}$/.test(id) && !F.asked.has(id) && !F.want.includes(id)) F.want.push(id);
+    }
+    if (!F.loadTimer && F.want.length) F.loadTimer = setTimeout(loadNext, 2000);
+  }
+
+  function loadNext() {
+    F.loadTimer = 0;
+    if (S.dead || F.asked.size >= LOAD_MAX) { F.want = []; return; }
+    const id = F.want.shift();
+    if (!id) return;
+    F.asked.add(id);
+    window.postMessage({ source: FEED_TAG, from: "ext", kind: "load", channel_id: id }, location.origin);
+    if (F.want.length) {
+      F.loadTimer = setTimeout(loadNext, LOAD_GAP_MS[0] + Math.random() * (LOAD_GAP_MS[1] - LOAD_GAP_MS[0]));
     }
   }
 
@@ -1134,6 +1274,7 @@
       filled: S.filled ? S.filled.itemId : null,
       notice: S.notice,
       group: S.group,
+      feed: F.ready,
     };
     const key = JSON.stringify(view);
     if (key === ui.lastKey) return; // unchanged: keep the DOM (and hover, scroll) as it is
@@ -1162,7 +1303,10 @@
 
     // connection
     if (!S.conn) body.appendChild(h("div", { class: "muted", text: "正在连接 KOL Mail…" }));
-    else if (S.conn.ok) body.appendChild(h("div", { class: "muted", text: "已连接 KOL Mail" }));
+    else if (S.conn.ok) {
+      body.appendChild(h("div", { class: "muted",
+        text: F.ready ? "已连接 KOL Mail，所有私信的新消息都在同步" : "已连接 KOL Mail" }));
+    }
     else body.appendChild(h("div", { class: "err-text", text: S.conn.error }));
 
     if (S.group) {
@@ -1252,6 +1396,9 @@
     render();
   });
   updateTheme();
+  window.addEventListener("message", onPageMessage);
+  // page.js may have found Discord's data before this script listened: ask it to say so again
+  window.postMessage({ source: FEED_TAG, from: "ext", kind: "hello" }, location.origin);
   S.timers.tick = setInterval(tick, TICK_MS);
   tick();
 })();

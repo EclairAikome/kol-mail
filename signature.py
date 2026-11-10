@@ -6,6 +6,9 @@ handwritten name in place of the signature's first line when that line is the na
 signature. The pictures go inline (mailserver.py), so they show without the reader allowing "external images".
 The plain text goes along as the mail's text version.
 
+A reply can also carry pictures inside its text (0.10). The text stays plain: a line that reads "[image: 2]" stands
+for picture 2, and only here does it become an <img> at that place, sent inline like the signature's pictures.
+
 Kept in data/signature.json; the pictures in data/signature/. The handwritten name is drawn by the page (a canvas
 with one of the handwriting fonts the computer has) and uploaded as a PNG at twice its shown size; the banner is the
 team's (templates/kolmail-inline-banner.png) unless the owner uploads another. The page shows the pictures from
@@ -41,6 +44,11 @@ DEFAULT_BANNER = Path(__file__).resolve().parent / "templates" / f"{mailserver.I
 DEFAULTS = {"font": DEFAULT_FONT, "name_on": False, "name_text": "", "name_font": "", "banner_on": True,
             "versions": {}}
 URL = re.compile(r"https?://[^\s<>\"'\u0080-￿]*[^\s<>\"'.,;:!?)\]\u0080-￿]")  # ends at 。 too
+# A line of a reply's text that stands for a picture placed there (static/index.html writes the same form).
+PICTURE_LINE = re.compile(r"[ \t]*\[image: ?([0-9]{1,2})\][ \t]*")  # [0-9]: the page's \d is ASCII only
+PICTURE_TYPES = {".png": b"\x89PNG\r\n\x1a\n", ".jpg": b"\xff\xd8\xff", ".jpeg": b"\xff\xd8\xff", ".gif": b"GIF8"}
+PICTURE_WIDTH = 600          # pixels a picture in the text is shown at most (a mail window is about that wide)
+MAX_BODY_PICTURES = 10
 
 
 class SignatureError(ValueError):
@@ -52,6 +60,47 @@ def png_size(data: bytes) -> tuple[int, int] | None:
     if len(data) < 24 or not data.startswith(b"\x89PNG\r\n\x1a\n") or data[12:16] != b"IHDR":
         return None
     return struct.unpack(">II", data[16:24])
+
+
+def picture_labels(text: str) -> list[str]:
+    """The pictures a text has a line for, in order (a label twice when two lines name it)."""
+    return [m.group(1) for line in (text or "").replace("\r\n", "\n").split("\n")
+            if (m := PICTURE_LINE.fullmatch(line))]
+
+
+def only_pictures(paragraph: str) -> bool:
+    """A paragraph that is nothing but picture lines: nothing to translate, nothing to check."""
+    lines = [line for line in (paragraph or "").split("\n") if line.strip()]
+    return bool(lines) and all(PICTURE_LINE.fullmatch(line) for line in lines)
+
+
+def picture_width(data: bytes) -> int | None:
+    """The width in pixels of a PNG, GIF or JPEG, read from its header; None when it cannot be told."""
+    size = png_size(data)
+    if size:
+        return size[0]
+    if data[:4] == b"GIF8" and len(data) >= 10:
+        return struct.unpack("<H", data[6:8])[0]
+    if data[:3] == b"\xff\xd8\xff":
+        i = 2
+        while i + 9 < len(data) and data[i] == 0xFF:
+            marker, length = data[i + 1], struct.unpack(">H", data[i + 2:i + 4])[0]
+            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):  # a start-of-frame: height, width
+                return struct.unpack(">H", data[i + 7:i + 9])[0]
+            i += 2 + length
+    return None
+
+
+def is_picture(name: str, head: bytes) -> bool:
+    """A file that can stand inside a mail's text: PNG, JPEG or GIF by its name and by its first bytes."""
+    magic = PICTURE_TYPES.get(Path(name).suffix.lower())
+    return bool(magic) and head.startswith(magic)
+
+
+def text_version(text: str, names: dict[str, str]) -> str:
+    """The mail's plain-text version: a picture line names its file instead of its number."""
+    return "\n".join(f"[image: {names[m.group(1)]}]" if (m := PICTURE_LINE.fullmatch(line)) and m.group(1) in names
+                     else line for line in (text or "").replace("\r\n", "\n").split("\n"))
 
 
 def clean(raw: dict) -> dict:
@@ -152,14 +201,22 @@ class Signature:
             out["banner"] = self.picture("banner")
         return out
 
-    def outgoing(self, text: str, signature: str) -> dict:
-        """send_email arguments for a reply: its HTML with the plain text carried along, and the inline pictures."""
+    def outgoing(self, text: str, signature: str, in_text: dict[str, Path] | None = None,
+                 names: dict[str, str] | None = None) -> dict:
+        """send_email arguments for a reply: its HTML with the plain text carried along, and the inline pictures.
+        in_text: the pictures the text has lines for, label -> a file named kolmail-inline-body<label>.<ext>;
+        names: what each is called in the text version."""
         s = self.load()
         pictures = self.pictures(s)
         sizes = {k: self.shown(k) for k in pictures}
-        markup = render(text, signature, s, {k: f"cid:{mailserver.cid(k)}" for k in pictures}, sizes)
-        return {"body": mailserver.text_mark(text) + markup, "html": True,
-                "attachments": [str(p) for p in pictures.values()]}
+        placed = {}
+        for label, path in (in_text or {}).items():
+            width = picture_width(Path(path).read_bytes()[:65536])
+            placed[label] = {"src": f"cid:{mailserver.cid('body' + label)}", "alt": (names or {}).get(label, ""),
+                             "width": min(width, PICTURE_WIDTH) if width else None}
+        markup = render(text, signature, s, {k: f"cid:{mailserver.cid(k)}" for k in pictures}, sizes, placed)
+        return {"body": mailserver.text_mark(text_version(text, names or {})) + markup, "html": True,
+                "attachments": [str(p) for p in pictures.values()] + [str(p) for p in (in_text or {}).values()]}
 
 
 def _lines(text: str) -> str:
@@ -183,16 +240,41 @@ def _img(src: str, size: dict | None, alt: str) -> str:
             f'style="display:block;border:0;outline:none">')
 
 
-def render(text: str, signature: str, s: dict, sources: dict[str, str], sizes: dict[str, dict | None]) -> str:
+def _paragraph(p: str, placed: dict[str, dict]) -> list[str]:
+    """A paragraph's HTML: its text, with every line that stands for a picture we have turned into that picture."""
+    out, run = [], []
+
+    def flush():
+        if run:
+            out.append(f'<p style="margin:0 0 1em 0">{_lines(chr(10).join(run))}</p>')
+            run.clear()
+    for line in p.split("\n"):
+        m = PICTURE_LINE.fullmatch(line)
+        pic = placed.get(m.group(1)) if m else None
+        if not pic:
+            run.append(line)
+            continue
+        flush()
+        width = f' width="{int(pic["width"])}"' if pic.get("width") else ""
+        out.append(f'<div style="margin:0 0 1em 0"><img src="{html.escape(pic["src"], quote=True)}"{width} '
+                   f'alt="{html.escape(pic.get("alt") or "", quote=True)}" '
+                   f'style="display:block;max-width:100%;height:auto;border:0;outline:none"></div>')
+    flush()
+    return out
+
+
+def render(text: str, signature: str, s: dict, sources: dict[str, str], sizes: dict[str, dict | None],
+           placed: dict[str, dict] | None = None) -> str:
     """The HTML of a reply. sources maps the pictures that go along to their src (cid: in a mail, a URL in the
-    page's preview); sizes gives their shown size."""
+    page's preview); sizes gives their shown size. placed: the pictures inside the text, label -> {"src", "alt",
+    "width"}; a picture line whose label is not in it stays the text it is."""
     text = (text or "").replace("\r\n", "\n").strip()
     sig = (signature or "").replace("\r\n", "\n").strip()
     body, sig_lines = text, []
     if sig and text.endswith(sig):
         body, sig_lines = text[:-len(sig)].rstrip(), sig.split("\n")
     paragraphs = [p for p in re.split(r"\n\s*\n", body) if p.strip()]
-    parts = [f'<p style="margin:0 0 1em 0">{_lines(p.strip())}</p>' for p in paragraphs]
+    parts = [piece for p in paragraphs for piece in _paragraph(p.strip("\n"), placed or {})]
     block = []
     if "name" in sources:
         block.append(f'<div style="margin:0 0 4px 0">{_img(sources["name"], sizes.get("name"), s["name_text"])}</div>')

@@ -139,7 +139,7 @@ def test_the_rule_file_is_read_again_after_an_edit(tmp_path):
 
 
 def test_quoted_history_and_titles_are_not_the_draft_or_the_kol():
-    assert c.own_words("Can we talk?\n\nOn Mon, Eclair wrote:\n> PayPal works too") == "Can we talk?\n"
+    assert c.own_words("Can we talk?\n\nOn Mon, Jordan wrote:\n> PayPal works too") == "Can we talk?\n"
     # a KOL's video title quoted in a compliment is not a promise
     assert "no-discount-code-promise" not in found('I enjoyed your video "Every discount code tier list".')
 
@@ -546,7 +546,7 @@ def test_selling_points_and_claims_about_us_must_still_be_kept(notes, body, zh):
 def test_every_prompt_carries_the_hard_rules():
     brief = c.prompt_brief()
     assert brief.count("\n") + 1 == len(c.load().rules) and "纯 CPS 先报默认档" in brief
-    args = {"owner": "Eclair", "owner_role": "BD", "company": "LootBar", "boundary": "b", "playbook": "",
+    args = {"owner": "Jordan", "owner_role": "BD", "company": "LootBar", "boundary": "b", "playbook": "",
             "hard_rules": brief}
     for system in (replyflow.strategy_system(**args), replyflow.draft_system(**args, signature="E"),
                    replyflow.chat_system(**args, signature="E")):

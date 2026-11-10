@@ -9,7 +9,10 @@
 
 const DEFAULT_PORT = 8765;
 const TIMEOUT_MS = 15000;
-const OPS = new Set(["hello", "sync", "queue", "queue/update"]);
+const OPS = new Set(["hello", "sync", "queue", "queue/update", "feed"]);
+const FEED_CONVS = 20;      // DMs in one feed call
+const FEED_MESSAGES = 100;  // messages of one DM in it
+const FEED_CHANNELS = 100;  // DMs named in its snapshot
 const STATUSES = new Set(["filled", "sent", "dropped"]);
 const DISCORD_ORIGINS = new Set(["https://discord.com", "https://ptb.discord.com", "https://canary.discord.com"]);
 const CHANNEL_ID = /^\d{5,25}$/;
@@ -25,6 +28,7 @@ const ERR = {
   timeout: "KOL Mail 没有响应，稍后再试",
   badReply: "KOL Mail 返回的内容看不懂，可能需要更新 KOL Mail",
   internal: "扩展内部出错，刷新页面再试",
+  elsewhere: "这个页面现在不在这个私信上，切回去再试",
 };
 
 // Content scripts must not read the token: only this worker and the popup may use storage.local.
@@ -74,7 +78,7 @@ async function rawCall(op, payload) {
 }
 
 /**
- * hello / sync / queue. Resolves { ok: true, data } or { ok: false, code, error, status? }:
+ * hello / sync / queue / feed. Resolves { ok: true, data } or { ok: false, code, error, status? }:
  * code "auth" (401/403 or no token), "offline" (not running / no answer), "server" (anything else).
  */
 async function callKolMail(op, payload) {
@@ -227,10 +231,17 @@ function senderKind(sender) {
   return typeof sender.url === "string" && sender.url.startsWith(chrome.runtime.getURL("")) ? "extension" : null;
 }
 
-/** The DM channel the sending Discord page is on right now (its address), or null. */
+/**
+ * The DM channel the sending Discord page is on right now, or null.
+ * The tab's address says it: Discord changes DMs without loading a page, and the tab's url follows that, while
+ * sender.url stays the address the page was first loaded on. Going by sender.url refused every DM after the first
+ * one ("扩展内部出错") until the page was reloaded. The tab's url needs the discord.com host permission; without
+ * it (an install from before 0.10 not reloaded yet) sender.url is all there is.
+ */
 function senderChannel(sender) {
+  const tabUrl = sender.tab && typeof sender.tab.url === "string" ? sender.tab.url : "";
   try {
-    const m = /^\/channels\/@me\/(\d{5,25})(?:\/\d{5,25})?\/?$/.exec(new URL(sender.url || (sender.tab && sender.tab.url) || "").pathname);
+    const m = /^\/channels\/@me\/(\d{5,25})(?:\/\d{5,25})?\/?$/.exec(new URL(tabUrl || sender.url || "").pathname);
     return m ? m[1] : null;
   } catch (e) {
     return null;
@@ -240,6 +251,23 @@ function senderChannel(sender) {
 function validSync(p) {
   return Array.isArray(p.messages) && p.messages.length <= 50 && p.peer && typeof p.peer === "object" &&
     p.me && typeof p.me === "object";
+}
+
+const isObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+
+/**
+ * What the page script read from Discord's own data (page.js): messages of any DM, and which DMs there are.
+ * It names its DMs itself, so it may come from a Discord page wherever that page is; it only ever adds to what
+ * KOL Mail knows, and a reply is still claimed and recorded by the page showing that DM alone.
+ */
+function validFeed(p) {
+  const convs = p.convs == null ? [] : p.convs;
+  const channels = p.channels == null ? [] : p.channels;
+  if (!isObject(p.me) || !Array.isArray(convs) || !Array.isArray(channels)) return false;
+  if (convs.length > FEED_CONVS || channels.length > FEED_CHANNELS) return false;
+  const named = (c) => isObject(c) && CHANNEL_ID.test(String(c.channel_id || "")) && isObject(c.peer);
+  return convs.every((c) => named(c) && Array.isArray(c.messages) && c.messages.length <= FEED_MESSAGES) &&
+    channels.every(named);
 }
 
 async function handle(msg, sender, kind) {
@@ -254,7 +282,11 @@ async function handle(msg, sender, kind) {
       const p = msg.payload && typeof msg.payload === "object" && !Array.isArray(msg.payload) ? msg.payload : null;
       if (!OPS.has(op) || !p || op === "queue/update") return { ok: false, error: ERR.internal };
       if (op === "hello") return callKolMail("hello", {});
-      if (!sameDm || String(p.channel_id) !== ch) return { ok: false, error: ERR.internal };
+      if (op === "feed") {
+        if (kind !== "discord" || !validFeed(p)) return { ok: false, error: ERR.internal };
+        return callKolMail("feed", { me: p.me, convs: p.convs || [], channels: p.channels || [] });
+      }
+      if (!sameDm || String(p.channel_id) !== ch) return { ok: false, code: "elsewhere", error: ERR.elsewhere };
       if (op === "sync" && !validSync(p)) return { ok: false, error: ERR.internal };
       if (op === "queue") await flushOutbox(); // status changes first, so the queue is not stale
       return callKolMail(op, op === "queue" ? { channel_id: p.channel_id } : p);
@@ -263,17 +295,18 @@ async function handle(msg, sender, kind) {
     case "update": {
       const itemId = typeof msg.item_id === "string" ? msg.item_id : "";
       const status = msg.type === "claim" ? "filled" : msg.status;
-      if (!sameDm || !itemId || itemId.length > 200 || !STATUSES.has(status)) return { ok: false, error: ERR.internal };
+      if (!sameDm) return { ok: false, code: "elsewhere", error: ERR.elsewhere };
+      if (!itemId || itemId.length > 200 || !STATUSES.has(status)) return { ok: false, error: ERR.internal };
       return msg.type === "claim" ? claim(ch, itemId) : enqueueUpdate(ch, itemId, status);
     }
     case "open":
       if (!CHANNEL_ID.test(ch)) return { ok: false, error: ERR.internal };
       return openKolMail(ch);
     case "state_get":
-      if (!sameDm) return { ok: false, error: ERR.internal };
+      if (!sameDm) return { ok: false, code: "elsewhere", error: ERR.elsewhere };
       return stateGet(ch);
     case "state_set":
-      if (!sameDm) return { ok: false, error: ERR.internal };
+      if (!sameDm) return { ok: false, code: "elsewhere", error: ERR.elsewhere };
       return stateSet(ch, msg.data);
     case "ui_get": {
       if (kind !== "discord") return { ok: false, error: ERR.internal };

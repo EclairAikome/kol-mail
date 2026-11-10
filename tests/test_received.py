@@ -41,11 +41,11 @@ class FakeServer:
                            for i, s, d, _ in chunk], "total": len(hits)}
 
 
-GLOOBY = ("929", "Glooby <glooby@example.com>", at(11, 33, 32), at(4, 33, 40))  # header 7 hours late
+LATE = ("929", "Gamer <gamer@example.com>", at(11, 33, 32), at(4, 33, 40))  # header 7 hours late
 INBOX = [("931", "Ana <ana@example.com>", at(7, 10), at(7, 10, 5)),
          ("930", "Bo <bo@example.com>", at(5, 0), at(5, 0, 3)),
-         GLOOBY,
-         ("928", "Glooby <glooby@example.com>", at(8, 10, day=26), at(8, 10, 4, day=26))]
+         LATE,
+         ("928", "Gamer <gamer@example.com>", at(8, 10, day=26), at(8, 10, 4, day=26))]
 
 
 def listing(mails):
@@ -58,7 +58,7 @@ def test_only_a_header_later_than_the_mail_above_it_is_suspect():
 
 
 def test_a_newest_mail_dated_after_the_fetch_is_suspect():
-    found = received.suspects(listing([GLOOBY]), NOW, {})
+    found = received.suspects(listing([LATE]), NOW, {})
     assert [(e["email_id"], bound) for e, bound in found] == [("929", NOW)]
 
 
@@ -82,25 +82,25 @@ def test_a_header_too_early_makes_only_the_mail_below_it_suspect():
 
 def test_find_narrows_the_receipt_time_down_to_a_minute():
     server = FakeServer(INBOX)
-    when = asyncio.run(received.find(server.call, "INBOX", "929", GLOOBY[1], at(5, 0), NOW))
-    assert GLOOBY[3] - received.STEP <= when <= GLOOBY[3]
+    when = asyncio.run(received.find(server.call, "INBOX", "929", LATE[1], at(5, 0), NOW))
+    assert LATE[3] - received.STEP <= when <= LATE[3]
     assert server.calls <= 14
 
 
 def test_find_still_finds_the_mail_when_its_bound_is_too_early():
-    when = asyncio.run(received.find(FakeServer(INBOX).call, "INBOX", "929", GLOOBY[1], at(3, 0, day=25), NOW))
-    assert GLOOBY[3] - received.STEP <= when <= GLOOBY[3]
+    when = asyncio.run(received.find(FakeServer(INBOX).call, "INBOX", "929", LATE[1], at(3, 0, day=25), NOW))
+    assert LATE[3] - received.STEP <= when <= LATE[3]
 
 
 def test_find_gives_up_when_the_mail_is_gone():
-    assert asyncio.run(received.find(FakeServer(INBOX[:2]).call, "INBOX", "929", GLOOBY[1], at(5, 0), NOW)) is None
+    assert asyncio.run(received.find(FakeServer(INBOX[:2]).call, "INBOX", "929", LATE[1], at(5, 0), NOW)) is None
 
 
 def test_find_pages_through_a_busy_sender():
-    many = [(str(2000 + i), GLOOBY[1], at(4, 0) - timedelta(minutes=i), at(4, 0) - timedelta(minutes=i))
+    many = [(str(2000 + i), LATE[1], at(4, 0) - timedelta(minutes=i), at(4, 0) - timedelta(minutes=i))
             for i in range(250)]
-    when = asyncio.run(received.find(FakeServer(many + [GLOOBY]).call, "INBOX", "929", GLOOBY[1], NOW, NOW))
-    assert GLOOBY[3] - received.STEP <= when <= GLOOBY[3]
+    when = asyncio.run(received.find(FakeServer(many + [LATE]).call, "INBOX", "929", LATE[1], NOW, NOW))
+    assert LATE[3] - received.STEP <= when <= LATE[3]
 
 
 def test_shown_keeps_the_header_unless_it_is_later_than_the_arrival():
@@ -128,7 +128,7 @@ def test_a_list_fetch_corrects_the_row_and_asks_the_page_to_repaint(fresh_cache,
     asyncio.run(app.check_received("INBOX", emails, NOW.timestamp()))
     rows = {r["email_id"]: r["date"] for r in (app.list_row("INBOX", e, {}) for e in emails)}
     assert received.parse(rows["929"]) == received.parse(stored("<929@x>")["<929@x>"])
-    assert GLOOBY[3] - received.STEP <= received.parse(rows["929"]) <= GLOOBY[3]
+    assert LATE[3] - received.STEP <= received.parse(rows["929"]) <= LATE[3]
     assert rows["930"] == emails[1]["date"]
     assert app.state["unread_rev"] == 1
     calls = server.calls

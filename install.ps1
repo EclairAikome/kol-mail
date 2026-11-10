@@ -3,9 +3,9 @@
 # 用法（维护者会在 POPO 群里发带参数的完整命令）：
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -Repo owner/kol-mail -Feedback <反馈地址>
 #
-# 公司邮箱固定是 @lootbar.com（2026-11-04 起是阿里云邮箱美国站，之前是 Amazon WorkMail），收发信服务器已经是默认值，
-# 不用再问；换公司时用 -Domain、
-# -ImapHost、-SmtpHost、-Company 改。维护者在本机试装时加 -Source <源码目录> -Dir <别的目录> -NoService，
+# 邮箱不在这里配：装好后在网页登录页填完整的邮箱地址和密码，收发信服务器由程序按地址自己找（mailfind.py）。
+# 团队想给同事预设公司邮箱时，可以带 -Domain、-ImapHost、-SmtpHost、-Company，都不带也能用。
+# 维护者在本机试装时加 -Source <源码目录> -Dir <别的目录> -NoService，
 # 这样不注册开机任务、不放桌面图标、不启动服务（真服务会在下班时间自动回信）。
 #
 # 做的事：找到或安装 Python，下载最新版 KOL Mail，装依赖，配置 AI（Claude Code 或 CodeMaker），注册开机自动启动的
@@ -18,10 +18,10 @@
 param(
     [string]$Repo = "",
     [string]$Feedback = "",
-    [string]$Domain = "lootbar.com",
-    [string]$Company = "LootBar",
-    [string]$ImapHost = "imap.us.alibabacloud.com",
-    [string]$SmtpHost = "smtp.us.alibabacloud.com",
+    [string]$Domain = "",    # 公司邮箱的域名，比如 example.com（可不填）
+    [string]$Company = "",   # 公司或品牌名，AI 起草时用来说明你的身份（可不填）
+    [string]$ImapHost = "",  # 公司邮箱的收信、发信服务器（可不填：登录时按邮箱地址自动找）
+    [string]$SmtpHost = "",
     [string]$GoogleClientId = "",
     [string]$GoogleClientSecret = "",
     [string]$PipIndex = "",
@@ -223,6 +223,17 @@ function Test-OnWorkMail($account) {
     } catch { return $false }
 }
 
+# 按邮箱地址找收发信服务器（程序自带的 mailfind.py：MX 记录、autoconfig、常见主机名）。找不到返回 $null
+function Find-MailServers($address) {
+    $finder = Join-Path $App "mailfind.py"
+    if (-not (Test-Path $finder)) { return $null }
+    $r = Run-Native { & $Py $finder $address }
+    if ($r.Code -ne 0) { return $null }
+    try {
+        return ($r.Out -split "`n" | Where-Object { $_.Trim().StartsWith("{") } | Select-Object -Last 1) | ConvertFrom-Json
+    } catch { return $null }
+}
+
 # 邮件组件把失败分成认证被拒、凭据丢失、网络/TLS 不通、超时几类；只有前两类重输密码有用
 function Test-PasswordProblem($failed) {
     return ($failed -join "`n") -match "Authentication or provider policy rejected|Credential is unavailable"
@@ -266,9 +277,11 @@ function Set-MailPassword($account, $email, [string[]]$addArgs) {
 }
 
 if ($Mirror -and -not $Mirror.StartsWith("https://")) { throw "-Mirror 必须是 https 地址" }
-# 旧安装命令里写明的 WorkMail 服务器换成阿里云的（公司邮箱 2026-11-04 换了）
+# 旧安装命令里写明的 WorkMail 服务器换成阿里云的（那个公司邮箱后来换了）
 if ($ImapHost -match '\.awsapps\.com$') { $ImapHost = "imap.us.alibabacloud.com" }
 if ($SmtpHost -match '\.awsapps\.com$') { $SmtpHost = "smtp.us.alibabacloud.com" }
+# 只有命令里把域名和两个服务器都给全了，才记成“公司邮箱的服务器”；按某个邮箱地址找到的不算
+$presetServers = [bool]($Domain -and $ImapHost -and $SmtpHost)
 
 $App = Join-Path $Dir "app"
 $Venv = Join-Path $Dir "venv"
@@ -379,24 +392,37 @@ if ($webLogin) {
     Say "  邮箱在 KOL Mail 的页面上登录：装好后浏览器会打开登录页，在那里填邮箱和密码（授权码）。"
 } else {
     while ($email -notmatch "^[^@\s]+@[^@\s]+\.[^@\s]+$") {
-        $email = Ask $(if ($Domain) { "你的工作邮箱（只填 @$Domain 前面的部分就行）" } else { "你的工作邮箱" })
-        if ($email -and $Domain -and $email -notmatch "@") { $email = "$email@$Domain" }
+        $email = Ask "你的邮箱地址（要写完整，比如 name@example.com）"
     }
     $email = $email.ToLower()
     $account = if ((Has $old "mail") -and (Has $old.mail "account_name")) { $old.mail.account_name } else { ($email.Split("@")[0] -replace "[^A-Za-z0-9_-]", "") }
-    # 默认用邮箱前缀当名字：eclair -> Eclair，john.doe -> John Doe
+    # 默认用邮箱前缀当名字：jordan -> Jordan，john.doe -> John Doe
     $guess = (($email.Split("@")[0] -split "[._-]+") | Where-Object { $_ } |
         ForEach-Object { $_.Substring(0, 1).ToUpper() + $_.Substring(1) }) -join " "
     while (-not $fullName) { $fullName = Ask "对外署名（英文名）" $guess }
     $accounts = (Run-Native { & $Mcp account list }).Out
     if ($accounts -notmatch "(?m)\b$([regex]::Escape($account))\b") {
-        if (-not $ImapHost) { $ImapHost = Ask "收信服务器（IMAP）" }
+        $serverArgs = @()
+        if (-not $ImapHost -and -not $SmtpHost) {
+            Say "  正在按邮箱地址查找收发信服务器…"
+            $found = Find-MailServers $email
+            if ($found) {
+                $ImapHost = "$($found.imap_host)"; $SmtpHost = "$($found.smtp_host)"
+                $serverArgs = @("--imap-port", "$($found.imap_port)", "--smtp-port", "$($found.smtp_port)")
+                if ("$($found.imap_security)" -eq "starttls") { $serverArgs += @("--no-imap-ssl", "--imap-starttls") }
+                else { $serverArgs += @("--imap-ssl", "--no-imap-starttls") }
+                if ("$($found.smtp_security)" -eq "starttls") { $serverArgs += @("--no-smtp-ssl", "--smtp-starttls") }
+                else { $serverArgs += @("--smtp-ssl", "--no-smtp-starttls") }
+                Say "  找到了：收信 $ImapHost，发信 $SmtpHost"
+            }
+        }
+        if (-not $ImapHost) { $ImapHost = Ask "没能自动找到服务器。请填邮箱服务商给的收信服务器（IMAP）" }
         if (-not $SmtpHost) { $SmtpHost = Ask "发信服务器（SMTP）" }
         Say "  马上会弹出一个小窗口，在里面输入邮箱密码（可以 Ctrl+V 粘贴）。密码由邮件组件存进 Windows 凭据管理器。"
-        $mailOk = Set-MailPassword $account $email @("account", "add", $account, "--email", $email, "--full-name", $fullName,
-            "--imap-host", $ImapHost, "--smtp-host", $SmtpHost, "--imap-user", $email, "--smtp-user", $email)
+        $mailOk = Set-MailPassword $account $email (@("account", "add", $account, "--email", $email, "--full-name", $fullName,
+            "--imap-host", $ImapHost, "--smtp-host", $SmtpHost, "--imap-user", $email, "--smtp-user", $email) + $serverArgs)
     } elseif (Test-OnWorkMail $account) {
-        # 公司邮箱 2026-11-04 从 WorkMail 换到了阿里云：服务器由 KOL Mail 启动时改，原密码不能用时才在页面上重输
+        # 这个公司邮箱从 WorkMail 换到了阿里云：服务器由 KOL Mail 启动时改，原密码不能用时才在页面上重输
         Say "  公司邮箱换到阿里云了：装好后打开 KOL Mail 会自动换过去；原来的密码不能用的话，页面会请你输入一次。"
         $mailOk = $true
     } else {
@@ -629,7 +655,7 @@ if ($email) {
     $mailAnswers.company_domain = "@$Domain"
 }
 # 公司邮箱的服务器：登录页上填公司邮箱时就不用再填服务器
-if ($Domain -and $ImapHost -and $SmtpHost) {
+if ($presetServers) {
     $mailAnswers.company_servers = [ordered]@{ domain = $Domain; imap_host = $ImapHost; smtp_host = $SmtpHost }
 }
 $answers = [ordered]@{
@@ -646,7 +672,7 @@ if ($pinCmModels) { $answers.llm.models = $CmModels }
 # 新版程序第一次打开页面时，会请同事自己写签名和“我的谈判方式”（每人签名格式和打法都不一样）；
 # 旧版程序（v0.1.1 及以前）没有这一步，还是在这里把签名问全，否则签名只有名字。
 $setupInApp = [bool](Select-String -Quiet -SimpleMatch -Pattern 'id="setupDlg"' -LiteralPath (Join-Path $App "static\index.html"))
-if (-not ((Has $old "identity") -and (Has $old.identity "company"))) { $answers.identity.company = $Company }
+if ($Company -and -not ((Has $old "identity") -and (Has $old.identity "company"))) { $answers.identity.company = $Company }
 if (-not ((Has $old "identity") -and (Has $old.identity "signature"))) {
     if ($setupInApp) {
         $answers.identity.signature = $fullName
@@ -655,7 +681,8 @@ if (-not ((Has $old "identity") -and (Has $old.identity "signature"))) {
         $extra = Ask "签名里额外的一行（比如 Discord: xxx，没有就回车）"
         $site = Ask "签名里的网址（没有就回车）" $(if ($Domain) { "https://$Domain/" } else { "" })
         $answers.identity.title = $title
-        $answers.identity.signature = (@($fullName, "$title | $Company", $extra, $site) | Where-Object { $_ }) -join "`n"
+        $role = if ($Company) { "$title | $Company" } else { $title }
+        $answers.identity.signature = (@($fullName, $role, $extra, $site) | Where-Object { $_ }) -join "`n"
     }
 }
 if (-not ((Has $old "paths") -and (Has $old.paths "playbook"))) {
@@ -741,11 +768,17 @@ Register-ScheduledTask -TaskName "kol-mail" -Action $action -Trigger $trigger -S
 
 # ---------------------------------------------------------------- 8. 桌面图标，启动
 Say "[8/8] 放桌面图标并启动…"
+# The shortcut carries KOL Mail's own icon (static\kolmail.ico) instead of the gear of a .cmd file, and starts
+# minimized: start-kol-mail.cmd only opens the browser, its window has nothing to show unless it fails.
 $lnk = Join-Path ([Environment]::GetFolderPath("Desktop")) "KOL Mail.lnk"
 $shell = New-Object -ComObject WScript.Shell
 $s = $shell.CreateShortcut($lnk)
 $s.TargetPath = Join-Path $App "start-kol-mail.cmd"
 $s.WorkingDirectory = $App
+$s.Description = "打开 KOL Mail"
+$s.WindowStyle = 7
+$icon = Join-Path $App "static\kolmail.ico"
+if (Test-Path $icon) { $s.IconLocation = "$icon,0" }
 $s.Save()
 Start-ScheduledTask -TaskName "kol-mail"
 Start-Process (Join-Path $App "start-kol-mail.cmd")
