@@ -145,7 +145,155 @@ def patch() -> bool:
         add_folder_tools()
     except Exception as e:  # noqa: BLE001  sending and reading must work without them (the folder menu then fails)
         print(f"kol-mail: folder tools not added: {e!r}", file=sys.stderr)
+    try:
+        patch_search(classic)
+    except Exception as e:  # noqa: BLE001  sending must work without it (searching by sender then fails on Alibaba)
+        print(f"kol-mail: header search fallback not added: {e!r}", file=sys.stderr)
     return True
+
+
+# ---------------------------------------------------------------- searching a server without text search
+
+# Alibaba Mail (imap.us.alibabacloud.com, where lootbar.com moved on 2026-11-04) answers every UID SEARCH with FROM,
+# TO, SUBJECT, TEXT or BODY in it with "BAD invalid command or parameters", and HEADER <field> with an empty OK. Date
+# and flag searches work. So a search by sender, recipient or subject (list_emails_metadata from_address, to_address,
+# subject, text; KOL Mail's search box) failed there as "provider_failure". When the server says BAD to such a
+# search, it runs again without those keys and the headers of what it finds are matched here instead, the way IMAP
+# would: a case-insensitive substring of the decoded, unfolded From, To, Subject. TEXT is matched against From, To,
+# Cc and Subject only (not the body). Searches that also carry BODY, HEADER, KEYWORD, OR or NOT cannot be answered
+# from these headers and keep the server's refusal. A server that does text search (Gmail...) never gets here.
+HEADER_KEYS = {"FROM": ("from",), "TO": ("to",), "SUBJECT": ("subject",), "TEXT": ("from", "to", "cc", "subject")}
+# Search keys that take one value (RFC 3501): the value must not be read as a key. Those that make the search
+# unanswerable from headers are refused outright.
+VALUE_KEYS = {"BCC", "BEFORE", "CC", "LARGER", "ON", "SENTBEFORE", "SENTON", "SENTSINCE", "SINCE", "SMALLER", "UID"}
+UNANSWERABLE = {"BODY", "HEADER", "KEYWORD", "UNKEYWORD", "OR", "NOT"}
+SEARCH_FETCH_CHUNK = 200
+text_search_refused: set[str] = set()  # hosts whose text search was refused and answered by the fallback
+
+
+def _search_value(token) -> str | None:
+    """The text of one search value token: an atom, a quoted string, or a UTF-8 literal (classic._ImapSearchLiteral)."""
+    data = getattr(token, "data", None)
+    if isinstance(data, bytes):
+        return data.decode("utf-8", "replace")
+    if not isinstance(token, str):
+        return None
+    if len(token) >= 2 and token[0] == token[-1] == '"':
+        return re.sub(r"\\(.)", r"\1", token[1:-1])
+    return token
+
+
+def split_header_keys(criteria) -> tuple[list, list[tuple[str, str]]] | None:
+    """(the criteria without FROM/TO/SUBJECT/TEXT and their values, those keys with their text), or None when the
+    search cannot be answered from headers: no such key, or a key from UNANSWERABLE. Tokens are read key by key, so
+    a value that happens to be "not" or "to" (SUBJECT not) is a value, not a key."""
+    rest, keys, items, i = [], [], list(criteria), 0
+    while i < len(items):
+        token = items[i]
+        key = token.upper() if isinstance(token, str) else None
+        if key in UNANSWERABLE:
+            return None
+        if key in HEADER_KEYS:
+            value = _search_value(items[i + 1]) if i + 1 < len(items) else None
+            if value is None:
+                return None
+            keys.append((key, value))
+            i += 2
+            continue
+        width = 2 if key in VALUE_KEYS else 1
+        rest += items[i:i + width]
+        i += width
+    return (rest, keys) if keys else None
+
+
+def _plain(text: str) -> str:
+    """Folded lines joined and runs of white space made one space, for comparing."""
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def header_match(headers, keys: list[tuple[str, str]]) -> bool:
+    """IMAP's own rule for FROM/TO/SUBJECT: every key's text is a substring of its field, ignoring case. headers come
+    from email.policy.default, which decodes encoded words and raw UTF-8 and unfolds long lines."""
+    for key, text in keys:
+        wanted = _plain(text)
+        fields = [_plain(str(v)) for name in HEADER_KEYS[key] for v in (headers.get_all(name) or [])]
+        if not any(wanted in f for f in fields):
+            return False
+    return True
+
+
+def parse_headers(raw: bytes):
+    import email.policy
+    from email.parser import BytesHeaderParser
+    try:
+        return BytesHeaderParser(policy=email.policy.default).parsebytes(raw)
+    except Exception:  # noqa: BLE001  a header the modern parser rejects: the lenient one still gives its text
+        return BytesHeaderParser().parsebytes(raw)
+
+
+def _fetched_headers(data) -> dict[str, bytes]:
+    """{uid: raw header block} from one UID FETCH answer (aioimaplib: the line with UID, then the literal; some
+    servers put the UID after the literal)."""
+    found: dict[str, bytes] = {}
+    for i, item in enumerate(data):
+        if not isinstance(item, bytes | bytearray) or i + 1 >= len(data) or not isinstance(data[i + 1], bytearray):
+            continue
+        if b"FETCH" not in item:
+            continue
+        uid = re.search(rb"UID (\d+)", item)
+        if not uid and i + 2 < len(data) and isinstance(data[i + 2], bytes | bytearray):
+            uid = re.search(rb"UID (\d+)", data[i + 2])
+        if uid:
+            found[uid.group(1).decode()] = bytes(data[i + 1])
+    return found
+
+
+async def header_search(classic, original, imap, criteria, keys):
+    """The fallback: search without the header keys, then keep the mails whose headers match them. Every candidate
+    is read (the server's own search caps candidates at classic.MAX_METADATA_CANDIDATES); a FETCH that leaves one
+    out raises, as the library does for missing metadata, instead of returning fewer matches."""
+    response = await original(imap, criteria or ["ALL"])
+    if classic._imap_status(response) != "OK":
+        return response
+    uids = sorted(classic._normalize_search_uids(response[1]), key=int)
+    kept = []
+    for start in range(0, len(uids), SEARCH_FETCH_CHUNK):
+        chunk = uids[start:start + SEARCH_FETCH_CHUNK]
+        fetched = await imap.uid("fetch", ",".join(chunk), "BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT)]")
+        classic._raise_for_imap_command_failure(fetched, f"FETCH headers for {len(chunk)} UIDs")
+        found = _fetched_headers(fetched[1])
+        missing = set(chunk) - set(found)
+        if missing:
+            raise classic.MetadataProviderObservationError(
+                f"Provider returned incomplete header metadata for {len(missing)} UIDs")
+        kept += [uid for uid in chunk if header_match(parse_headers(found[uid]), keys)]
+    return classic.aioimaplib.Response("OK", [" ".join(kept).encode("ascii"), b"SEARCH completed"])
+
+
+def patch_search(classic) -> None:
+    original = classic._uid_search
+    if getattr(original, "kolmail", False):
+        return
+
+    async def search(imap, criteria):
+        split = split_header_keys(criteria)
+        host = str(getattr(imap, "host", "") or "")
+        if split and host and host in text_search_refused:
+            return await header_search(classic, original, imap, *split)
+        response = await original(imap, criteria)
+        status = classic._imap_status(response)
+        if split and status in ("BAD", "NO"):
+            answer = await header_search(classic, original, imap, *split)
+            # Only a BAD that the same search without the header keys got past counts as "no text search here". A
+            # BAD for another reason (a date) fails the fallback too, and a NO (busy, or a charset the server did not
+            # take) is answered this once but marks nothing.
+            if host and status == "BAD" and classic._imap_status(answer) == "OK":
+                text_search_refused.add(host)
+            return answer if classic._imap_status(answer) == "OK" else response
+        return response
+
+    search.kolmail = True
+    classic._uid_search = search
 
 
 # ---------------------------------------------------------------- renaming and deleting folders
