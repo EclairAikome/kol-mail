@@ -8884,10 +8884,10 @@ async def tg_sync_chat(chat_id: int, name: str = "", username: str = "") -> int:
     username = username or next((str(m.get("username") or "") for m in theirs if m.get("username")), "")
     key = f"tg:{chat_id}"
     CHATS.upsert_conv(key, peer_id=chat_id, peer_name=name, username=username)
-    new = CHATS.add_messages(key, [x for x in map(tg_message, msgs) if x])
+    read = [x for x in map(tg_message, msgs) if x]
+    new = CHATS.add_messages(key, read)
     chat_autolink(key)
-    if new:
-        spawn(chat_record(key), "记录私信")
+    chat_after_store(key, read, bool(new))
     return len(new)
 
 
@@ -9011,31 +9011,70 @@ def chat_linked(conv: dict | None) -> bool:
     return bool(conv and not conv["ignored"] and (conv.get("kol_id") or conv.get("kol_email")))
 
 
+def chat_after_store(key: str, msgs: list[dict], new: bool):
+    """After a chat's messages were read in: what is new, or an edit just found, goes to the sheet and 私信记录;
+    otherwise an attachment whose copy is still missing is tried with the address this reading brought."""
+    conv = CHATS.conv(key)
+    if not chat_linked(conv):
+        return
+    if new or CHATS.waiting(key):
+        spawn(chat_record(key), "记录私信")
+    elif chat_files_todo(key, msgs):
+        spawn(chat_keep_files(conv, msgs), "存私信附件")
+
+
+def chat_notes_ready() -> bool:
+    """Before the first row this version writes to 私信记录: a store from before msg.noted learns which of its
+    messages the files already hold (once), so none is written twice and only the missing ones are added. False
+    while the files cannot be read: nothing is written to 私信记录 until they can (the sheet is written as ever)."""
+    if CHATS.get_kv(chats.RECONCILED) == "1":
+        return True
+    try:
+        found = CHATS.reconcile(CHAT_RECORD, autoreply.TZ)
+    except OSError as e:
+        state["sheet_error"] = f"私信记录读不到，这次先不往里写：{err_text(e)}"
+        log("chat transcript not reconciled", err_text(e))
+        return False
+    if found:
+        log("chat transcript reconciled", f"{found[0]} message(s) already in it, {found[1]} not")
+    return True
+
+
 async def chat_record(key: str):
-    """New messages of a linked chat: translated (so 沟通记录 reads in Chinese), then written to KOL总表 and 私信记录.
-    Messages from before the link's backfill window (scrolled up to in Discord, say) never reach the sheet."""
+    """A linked chat's messages go two ways. To KOL总表's 沟通记录, translated (so it reads in Chinese): the new
+    ones, never those from before the link's backfill window (scrolled up to in Discord, say). To 私信记录, in
+    their own words: every one the transcript does not hold, however old, so a chat linked today has its whole
+    history there; then a row for each edit found since, the earlier row left as it was. Attachments are copied
+    first, and the row says where the copy is."""
     async with chat_lock(key):
         conv = CHATS.conv(key)
         if not chat_linked(conv):
             return
+        notes = chat_notes_ready()
         linked_at = chats.parse_time(conv.get("linked_at"))
         if linked_at:
             CHATS.skip_old(key, linked_at - chats.BACKFILL)
         todo = CHATS.unlogged(key)
-        if not todo:
+        if not todo and not (notes and CHATS.waiting(key)):
             return
-        try:
-            await chat_translate(key, todo)
-        except ClaudeError as e:  # the row goes in anyway, in the original language
-            log("chat translation failed", key, err_text(e))
+        if todo:
+            try:
+                await chat_translate(key, todo)
+            except ClaudeError as e:  # the row goes in anyway, in the original language
+                log("chat translation failed", key, err_text(e))
+        if notes:
+            try:
+                await chat_keep_files(conv, CHATS.unnoted(key))
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001  the words are written all the same; the row says no copy
+                log("chat attachments not kept", key, err_text(e))
         conv = CHATS.conv(key)  # the translation takes a while: unlinked or relinked meanwhile counts
         if chat_linked(conv):
-            chat_log(conv, CHATS.unlogged(key))
+            chat_log(conv, CHATS.unlogged(key), notes)
 
 
-def chat_log(conv: dict, todo: list[dict]):
-    if not todo:
-        return
+def chat_log(conv: dict, todo: list[dict], notes: bool = True):
     key, label = conv["key"], chats.LABELS[conv["channel"]]
     token = chats.peer_token(conv)
     for run in chats.runs(todo):
@@ -9049,12 +9088,532 @@ def chat_log(conv: dict, todo: list[dict]):
             if value:
                 op[field] = value
         sheet_post(op)
-    try:
-        chats.append_transcript(CHAT_RECORD, conv, todo, autoreply.TZ)
-    except OSError as e:
-        state["sheet_error"] = f"私信记录写不进去：{err_text(e)}"
-        log("chat transcript not written", key, err_text(e))
     CHATS.mark_logged(key, [m["id"] for m in todo])
+    if not notes:
+        return
+    msgs, edits = CHATS.unnoted(key), CHATS.edits(key, waiting=True)
+    marks = chat_file_marks(key, msgs)
+    days: dict[str, tuple[list, list]] = {}  # one file per day, and each day marked as written on its own:
+    for m in msgs:                           # a day that cannot be written never has the others written twice
+        days.setdefault(chats.local_day(m["at"], autoreply.TZ), ([], []))[0].append(m)
+    for e in edits:
+        days.setdefault(chats.local_day(e["found_at"], autoreply.TZ), ([], []))[1].append(e)
+    for day in sorted(days):
+        ms, es = days[day]
+        try:
+            chats.append_transcript(CHAT_RECORD, conv, ms, autoreply.TZ, files=marks, edits=es)
+        except OSError as e:  # they stay unnoted: the chat's next message, or the next look (chat_backfill), writes them
+            state["sheet_error"] = f"私信记录写不进去：{err_text(e)}"
+            log("chat transcript not written", key, day, err_text(e))
+            continue
+        CHATS.mark_noted(key, [m["id"] for m in ms])
+        CHATS.mark_edits_noted([e["n"] for e in es])
+
+
+# Copies of what came with a message (a rate card, a screenshot of a payment), kept for good next to 私信记录: Discord's
+# attachment addresses stop working within a day, and either side can delete a message. Nothing here is opened or
+# run: a copy is evidence, written once, named in msg_file with its SHA-256.
+CHAT_FILE_HOSTS = ("cdn.discordapp.com", "media.discordapp.net")  # where Discord serves attachments from, and nowhere else
+CHAT_FILE_TRIES = 3       # times a copy is tried before the row just says it is missing
+CHAT_FILE_BUDGET = 180    # seconds one pass may spend copying before the rows are written without the rest
+chat_file_locks: dict[str, asyncio.Lock] = {}
+
+
+def chat_files_dir(key: str, mid: str) -> Path:
+    """私信记录\\附件\\<tg|dc>-<chat id>\\<message id>: under 私信记录, which sweep_attachments never looks at."""
+    prefix, cid = key.split(":", 1)
+    return CHAT_RECORD / "附件" / f"{prefix}-{cid.lstrip('-')}" / re.sub(r"[^0-9A-Za-z_-]", "_", str(mid))[:40]
+
+
+def chat_file_name(name: str, n: int, taken: set[str]) -> str:
+    """A name safe to write under Windows and macOS: no path, no reserved name, no hidden characters. A type that
+    is not among the ones KOL Mail opens (ALLOWED_TYPES) gets ".unchecked" after it, so a double click runs
+    nothing. A second file of the same name in one message gets its number in front."""
+    base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", strip_hidden(chats.plain(name, 120))).strip(". \u3000\u00a0")[:100]
+    if not base or re.fullmatch(r"(?i)(con|prn|aux|nul|com\d|lpt\d)(\..*)?", base):
+        base = f"file-{n + 1}" + (("." + attachment_ext(name)) if attachment_ext(name) else "")
+    if attachment_ext(base) not in ALLOWED_TYPES:
+        base += ".unchecked"
+    name, k = base, n + 1
+    while name.casefold() in taken:  # never the name of a copy that is there: no copy is ever written over
+        name, k = f"{k}-{base}", k + 1
+    taken.add(name.casefold())
+    return name
+
+
+def chat_file_items(key: str, m: dict) -> list[dict]:
+    """What of a message can be copied: {"n", "name", "url"} for a Discord attachment, {"n", "name", "tg"} for a
+    Telegram photo or an image sent as a file. Other Telegram media (a video, a PDF, a voice message) is named
+    in the row but not copied: KOL Mail's Telegram login only reads images."""
+    extra = m.get("extra") if isinstance(m.get("extra"), dict) else {}
+    if key.startswith("dc:"):
+        atts = extra.get("attachments") if isinstance(extra.get("attachments"), list) else []
+        return [{"n": n, "name": chats.plain(a.get("name"), 120) or "file", "url": str(a.get("url") or "")}
+                for n, a in enumerate(atts) if isinstance(a, dict)]
+    attached = materials.tg_file(str(extra.get("media") or ""))
+    if not attached or not str(m.get("id") or "").isdigit():
+        return []
+    kind, name = attached
+    if kind == "photo" or (kind == "document" and attachment_ext(name) in IMAGE_TYPES):
+        return [{"n": 0, "name": name, "tg": kind}]
+    return []
+
+
+def chat_files_todo(key: str, msgs: list[dict]) -> list[tuple[dict, dict]]:
+    """(message, item) for every attachment of these messages with no copy yet and tries left."""
+    todo = []
+    for m in msgs:
+        items = chat_file_items(key, m)
+        if not items:
+            continue
+        known = {f["n"]: f for f in CHATS.files(key, m["id"])}
+        for it in items:
+            f = known.get(it["n"]) or {}
+            # Discord signs an attachment's address anew about once a day: one never asked is a new chance
+            fresh = bool(it.get("url")) and f.get("src") != it["url"]
+            if not f.get("path") and (f.get("tries", 0) < CHAT_FILE_TRIES or fresh):
+                todo.append((m, it))
+    return todo
+
+
+async def discord_file(url: str) -> bytes:
+    """An attachment from Discord's own file servers, and only from there: the address comes from a web page."""
+    parts = urllib.parse.urlsplit(url)
+    try:
+        port = parts.port
+    except ValueError:
+        port = -1
+    if parts.scheme != "https" or (parts.hostname or "").lower() not in CHAT_FILE_HOSTS or port not in (None, 443) \
+            or parts.username or parts.password:
+        raise materials.Unreadable("不是 Discord 附件服务器的地址，没下载")
+    async with materials.new_client() as client:
+        page = await materials.get(client, url, CHAT_FILE_HOSTS, max_bytes=ATTACH_MAX_BYTES)
+    if page.status in (403, 404):
+        raise materials.Unreadable("Discord 的附件链接已过期，在 Discord 里重新打开这个私信后会再试")
+    if page.status != 200:
+        raise materials.Unreadable(f"Discord 返回 {page.status}")
+    return page.body
+
+
+async def telegram_file(chat_id: int, message_id: int, kind: str) -> bytes:
+    """A Telegram photo, or an image sent as a file, as telegram-mcp reads it into memory (see telegram_materials:
+    never a file over TG_FILE_MAX, never anything it would parse)."""
+    if not tg.ready.is_set():
+        raise NotReady("Telegram 后端没连上")
+    if kind == "document":
+        info = str(await tg.call("get_media_info", timeout=30, chat_id=chat_id, message_id=message_id))
+        sizes = [int(x) for x in re.findall(r"\bsize=(\d+)", info)]
+        mimes = re.findall(r"\bmime_type='([^']*)'", info)
+        if not sizes or max(sizes) > TG_FILE_MAX:
+            raise materials.Unreadable(f"查不到大小或超过 {TG_FILE_MAX // (1024 * 1024)} MB，没下载")
+        if not mimes or not all(m.lower().startswith("image/") for m in mimes):
+            raise materials.Unreadable("文件内容不是图片，没下载")
+    blocks = await tg.call("inspect_document", timeout=120, raw=True, chat_id=chat_id, message_id=message_id)
+    for b in blocks:
+        if getattr(b, "type", "") == "image":
+            return base64.b64decode(b.data)
+    raise materials.Unreadable("Telegram 后端没给出图片")
+
+
+def mark_from_internet(path: Path) -> bool:
+    """Windows' mark of a downloaded file (Zone.Identifier); False where there is none to give."""
+    if os.name != "nt":
+        return False
+    try:
+        with open(f"{path}:Zone.Identifier", "w", encoding="ascii", newline="") as ads:  # MOTW is already CRLF
+            ads.write(MOTW)
+    except OSError:
+        return False
+    return True
+
+
+def chat_file_write(folder: Path, name: str, data: bytes) -> Path:
+    """The copy, written whole or not at all, under a name no file in the folder has. It is marked as coming from
+    the internet, as a browser's download is (Office then opens it in Protected View). Nothing here looks inside
+    the file, so one that is not a picture and could not get that mark (not Windows, or a disk without such
+    marks) is kept as <name>.unchecked instead: evidence all the same, and a double click opens nothing."""
+    folder.mkdir(parents=True, exist_ok=True)
+    part = folder / f"part-{secrets.token_hex(4)}"
+    try:
+        part.write_bytes(data)
+        if not mark_from_internet(part) and attachment_ext(name) not in IMAGE_TYPES and not name.endswith(".unchecked"):
+            name += ".unchecked"
+        there = {p.name.casefold() for p in folder.iterdir()}
+        path, k = folder / name, 2
+        while path.name.casefold() in there:
+            path, k = folder / f"{k}-{name}", k + 1
+        os.replace(part, path)  # a rename keeps the mark, which is a stream of the file
+    except OSError:
+        with contextlib.suppress(OSError):
+            part.unlink()
+        raise
+    return path
+
+
+async def chat_keep_files(conv: dict, msgs: list[dict]):
+    """Copy what these messages carry and has no copy yet. One file after another, one pass per chat at a time;
+    a file that cannot be had is noted with the reason and tried again while it has tries left."""
+    key = conv["key"]
+    if not chat_files_todo(key, msgs):
+        return
+    async with chat_file_locks.setdefault(key, asyncio.Lock()):
+        started = time.monotonic()
+        for m, it in chat_files_todo(key, msgs):  # again under the lock: another pass may have made the copy
+            if time.monotonic() - started > CHAT_FILE_BUDGET:
+                log("chat attachments: out of time, the rest later", key)
+                break
+            try:
+                if "url" in it:
+                    data = await discord_file(it["url"])
+                else:
+                    data = await telegram_file_gated(int(key.split(":", 1)[1]), int(m["id"]), it["tg"])
+                    ext = "webp" if data[:4] == b"RIFF" and data[8:12] == b"WEBP" else \
+                        next((e for sig, e in TG_IMAGE_TYPES if data.startswith(sig)), None)
+                    if not ext:
+                        raise materials.Unreadable("文件内容不是图片，没保存")
+                    if it["tg"] == "photo":  # telegram-mcp names no file for a photo: it gets its real type
+                        it = {**it, "name": f"photo.{ext}"}
+                folder = chat_files_dir(key, m["id"])
+                taken = {Path(f["path"]).name.casefold() for f in CHATS.files(key, m["id"]) if f["path"]}
+                path = await asyncio.to_thread(chat_file_write, folder, chat_file_name(it["name"], it["n"], taken), data)
+                CHATS.file_saved(key, m["id"], it["n"], it["name"], str(path), hashlib.sha256(data).hexdigest(), len(data))
+                log("chat attachment kept", key, m["id"], path.name, len(data))
+                chat_late_file(conv, m["id"], path)
+            except asyncio.CancelledError:
+                raise
+            except NotReady:
+                break  # no Telegram right now: not a try, the next look (chat_backfill) comes back to it
+            except Exception as e:  # noqa: BLE001  one file that cannot be had never keeps the next from being copied
+                CHATS.file_failed(key, m["id"], it["n"], it["name"], err_text(e), it.get("url") or "")
+                log("chat attachment not kept", key, m["id"], shown_name(it["name"]), err_text(e))
+
+
+def chat_late_file(conv: dict, mid: str, path: Path):
+    """A copy made after the message's row was written (the row says 未存): 私信记录 gets a row saying where it is."""
+    m = CHATS.message(conv["key"], mid)
+    if not m or not m["noted"]:
+        return  # the row is still to come, and will name the copy itself
+    try:
+        where = path.relative_to(CHAT_RECORD).as_posix()
+    except ValueError:
+        where = path.name
+    try:
+        chats.append_rows(CHAT_RECORD, {chats.local_day(datetime.now(timezone.utc), autoreply.TZ):
+                                        [chats.file_line(conv, m, where, autoreply.TZ)]})
+    except OSError as e:  # the copy is there and msg_file names it; only the row is missing
+        log("chat transcript not written", conv["key"], err_text(e))
+
+
+def chat_file_marks(key: str, msgs: list[dict]) -> dict[str, str]:
+    """For 私信记录: what each message carried, and where its copy is (relative to 私信记录) or that there is none."""
+    marks = {}
+    for m in msgs:
+        names = chats.file_names(m)
+        if not names:
+            continue
+        if not chat_file_items(key, m):  # Telegram media that is never copied (a video, a voice message): its label
+            marks[m["id"]] = f"[{names[0]}]"
+            continue
+        saved = {f["n"]: f for f in CHATS.files(key, m["id"]) if f["path"]}
+        parts = []
+        for n, name in enumerate(names):
+            if n in saved:
+                try:
+                    where = Path(saved[n]["path"]).relative_to(CHAT_RECORD).as_posix()
+                except ValueError:
+                    where = Path(saved[n]["path"]).name
+                parts.append(f"{name}，已存 {where}")
+            else:
+                parts.append(f"{name}，未存")
+        marks[m["id"]] = "[附件 " + "；".join(parts) + "]"
+    return marks
+
+
+async def telegram_file_gated(chat_id: int, message_id: int, kind: str) -> bytes:
+    """One Telegram download at a time, whatever the number of chats being written: the login that fetches the
+    file is the one that receives and sends."""
+    async with chat_file_locks.setdefault("tg", asyncio.Lock()):
+        return await telegram_file(chat_id, message_id, kind)
+
+
+# 私信备份: once a day a whole copy of the store and of 私信记录's files, and a ledger of their SHA-256 sums. A
+# transcript file only ever grows at its end, so a sum taken today still proves tomorrow that the file's first so
+# many bytes are what they were. Each run ends with a digest over the run before it and its own lines: whoever
+# holds a digest (a mail to oneself, a message in a group) can show that nothing before it was changed since.
+# This keeps the ledger; chat_hash_send below mails the digest where the owner switched that on.
+CHAT_BACKUP_HOUR = 18     # local time: after the working day, so the day's talk is in the copy made that day
+CHAT_BACKUP_KEEP = 30     # daily copies kept, plus the first one of every month
+CHAT_BACKUP_AT = "chat_backup_at"  # CHATS kv: when the last copy was made
+CHAT_BACKUP_EVERY = 1800  # seconds between looks at whether a copy is due
+CHAT_LEDGER = "哈希台账.txt"
+CHAT_LEDGER_HEAD = ("# KOL Mail 私信留存哈希台账，只在末尾追加。\n"
+                    "# 每行依次是时间、文件、字节数、SHA-256、说明，用制表符隔开。\n"
+                    "# 私信记录的文件只追加不改写，核对时取文件开头同样多的字节算 SHA-256，结果应当和这里记的一样。\n"
+                    "# 文件一栏是 = 的那一行是当次备份的汇总值，由上一次的汇总值和这一次的各行一起算出。"
+                    "把它存到别处，就能证明在它之前的行没有被动过。\n")
+
+
+def chat_backup_dir() -> Path:
+    return CHAT_RECORD.parent / "私信备份"
+
+
+def chat_backup_due(now: datetime, last: datetime | None) -> bool:
+    """A copy is made each day from CHAT_BACKUP_HOUR on; a day whose evening the computer was off for is made up
+    for at the next start."""
+    if last is None:
+        return True
+    evening = now.replace(hour=CHAT_BACKUP_HOUR, minute=0, second=0, microsecond=0)
+    return last < (evening if now >= evening else evening - timedelta(days=1))
+
+
+def sha256_file(path: Path, size: int | None = None) -> str:
+    """The SHA-256 of the file, or of its first `size` bytes."""
+    h, left = hashlib.sha256(), size
+    with path.open("rb") as f:
+        while left is None or left > 0:
+            block = f.read(1 << 20 if left is None else min(1 << 20, left))
+            if not block:
+                break
+            h.update(block)
+            if left is not None:
+                left -= len(block)
+    return h.hexdigest()
+
+
+def ledger_digest(before: str, lines: list[str]) -> str:
+    return hashlib.sha256((before + "\n" + "\n".join(lines)).encode("utf-8")).hexdigest()
+
+
+def ledger_read(path: Path) -> tuple[dict[str, tuple[int, str]], str]:
+    """({file: (size, sha256) as last written}, the last run's digest or "")."""
+    files, digest = {}, ""
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            cells = line.split("\t")
+            if line.startswith("#") or len(cells) < 4:
+                continue
+            if cells[1] == "=":
+                digest = cells[3]
+            elif cells[2].isdigit():
+                files[cells[1]] = (int(cells[2]), cells[3])
+    return files, digest
+
+
+def chat_backup(now: datetime) -> dict:
+    """Today's copy and the ledger lines for it. Runs in a worker thread."""
+    root = chat_backup_dir()
+    folder = root / f"{now:%Y-%m-%d}"
+    if (folder / "chats.sqlite3").exists():  # a second copy the same day (one made up for in the morning, then the
+        folder = root / f"{now:%Y-%m-%d-%H%M%S}"  # evening's): the first stays as the ledger knows it
+    folder.mkdir(parents=True, exist_ok=True)
+    CHATS.backup(folder / "chats.sqlite3")
+    # each file read once: its size, its sum and its copy in the zip are of the same bytes, whatever is appended meanwhile
+    records = [(p.name, p.read_bytes()) for p in sorted(CHAT_RECORD.glob("*.md"))] if CHAT_RECORD.is_dir() else []
+    part = folder / "私信记录.zip.part"
+    with zipfile.ZipFile(part, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data in records:
+            z.writestr(name, data)
+    os.replace(part, folder / "私信记录.zip")
+    ledger = root / CHAT_LEDGER
+    known, before = ledger_read(ledger)
+    stamp = now.isoformat(timespec="seconds")
+    lines = []
+    for name, data in records:
+        name, size, digest = f"私信记录/{name}", len(data), hashlib.sha256(data).hexdigest()
+        old = known.get(name)
+        if old == (size, digest):
+            continue
+        note = "新文件" if not old else "末尾有追加" if hashlib.sha256(data[:old[0]]).hexdigest() == old[1] and \
+            size >= old[0] else "已记过的内容有变化"
+        lines.append(f"{stamp}\t{name}\t{size}\t{digest}\t{note}")
+    for p in (folder / "chats.sqlite3", folder / "私信记录.zip"):
+        lines.append(f"{stamp}\t私信备份/{folder.name}/{p.name}\t{p.stat().st_size}\t{sha256_file(p)}\t当天备份")
+    digest = ledger_digest(before, lines)
+    new = not ledger.exists()
+    torn = not new and ledger.stat().st_size > 0 and not ledger.read_bytes().endswith(b"\n")  # cut off mid-line once
+    with ledger.open("a", encoding="utf-8", newline="\n") as f:
+        f.write(CHAT_LEDGER_HEAD if new else "\n" if torn else "")
+        f.write("\n".join(lines) + f"\n{stamp}\t=\t{len(lines)}\t{digest}\t汇总值\n")
+    changed = [ln.split("\t")[1] for ln in lines if ln.endswith("已记过的内容有变化")]
+    try:  # old copies go last, and never in the way of the copy just made
+        days = sorted(d for d in root.iterdir() if d.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}(-\d{6})?", d.name))
+        keep = set(days[-CHAT_BACKUP_KEEP:])
+        for d in days:  # the first copy of each month stays for good
+            if not any(k.name[:7] == d.name[:7] and k.name < d.name for k in days):
+                keep.add(d)
+        for d in days:
+            if d not in keep:
+                shutil.rmtree(d, ignore_errors=True)
+    except OSError as e:
+        log("chat backup: old copies not cleared", err_text(e))
+    return {"folder": str(folder), "digest": digest, "lines": len(lines), "changed": changed}
+
+
+# The digest leaves this computer by mail where the owner switched that on (settings.json chats.hash_mail): from the
+# primary mailbox to itself. What the mail server keeps of it carries the server's own time and signature, which
+# nobody at this computer can make up afterwards. It is the only thing the chat record ever sends anywhere.
+CHAT_HASH_MAILED = "chat_hash_mailed"  # CHATS kv: the digest of the last run that was mailed
+CHAT_HASH_TRIED = "chat_hash_tried"    # CHATS kv: "<digest> <tries>" of the run whose mail did not get through
+CHAT_HASH_TRIES = 3    # a send with an unknown outcome is not repeated for ever: the next day's digest covers it
+CHAT_HASH_LINES = 200  # ledger lines one mail lists at most
+CHAT_HASH_LATE = 26 * 3600  # seconds a run may wait for its mail before the owner is told
+
+
+def chat_hash_mail_on() -> bool:
+    return CFG["chats"].get("hash_mail") is True and not DEV and not LOGGED_OUT
+
+
+def chat_hash_trouble(since: str, why: str):
+    """A proof that silently stopped being sent is none, so it is said where the owner looks, and said again at every
+    look while it lasts: the field is the sheet's too, and a sheet write that went well empties it."""
+    if not state.get("sheet_error"):
+        state["sheet_error"] = f"私信留存哈希邮件没寄出去（{why}），最早一份是 {since[:16].replace('T', ' ')} 的备份"
+
+
+def ledger_runs(path: Path) -> list[tuple[str, list[str]]]:
+    """The ledger's runs in order: (a run's digest, its lines with the digest line last)."""
+    runs, lines = [], []
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            cells = line.split("\t")
+            if line.startswith("#") or len(cells) < 4 or not cells[3]:  # a line cut off mid-way is no run's
+                continue
+            lines.append(line)
+            if cells[1] == "=":
+                runs.append((cells[3], lines))
+                lines = []
+    return runs
+
+
+def chat_hash_text(runs: list[tuple[str, list[str]]]) -> tuple[str, str]:
+    """(subject, text) of the mail for these runs: the last one's digest, and every line the digests cover."""
+    digest, last = runs[-1]
+    stamp = last[-1].split("\t")[0]
+    lines = [line for _, run in runs for line in run]
+    left_out = max(0, len(lines) - CHAT_HASH_LINES)
+    changed = any(line.endswith("\t已记过的内容有变化") for line in lines)
+    text = "\n".join([
+        "这封信由 KOL Mail 自动发到自己的邮箱，给私信留存留一份带邮件服务器时间的凭证。不用回复，请不要删除。",
+        "",
+        "汇总值（SHA-256）",
+        digest,
+        "",
+        f"生成时间 {stamp}",
+        "汇总值由上一次的汇总值和这一次台账的各行一起算出。日后核对时，打开本机“KOL邮件汇总\\私信备份\\"
+        f"{CHAT_LEDGER}”，找到同一时间、文件一栏是 = 的那一行。两边的值一样，就说明这一行之前记下的私信记录和备份"
+        "没有被改过。",
+        *(["", "注意，这次有文件里已经记过的内容和上次不一样，见下面标着“已记过的内容有变化”的行。"] if changed else []),
+        "",
+        "台账各行，依次是时间、文件、字节数、SHA-256、说明",
+        *([f"（前面还有 {left_out} 行没有列出，见台账）"] if left_out else []),
+        *lines[left_out:],
+    ])
+    return f"KOL Mail 私信留存哈希 {stamp[:10]}", text + "\n"
+
+
+async def chat_hash_send(now: datetime | None = None) -> str:
+    """The ledger's runs that were not mailed yet, in one mail from the primary mailbox to itself. Says what came of
+    it: "" nothing to send (or given up on this run), "sent", "waiting" (the mail backend is away: the next look
+    tries again and no try is counted), "unknown" (it may or may not have gone out: tried again at the next look,
+    CHAT_HASH_TRIES times in all). The try is counted before the mail leaves, so that nothing that goes wrong after
+    it left can have the same run mailed at every look for ever."""
+    if not chat_hash_mail_on():
+        return ""
+    runs = await asyncio.to_thread(ledger_runs, chat_backup_dir() / CHAT_LEDGER)
+    mailed = CHATS.get_kv(CHAT_HASH_MAILED) or ""
+    for i in range(len(runs) - 1, -1, -1):
+        if mailed and runs[i][0] == mailed:
+            runs = runs[i + 1:]
+            break
+    if not runs:
+        return ""
+    digest, since = runs[-1][0], runs[0][1][-1].split("\t")[0]
+    made = chats.parse_time(since)
+    late = made is not None and ((now or datetime.now(autoreply.TZ)) - made).total_seconds() > CHAT_HASH_LATE
+    tried = (CHATS.get_kv(CHAT_HASH_TRIED) or "").split(" ")
+    tries = int(tried[1]) if len(tried) == 2 and tried[0] == digest and tried[1].isdigit() else 0
+    if tries >= CHAT_HASH_TRIES:
+        chat_hash_trouble(since, f"{CHAT_HASH_TRIES} 次都没确认发出，下一次备份后会连同这一份再寄")
+        return ""
+    subject, text = chat_hash_text(runs)
+    CHATS.set_kv(CHAT_HASH_TRIED, f"{digest} {tries + 1}")
+    with on_account(ACCOUNT):
+        me = self_address()
+        try:
+            result = await bg.send(recipients=[me], subject=subject, body=text)
+            delivered = send_outcome(result, [me])[0]
+        except NotReady:  # it never left: the try is given back
+            CHATS.set_kv(CHAT_HASH_TRIED, f"{digest} {tries}")
+            if late:
+                chat_hash_trouble(since, "邮箱一直没连上")
+            return "waiting"
+        except MailError as e:  # the server may have taken it before the connection dropped
+            delivered, result = False, err_text(e)
+    if delivered:
+        log("chat hash mailed", f"digest {digest[:16]}, {len(runs)} run(s)")
+        CHATS.set_kv(CHAT_HASH_MAILED, digest)
+        return "sent"
+    log("chat hash mail not confirmed", f"try {tries + 1} of {CHAT_HASH_TRIES}", result[:200])
+    if tries + 1 >= CHAT_HASH_TRIES or late:
+        chat_hash_trouble(since, f"发送结果不确定：{result[:120]}")
+    return "unknown"
+
+
+CHAT_FILE_LOOKBACK = 300  # messages of a chat looked at for attachments still to copy
+
+
+async def chat_backfill():
+    """Every linked chat whose history, or an edit, 私信记录 does not hold yet is written now, the chats nobody wrote
+    in for weeks too; and an attachment not copied yet (Telegram was not connected, the time ran out) is tried
+    again while it has tries left."""
+    for conv in await asyncio.to_thread(CHATS.convs):
+        if not chat_linked(conv):
+            continue
+        key = conv["key"]
+        try:
+            if CHATS.waiting(key):
+                await chat_record(key)
+            recent = CHATS.messages(key, CHAT_FILE_LOOKBACK)
+            if chat_files_todo(key, recent):
+                await chat_keep_files(conv, recent)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001  the next look tries again
+            log("chat backfill failed", key, err_text(e))
+
+
+async def chat_upkeep_loop():
+    """What keeps the record of the chats whole, every CHAT_BACKUP_EVERY seconds: what 私信记录 is behind with
+    (after a start that is the history from before this version), then the daily copy and its ledger when due."""
+    await asyncio.sleep(20)  # the mail comes first after a start
+    with contextlib.suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(tg.ready.wait(), 60)  # copies of Telegram photos need the login
+    while True:
+        try:
+            if chat_notes_ready():
+                await chat_backfill()
+            now = datetime.now(autoreply.TZ)
+            if chat_backup_due(now, chats.parse_time(CHATS.get_kv(CHAT_BACKUP_AT) or "")):
+                done = await asyncio.to_thread(chat_backup, now)
+                CHATS.set_kv(CHAT_BACKUP_AT, now.isoformat(timespec="seconds"))
+                log("chat backup", done["folder"], f"{done['lines']} ledger line(s), digest {done['digest'][:16]}")
+                if done["changed"]:  # a transcript file's earlier part is not what the ledger knew: said where it is seen
+                    state["sheet_error"] = ("私信记录里已经记过的内容被改动过：" + "、".join(done["changed"][:5])
+                                            + "，详见 私信备份\\" + CHAT_LEDGER)
+                    log("chat backup: RECORDED CONTENT CHANGED", done["changed"])
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001  the next look tries again
+            log("chat upkeep failed", err_text(e))
+        try:  # on its own: a copy that failed never keeps an earlier run's digest from being mailed
+            await chat_hash_send()  # the run just made, or one whose mail did not get through at an earlier look
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001  the next look tries again
+            log("chat hash mail failed", err_text(e))
+            if not state.get("sheet_error"):
+                state["sheet_error"] = f"私信留存哈希邮件没寄出去：{err_text(e)}"
+        await asyncio.sleep(CHAT_BACKUP_EVERY)
 
 
 async def chat_translate(key: str, msgs: list[dict]) -> int:
@@ -9659,8 +10218,7 @@ def ext_store(key: str, peer: dict, msgs: list[dict]) -> int:
                       username=peer.get("username"))
     new = CHATS.add_messages(key, msgs)
     chat_autolink(key)
-    if new:
-        spawn(chat_record(key), "记录私信")
+    chat_after_store(key, msgs, bool(new))
     return len(new)
 
 
@@ -9896,7 +10454,8 @@ async def lifespan(app):
     loops = [] if LOGGED_OUT else [mail.run(), bg.run(), finder.run(), translator_loop(), prefetch_loop()]
     if not DEV and not LOGGED_OUT:  # a dev copy next to the real service must never answer, notify, log or send anything
         loops += [scan_loop(), tg.run(), telegram_loop(), sheet_loop(), sheet_channels_loop(), mobile_loop(),
-                  case_worker(), awake_loop(), tg_sync_loop(), popo_sync_loop(), telegram_speedup(), learning_loop()]
+                  case_worker(), awake_loop(), tg_sync_loop(), popo_sync_loop(), telegram_speedup(), learning_loop(),
+                  chat_upkeep_loop()]
         if server_move().get("accounts"):
             loops.append(fold_loop())
     if not DEV or os.environ.get("KOL_PET") == "1":  # a dev copy shows its own pet only when asked

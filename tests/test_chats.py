@@ -208,8 +208,11 @@ def test_a_linked_chat_writes_its_runs_to_the_sheet_and_the_transcript(store, tm
         ("in", "对方消息：你好，价格多少？", "K0103", "Discord"), ("out", "我方消息：你好，我们按条付费", "K0103", "Discord")]
     assert posted[0]["chat"] == f"dc:{PEER}(PixelFox_)" and posted[0]["email"] == "pixelfox@example.com"
     assert posted[0]["message_id"] == f"{KEY}:2"
-    assert all(m["logged"] for m in store.messages(KEY))  # the 10-day-old one was skipped, not logged
-    assert "ancient" not in "".join(p.read_text(encoding="utf-8") for p in (tmp_path / "私信记录").glob("*.md"))
+    assert all(m["logged"] for m in store.messages(KEY))  # the 10-day-old one was skipped: never in the sheet
+    # ... but 私信记录 holds the whole history of a linked chat, the old message under its own day
+    files = sorted((tmp_path / "私信记录").glob("*.md"))
+    assert len(files) == 2 and "ancient" in files[0].read_text(encoding="utf-8")
+    assert "ancient" not in files[1].read_text(encoding="utf-8")
     posted.clear()
     asyncio.run(app.chat_record(KEY))
     assert posted == []  # each message once

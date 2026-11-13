@@ -7,6 +7,11 @@
  */
 "use strict";
 
+// The files this worker was started from. content.js carries the same number (test/background.test.js keeps them
+// equal): Chrome goes on running the worker it cached when the extension's files change on disk (an update of
+// KOL Mail), while every page gets the new content.js. A page that finds another number here asks for "reload".
+const BUILD = 2;
+const RELOADED_FOR = "reloaded_for"; // storage.local: the content.js build the extension last restarted itself for
 const DEFAULT_PORT = 8765;
 const TIMEOUT_MS = 15000;
 const OPS = new Set(["hello", "sync", "queue", "queue/update", "feed"]);
@@ -29,6 +34,7 @@ const ERR = {
   badReply: "KOL Mail 返回的内容看不懂，可能需要更新 KOL Mail",
   internal: "扩展内部出错，刷新页面再试",
   elsewhere: "这个页面现在不在这个私信上，切回去再试",
+  stale: "扩展后台和页面脚本不是同一版，到 chrome://extensions 给这个扩展点重新加载",
 };
 
 // Content scripts must not read the token: only this worker and the popup may use storage.local.
@@ -317,6 +323,22 @@ async function handle(msg, sender, kind) {
       if (kind !== "discord") return { ok: false, error: ERR.internal };
       await chrome.storage.local.set({ ui_collapsed: !!msg.collapsed });
       return { ok: true };
+    case "build":
+      if (kind !== "discord") return { ok: false, error: ERR.internal };
+      return { ok: true, data: { build: BUILD } };
+    case "reload": {
+      // A page whose content.js is another build than this worker: the extension restarts itself, which makes
+      // Chrome read every file again. Once per build: if the numbers still differ after that (the files on disk
+      // do not belong together), restarting again would never end, and the page is told to say so instead.
+      const theirs = msg.build;
+      if (kind !== "discord" || !Number.isInteger(theirs) || theirs < 1) return { ok: false, error: ERR.internal };
+      if (theirs === BUILD) return { ok: true, data: { reloading: false } };
+      const s = await chrome.storage.local.get(RELOADED_FOR);
+      if (s[RELOADED_FOR] === theirs) return { ok: false, code: "stale", error: ERR.stale };
+      await chrome.storage.local.set({ [RELOADED_FOR]: theirs });
+      setTimeout(() => chrome.runtime.reload(), 200); // after this answer went out
+      return { ok: true, data: { reloading: true } };
+    }
     default:
       return { ok: false, error: ERR.internal };
   }

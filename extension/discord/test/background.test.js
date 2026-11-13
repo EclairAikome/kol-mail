@@ -70,7 +70,8 @@ function load(settings, opts) {
   };
   if (!(opts && opts.noAccessLevel)) localArea.setAccessLevel = async (o) => { access.push(o.accessLevel); };
   const chrome = {
-    runtime: { id: "ext", getURL: (p) => "chrome-extension://ext/" + p, onMessage: { addListener: (fn) => (listener = fn) } },
+    runtime: { id: "ext", getURL: (p) => "chrome-extension://ext/" + p, onMessage: { addListener: (fn) => (listener = fn) },
+      reload: () => { actions.push(["reload"]); } },
     storage: {
       local: localArea,
       session: {
@@ -332,6 +333,53 @@ test("open KOL Mail: reuse a tab, else create one", async () => {
   const bg2 = load({ token: TOKEN });
   await bg2.send({ type: "open", channel_id: CH }, DISCORD);
   assert.deepEqual(bg2.actions.at(-1), ["create", `http://127.0.0.1:8765/#chat=dc:${CH}`]); // default port
+});
+
+test("build: the worker and content.js carry the same number, and the worker tells a Discord page its own", async () => {
+  const { Core } = require(path.join(__dirname, "..", "content.js"));
+  const src = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8");
+  assert.equal(Number(/^const BUILD = (\d+);$/m.exec(src)[1]), Core.BUILD);
+  const bg = load({ token: TOKEN, port });
+  assert.deepEqual(plain(await bg.send({ type: "build" }, DISCORD)), { ok: true, data: { build: Core.BUILD } });
+  assert.equal((await bg.send({ type: "build" }, POPUP)).ok, false);
+  assert.equal(Core.buildVerdict(plain(await bg.send({ type: "build" }, DISCORD))), "same");
+});
+
+test("reload: a page with another build restarts the extension, once per build", async () => {
+  const { Core } = require(path.join(__dirname, "..", "content.js"));
+  const settle = () => new Promise((r) => setTimeout(r, 300));
+  const newer = Core.BUILD + 1;
+  const bg = load({ token: TOKEN, port });
+  assert.deepEqual(plain(await bg.send({ type: "reload", build: Core.BUILD }, DISCORD)), { ok: true, data: { reloading: false } });
+  for (const bad of [undefined, "3", 0, 1.5]) assert.equal((await bg.send({ type: "reload", build: bad }, DISCORD)).ok, false);
+  assert.equal((await bg.send({ type: "reload", build: newer }, POPUP)).ok, false); // only a Discord page may ask
+  await settle();
+  assert.deepEqual(bg.actions, []);
+  assert.deepEqual(plain(await bg.send({ type: "reload", build: newer }, DISCORD)), { ok: true, data: { reloading: true } });
+  await settle();
+  assert.deepEqual(bg.actions, [["reload"]]);
+  // The worker that starts after the restart still has another number (the files on disk do not belong together):
+  // it does not restart again for the same page build, and says why.
+  const after = load(bg.local);
+  const r = plain(await after.send({ type: "reload", build: newer }, DISCORD));
+  assert.deepEqual([r.ok, r.code], [false, "stale"]);
+  assert.match(r.error, /chrome:\/\/extensions/);
+  await settle();
+  assert.deepEqual(after.actions, []);
+  assert.equal((await after.send({ type: "reload", build: newer + 1 }, DISCORD)).ok, true); // a later update: again
+  await settle();
+  assert.deepEqual(after.actions, [["reload"]]);
+  assert.equal(after.local.token, TOKEN); // nothing else in storage is touched
+});
+
+test("a worker from before the question existed reads as old, no answer at all as unknown", () => {
+  const { Core } = require(path.join(__dirname, "..", "content.js"));
+  assert.equal(Core.buildVerdict({ ok: false, error: "扩展内部出错，刷新页面再试" }), "old"); // 0.7 to 1.0's default branch
+  assert.equal(Core.buildVerdict({ ok: true, data: { build: Core.BUILD - 1 } }), "old");
+  assert.equal(Core.buildVerdict({ ok: true, data: {} }), "old");
+  assert.equal(Core.buildVerdict({ ok: false, error: "", code: "dead" }), "unknown");
+  assert.equal(Core.buildVerdict({ ok: false, error: "扩展后台没响应，刷新页面再试", code: "ext" }), "unknown");
+  assert.equal(Core.buildVerdict(null), "unknown");
 });
 
 test("conversation memory and the panel's collapsed state", async () => {

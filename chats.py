@@ -5,6 +5,10 @@ shows them in the 私信 view, drafts replies the way it drafts mail, and writes
 to a KOL总表 row to the sheet's 沟通记录 and to the transcript the 9:40/17:00 triage reads. Nothing is sent from
 here: app.py sends Telegram messages, and the extension fills Discord's input box for the owner to send.
 
+What is kept is kept against the other side changing its mind: a message read again with other words keeps its
+earlier words in msg_edit, the transcript holds a linked chat's whole history (msg.noted, apart from msg.logged,
+which is the sheet's), and msg_file names the copy of each attachment app.py saved.
+
 A conversation is keyed "tg:<chat id>" or "dc:<DM channel id>". Its peer token, "tg:<user id>(@username)" or
 "dc:<user id>(name)", is what the sheet's 聊天账号 column holds (kol-sheet\\kol.py and sheet/usersheet.py match on the
 part before the bracket)."""
@@ -33,6 +37,8 @@ QUEUE_MAX = 12           # messages one draft may hand to Discord
 QUEUE_TTL = timedelta(hours=6)  # a Discord draft not sent by then is stale: the extension never fills it
 PART_MAX = {"telegram": 4000, "discord": 1900}  # one chat message (Telegram's limit is 4096, Discord's 2000)
 EXTRA_FIELD_MAX = 2000   # characters of one string in a message's extra (a voice transcript, a link preview)
+RECONCILED = "noted_reconciled"  # kv: "1" once msg.noted was set from the transcript files (Store.reconcile)
+EDITS_MAX = 20           # edits of one message kept one by one; past that a change already kept is not kept again
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS conv (
@@ -42,8 +48,17 @@ CREATE TABLE IF NOT EXISTS conv (
   created_at TEXT NOT NULL, no_autolink INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS msg (
   conv TEXT NOT NULL, id TEXT NOT NULL, at TEXT NOT NULL, out INTEGER NOT NULL, author TEXT, text TEXT,
-  extra TEXT, zh TEXT, logged INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (conv, id));
+  extra TEXT, zh TEXT, logged INTEGER NOT NULL DEFAULT 0, noted INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (conv, id));
 CREATE INDEX IF NOT EXISTS msg_at ON msg (conv, at);
+CREATE TABLE IF NOT EXISTS msg_edit (
+  n INTEGER PRIMARY KEY AUTOINCREMENT, conv TEXT NOT NULL, id TEXT NOT NULL, found_at TEXT NOT NULL,
+  old_text TEXT, old_extra TEXT, new_text TEXT, real INTEGER NOT NULL DEFAULT 1,
+  noted INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS msg_edit_conv ON msg_edit (conv, id);
+CREATE TABLE IF NOT EXISTS msg_file (
+  conv TEXT NOT NULL, id TEXT NOT NULL, n INTEGER NOT NULL, name TEXT, path TEXT, sha256 TEXT, size INTEGER,
+  saved_at TEXT, error TEXT, tries INTEGER NOT NULL DEFAULT 0, src TEXT, PRIMARY KEY (conv, id, n));
 CREATE TABLE IF NOT EXISTS outbox (
   id INTEGER PRIMARY KEY AUTOINCREMENT, conv TEXT NOT NULL, batch TEXT NOT NULL, n INTEGER NOT NULL,
   of_n INTEGER NOT NULL, text TEXT NOT NULL, zh TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -216,27 +231,81 @@ def describe_extra(m: dict) -> str:
     return ""
 
 
-def transcript_line(conv: dict, m: dict, tz: timezone) -> str:
-    """One row of 私信记录\\<date>.md, the file the triage task reads: local time, channel, KOL, side, text."""
-    at = (parse_time(m["at"]) or datetime.now(timezone.utc)).astimezone(tz)
-    text = clean_text(m.get("text")) or describe_extra(m) or "（没有文字）"
-    # splitlines also breaks at U+2028 and the like: a reader splitting lines must never see a row of its own
-    text = " / ".join(s.strip() for s in text.replace("|", "｜").splitlines() if s.strip())[:1000]
+def file_names(m: dict) -> list[str]:
+    """What a message carries besides its words, by name: a Discord message's attachments, or what telegram-mcp
+    calls a Telegram message's media ("photo", "document: rates.pdf")."""
+    extra = m.get("extra") or {}
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra)
+        except ValueError:
+            extra = {}
+    if not isinstance(extra, dict):
+        return []
+    if isinstance(extra.get("attachments"), list):
+        return [plain(a.get("name"), 120) or "file" for a in extra["attachments"] if isinstance(a, dict)]
+    return [plain(extra["media"], 120)] if extra.get("media") else []
+
+
+def one_line(text, limit: int) -> str:
+    """Text as one cell of the transcript's table: no pipe, no line break. splitlines also breaks at U+2028 and
+    the like: a reader splitting lines must never see a row of its own."""
+    return " / ".join(s.strip() for s in str(text or "").replace("|", "｜").splitlines() if s.strip())[:limit]
+
+
+def row(conv: dict, at: datetime, out: bool, content: str) -> str:
     who = plain(conv.get("kol_name") or conv.get("peer_name"), 60).replace("|", "｜")
     return (f"| {at:%Y-%m-%d %H:%M} | {LABELS[channel_of(conv['key'])]} | {conv.get('kol_id') or '-'} | {who} "
-            f"| {'发' if m['out'] else '收'} | {text} |")
+            f"| {'发' if out else '收'} | {content} |")
+
+
+OWN_MARKS = re.compile(r"【(已编辑|旧文本|新文本|附件补存)】")  # what only KOL Mail's own rows say
+
+
+def not_ours(text: str) -> str:
+    """Words from a chat in which one of the transcript's own marks stands: the mark is written with other
+    brackets, so a message can never pass for a row saying a message was edited. Nothing else is changed."""
+    return OWN_MARKS.sub(r"〔\1〕", text)
+
+
+def transcript_line(conv: dict, m: dict, tz: timezone, files: str = "", legacy: bool = False) -> str:
+    """One row of 私信记录\\<date>.md, the file the triage task reads: local time, channel, KOL, side, text.
+    files: what app.py says of the message's attachments (their names, and where the copies are); it follows the
+    words. legacy: the row as the version before wrote it, which is what reconcile matches on."""
+    at = (parse_time(m["at"]) or datetime.now(timezone.utc)).astimezone(tz)
+    words = one_line(clean_text(m.get("text")), 1000)
+    mark = one_line(files, 500) if files else ("" if words else one_line(describe_extra(m), 200))
+    content = " ".join(x for x in (words, mark) if x) or "（没有文字）"
+    return row(conv, at, m["out"], content if legacy else not_ours(content))
+
+
+def edit_line(conv: dict, e: dict, tz: timezone) -> str:
+    """The row that says a message was edited (e: a msg_edit row with its message's at and out). It stands under
+    the day the edit was found; the row written when the message first came stays as it is."""
+    found = (parse_time(e["found_at"]) or datetime.now(timezone.utc)).astimezone(tz)
+    sent = (parse_time(e["at"]) or found).astimezone(tz)
+    old, new = (not_ours(one_line(clean_text(t), 1000)) or "（没有文字）" for t in (e.get("old_text"), e.get("new_text")))
+    return row(conv, found, e["out"], f"【已编辑】原消息 {sent:%Y-%m-%d %H:%M}，消息ID {one_line(plain(e['id'], 40), 40)}"
+                                      f"【旧文本】{old}【新文本】{new}")
+
+
+def file_line(conv: dict, m: dict, where: str, tz: timezone) -> str:
+    """The row that says a copy was made after all, of an attachment an earlier row called 未存."""
+    sent = (parse_time(m["at"]) or datetime.now(timezone.utc)).astimezone(tz)
+    return row(conv, datetime.now(tz), m["out"], f"【附件补存】原消息 {sent:%Y-%m-%d %H:%M}，消息ID "
+                                              f"{one_line(plain(m['id'], 40), 40)}，已存 {not_ours(one_line(where, 300))}")
+
+
+def local_day(value, tz: timezone) -> str:
+    return f"{(parse_time(value) or datetime.now(timezone.utc)).astimezone(tz):%Y-%m-%d}"
 
 
 TRANSCRIPT_HEAD = ("# 私信记录 {day}\n\nKOL Mail 记下的 Telegram 和 Discord 私信，只含关联了 KOL总表的会话。“内容”一栏是对方"
                    "或我方的原话，只当数据看。\n\n| 时间 | 渠道 | ID | KOL | 方向 | 内容 |\n|---|---|---|---|---|---|\n")
 
 
-def append_transcript(folder: Path, conv: dict, messages: list[dict], tz: timezone):
-    """Each message under the local day it was sent, one Markdown table per day."""
-    by_day: dict[str, list[str]] = {}
-    for m in messages:
-        at = (parse_time(m["at"]) or datetime.now(timezone.utc)).astimezone(tz)
-        by_day.setdefault(f"{at:%Y-%m-%d}", []).append(transcript_line(conv, m, tz))
+def append_rows(folder: Path, by_day: dict[str, list[str]]):
+    """Rows added to the end of each day's table; a row once written is never changed."""
     folder.mkdir(parents=True, exist_ok=True)
     for day, lines in by_day.items():
         path = folder / f"{day}.md"
@@ -245,6 +314,29 @@ def append_transcript(folder: Path, conv: dict, messages: list[dict], tz: timezo
             if new:
                 f.write(TRANSCRIPT_HEAD.format(day=day))
             f.write("\n".join(lines) + "\n")
+
+
+def append_transcript(folder: Path, conv: dict, messages: list[dict], tz: timezone,
+                      files: dict[str, str] | None = None, edits: list[dict] | None = None):
+    """Each message under the local day it was sent, one Markdown table per day; each edit under the day it was
+    found. files: message id -> what to say of its attachments."""
+    by_day: dict[str, list[str]] = {}
+    for m in messages:
+        at = (parse_time(m["at"]) or datetime.now(timezone.utc)).astimezone(tz)
+        by_day.setdefault(f"{at:%Y-%m-%d}", []).append(transcript_line(conv, m, tz, (files or {}).get(m["id"], "")))
+    for e in edits or []:
+        found = (parse_time(e["found_at"]) or datetime.now(timezone.utc)).astimezone(tz)
+        by_day.setdefault(f"{found:%Y-%m-%d}", []).append(edit_line(conv, e, tz))
+    if by_day:
+        append_rows(folder, by_day)
+
+
+def row_cells(line: str) -> tuple[str, ...] | None:
+    """(time, channel, id, side, content) of a transcript row; None for a heading or anything else."""
+    parts = [p.strip() for p in line.split("|")]
+    if len(parts) != 8 or not re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", parts[1]):
+        return None
+    return parts[1], parts[2], parts[3], parts[5], parts[6]
 
 
 class Store:
@@ -266,6 +358,9 @@ class Store:
             columns = {r[1] for r in self.db.execute("PRAGMA table_info(conv)")}
             if "no_autolink" not in columns:  # a store from before 0.7.0's review
                 self.db.execute("ALTER TABLE conv ADD COLUMN no_autolink INTEGER NOT NULL DEFAULT 0")
+            if "noted" not in {r[1] for r in self.db.execute("PRAGMA table_info(msg)")}:
+                # a store from before the transcript had a mark of its own: reconcile() finds what is in it
+                self.db.execute("ALTER TABLE msg ADD COLUMN noted INTEGER NOT NULL DEFAULT 0")
 
     def _all(self, sql: str, args=()) -> list[dict]:
         with self.lock:
@@ -334,7 +429,8 @@ class Store:
 
     def add_messages(self, key: str, messages: list[dict]) -> list[dict]:
         """Store messages ({"id", "at", "out", "author", "text", "extra"}); returns the ones not seen before, oldest
-        first. A message seen again with other text (edited) is updated, and counts as new only once."""
+        first. A message seen again with other text (edited) is updated, and counts as new only once; the words it
+        had before stay in msg_edit."""
         added = []
         with self.lock:
             self.db.execute("BEGIN")  # one commit for the lot, with conv's last_* times in the same transaction
@@ -354,12 +450,14 @@ class Store:
                     if cur.rowcount:
                         added.append({"conv": key, "id": mid, "at": at, "out": bool(m.get("out")),
                                       "author": plain(m.get("author"), 80), "text": text, "extra": extra_obj,
-                                      "zh": None, "logged": 0})
+                                      "zh": None, "logged": 0, "noted": 0})
                     else:  # edited since, or a transcript / link preview came later: keep the newest; a changed
                         # text loses the translation of the old words (same_words: not for a mark or a space)
                         old = self.db.execute("SELECT text, extra, zh FROM msg WHERE conv=? AND id=?",
                                               (key, mid)).fetchone()
                         if old and (old[0] != text or old[1] != extra):
+                            if (old[0] or "") != text:
+                                self._keep_edit(key, mid, old[0] or "", old[1], text)
                             self.db.execute("UPDATE msg SET zh=?, text=?, extra=? WHERE conv=? AND id=?",
                                             (old[2] if same_words(old[0], text) else None, text, extra, key, mid))
                 if added:
@@ -373,6 +471,50 @@ class Store:
                 raise
         return added
 
+    def _keep_edit(self, key: str, mid: str, old_text: str, old_extra, new_text: str):
+        """Inside add_messages' transaction: the words a message had before it was read with others. real is 0 when
+        only the drawing differs (same_words: Discord's page and Discord's data), which is kept but is no edit to
+        tell anyone of. Every real edit is kept, also back to words the message had before (a price changed and
+        changed back). Only where two readings take turns is the same change kept once: a change of drawing, or
+        a message with EDITS_MAX changes already, which no person made."""
+        real = 0 if same_words(old_text, new_text) else 1
+        if not real or self.db.execute("SELECT COUNT(*) FROM msg_edit WHERE conv=? AND id=?",
+                                       (key, mid)).fetchone()[0] >= EDITS_MAX:
+            if self.db.execute("SELECT 1 FROM msg_edit WHERE conv=? AND id=? AND old_text=? AND new_text=? LIMIT 1",
+                               (key, mid, old_text, new_text)).fetchone():
+                return
+        self.db.execute("INSERT INTO msg_edit (conv, id, found_at, old_text, old_extra, new_text, real) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)", (key, mid, now(), old_text, old_extra, new_text, real))
+
+    def edits(self, key: str, mid: str | None = None, waiting: bool = False) -> list[dict]:
+        """A chat's kept edits, oldest first, each with its message's time and side; of one message with mid;
+        waiting: only the real ones the transcript does not tell of yet."""
+        sql = ("SELECT e.*, m.at AS at, m.out AS out FROM msg_edit e JOIN msg m ON m.conv = e.conv AND m.id = e.id "
+               "WHERE e.conv=?")
+        args: list = [key]
+        if mid is not None:
+            sql, args = sql + " AND e.id=?", args + [str(mid)]
+        if waiting:
+            sql += " AND e.real=1 AND e.noted=0"
+        rows = self._all(sql + " ORDER BY e.n", args)
+        for r in rows:
+            r["out"] = bool(r["out"])
+        return rows
+
+    def mark_edits_noted(self, ns: list[int]):
+        with self.lock:
+            self.db.executemany("UPDATE msg_edit SET noted=1 WHERE n=?", [(n,) for n in ns])
+
+    @staticmethod
+    def _parsed(rows: list[dict]) -> list[dict]:
+        for r in rows:
+            r["out"] = bool(r["out"])
+            try:
+                r["extra"] = json.loads(r["extra"] or "{}")
+            except ValueError:
+                r["extra"] = {}
+        return rows
+
     def messages(self, key: str, limit: int = 80, before: str | None = None) -> list[dict]:
         """The newest `limit` messages, oldest first; with before (a message id), the ones older than that message,
         which is how the page reaches the start of a long chat a screenful at a time."""
@@ -384,13 +526,7 @@ class Store:
                 return []
             rows = self._all("SELECT * FROM msg WHERE conv=? AND (at < ? OR (at = ? AND id < ?)) "
                              "ORDER BY at DESC, id DESC LIMIT ?", (key, edge["at"], edge["at"], edge["id"], limit))
-        for r in rows:
-            r["out"] = bool(r["out"])
-            try:
-                r["extra"] = json.loads(r["extra"] or "{}")
-            except ValueError:
-                r["extra"] = {}
-        return rows[::-1]
+        return self._parsed(rows)[::-1]
 
     def count(self, key: str) -> int:
         return (self._one("SELECT COUNT(*) AS n FROM msg WHERE conv=?", (key,)) or {}).get("n", 0)
@@ -432,8 +568,111 @@ class Store:
                   (key, after.astimezone(timezone.utc).isoformat()))
 
     def skip_old(self, key: str, before: datetime):
-        """On linking: what is older than the backfill window never goes to the sheet."""
+        """On linking: what is older than the backfill window never goes to the sheet. (The transcript takes it all
+        the same: noted is not touched.)"""
         self._run("UPDATE msg SET logged=1 WHERE conv=? AND at<?", (key, before.astimezone(timezone.utc).isoformat()))
+
+    # ---------------------------------------------------------------- the transcript's own mark
+
+    def unnoted(self, key: str) -> list[dict]:
+        """Every message of the chat the transcript does not hold yet, oldest first: a chat's whole history when
+        it is linked, however old."""
+        return self._parsed(self._all("SELECT * FROM msg WHERE conv=? AND noted=0 ORDER BY at, id", (key,)))
+
+    def mark_noted(self, key: str, ids: list[str]):
+        with self.lock:
+            self.db.executemany("UPDATE msg SET noted=1 WHERE conv=? AND id=?", [(key, i) for i in ids])
+
+    def waiting(self, key: str) -> bool:
+        """Whether the transcript is behind for this chat: a message or a real edit it does not tell of."""
+        row = self._one("SELECT EXISTS(SELECT 1 FROM msg WHERE conv=? AND noted=0) OR "
+                        "EXISTS(SELECT 1 FROM msg_edit WHERE conv=? AND real=1 AND noted=0) AS w", (key, key))
+        return bool(row and row["w"])
+
+    def reconcile(self, folder: Path, tz: timezone) -> tuple[int, int] | None:
+        """Once, for a store from before msg.noted: every message whose row is in the transcript files is marked
+        noted, so only what is missing gets written. A row is matched by its time, channel, side and words, first
+        with the KOL id it would carry now, then without (the chat may have been linked to another row then).
+        Only a message the version before had logged can be in the files: it wrote the row and the mark together.
+        Returns (found, missing), or None when this store was reconciled before. OSError when the files cannot be
+        read now (the folder's drive is away, a file is locked or is not text): nothing is marked and the next
+        call tries again, since going on would write every message a second time."""
+        if self.get_kv(RECONCILED) == "1":
+            return None
+        if not folder.is_dir() and not folder.parent.is_dir():
+            raise OSError(f"{folder.parent} is not there")  # not "nothing written yet": the place itself is away
+        have: dict[tuple, int] = {}
+        for path in sorted(folder.glob("*.md")) if folder.is_dir() else []:
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except UnicodeDecodeError as e:
+                raise OSError(f"{path.name} is not UTF-8 text: {e}") from e
+            for line in lines:
+                cells = row_cells(line)
+                if cells:
+                    have[cells] = have.get(cells, 0) + 1
+        loose: dict[tuple, int] = {}
+        todo, found = [], []
+        for conv in self._all("SELECT * FROM conv"):
+            for m in self._parsed(self._all("SELECT * FROM msg WHERE conv=? AND noted=0 AND logged=1 ORDER BY at, id",
+                                            (conv["key"],))):
+                cells = row_cells(transcript_line(conv, m, tz, legacy=True))
+                if cells and have.get(cells):
+                    have[cells] -= 1
+                    found.append((conv["key"], m["id"]))
+                else:
+                    todo.append((conv["key"], m["id"], cells))
+        for cells, n in have.items():
+            if n:
+                k = cells[:2] + cells[3:]
+                loose[k] = loose.get(k, 0) + n
+        missing = 0
+        for key, mid, cells in todo:
+            k = cells[:2] + cells[3:] if cells else None
+            if k and loose.get(k):
+                loose[k] -= 1
+                found.append((key, mid))
+            else:
+                missing += 1
+        with self.lock:
+            self.db.execute("BEGIN")
+            try:
+                self.db.executemany("UPDATE msg SET noted=1 WHERE conv=? AND id=?", found)
+                self.db.execute("INSERT INTO kv (k, v) VALUES (?, '1') ON CONFLICT(k) DO UPDATE SET v='1'",
+                                (RECONCILED,))
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+        row = self._one("SELECT COUNT(*) AS n FROM msg WHERE noted=0")
+        return len(found), row["n"] if row else missing
+
+    # ---------------------------------------------------------------- copies of attachments
+
+    def files(self, key: str, mid: str | None = None) -> list[dict]:
+        """What is known of the chat's attachments (of one message with mid): the copy's path, size and SHA-256
+        once saved, or why it is not and how often it was tried."""
+        if mid is None:
+            return self._all("SELECT * FROM msg_file WHERE conv=? ORDER BY id, n", (key,))
+        return self._all("SELECT * FROM msg_file WHERE conv=? AND id=? ORDER BY n", (key, str(mid)))
+
+    def file_saved(self, key: str, mid: str, n: int, name: str, path: str, sha256: str, size: int):
+        self._run("INSERT INTO msg_file (conv, id, n, name, path, sha256, size, saved_at, error, tries) "
+                  "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 1) ON CONFLICT(conv, id, n) DO UPDATE SET name=excluded.name, "
+                  "path=excluded.path, sha256=excluded.sha256, size=excluded.size, saved_at=excluded.saved_at, "
+                  "error=NULL, tries=tries+1", (key, str(mid), n, name, path, sha256, size, now()))
+
+    def file_failed(self, key: str, mid: str, n: int, name: str, error: str, src: str = ""):
+        """A copy that could not be made; one already made is never set aside by a later failure. src: the address
+        it was asked from (a Discord attachment's address stops working within a day; a reading of the chat
+        that brings another address is a new chance, whatever the number of tries)."""
+        self._run("INSERT INTO msg_file (conv, id, n, name, error, tries, src) VALUES (?, ?, ?, ?, ?, 1, ?) "
+                  "ON CONFLICT(conv, id, n) DO UPDATE SET error=excluded.error, tries=tries+1, src=excluded.src "
+                  "WHERE path IS NULL", (key, str(mid), n, name, plain(error, 300), src))
+
+    def message(self, key: str, mid: str) -> dict | None:
+        rows = self._parsed(self._all("SELECT * FROM msg WHERE conv=? AND id=?", (key, str(mid))))
+        return rows[0] if rows else None
 
     # ---------------------------------------------------------------- Discord send queue
 
@@ -485,6 +724,20 @@ class Store:
                               (status, now(), key, item_id)))
 
     # ---------------------------------------------------------------- small state
+
+    def backup(self, dest: Path):
+        """A whole copy of the store as it is now (sqlite's own backup, safe while the store is in use), written
+        next to dest first and moved over it once complete."""
+        part = dest.with_name(dest.name + ".part")
+        with contextlib.suppress(OSError):
+            part.unlink()
+        out = sqlite3.connect(str(part))
+        try:
+            with self.lock:
+                self.db.backup(out)
+        finally:
+            out.close()
+        os.replace(part, dest)
 
     def get_kv(self, k: str) -> str | None:
         row = self._one("SELECT v FROM kv WHERE k=?", (k,))

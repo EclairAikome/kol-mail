@@ -63,6 +63,10 @@ DEFAULTS = {
     "onboarding": {
         "done": False,               # the signature and own negotiation style were saved once in the page
     },
+    "chats": {
+        "hash_mail": False,          # true: after each daily copy of the private chats (私信备份), the ledger's
+                                     # digest is mailed from the primary mailbox to itself
+    },
     "update": {
         "repo": "",                  # owner/name on GitHub
         "enabled": True,

@@ -334,10 +334,23 @@
     return lines.length ? tidyText(lines.join("\n")) : extractText(editor, { editor: true });
   }
 
+  // The files this script came with; background.js carries the same number (see there).
+  const BUILD = 2;
+
+  /**
+   * What the background's answer to { type: "build" } says of it: "same" when it is the worker these files came
+   * with, "unknown" when no answer came (the extension is restarting, or was), else "old". A worker from before
+   * the question existed answers it as it answers anything it does not know: an error without a code.
+   */
+  function buildVerdict(r) {
+    if (!r || r.code === "dead" || r.code === "ext") return "unknown";
+    return r.ok === true && r.data && r.data.build === BUILD ? "same" : "old";
+  }
+
   const Core = {
     parseDmPath, userIdFromAvatar, cleanName, parseLabelledBy, tidyText, normForMatch, looseKey, textsMatch,
     similarity, cmpId, atFromSnowflake, collectAttachments, resolveAuthors, classifyOut, buildMessages, countOthers,
-    pickPeer, decideSent, decideAutoFill, decideVanished, extractText, editorTextOf,
+    pickPeer, decideSent, decideAutoFill, decideVanished, extractText, editorTextOf, buildVerdict, BUILD,
   };
 
   // =================================================================================== Dom
@@ -610,6 +623,7 @@
     finalIds: new Set(),  // marked sent or dropped here: hidden even if a stale queue still lists them
     notice: null,         // { text, copyText?, warn? }
     group: false,         // a group DM: neither synced nor filled
+    stale: false,         // the background is an older build than this script and could not restart itself
     collapsed: false,
     lastSyncKey: "",
     lastSyncAt: 0,
@@ -728,6 +742,24 @@
   function scheduleSync(ms) {
     clearTimeout(S.timers.sync);
     S.timers.sync = setTimeout(() => doSync(false), ms);
+  }
+
+  /**
+   * Chrome keeps running the service worker it cached when the extension's files change on disk (an update of
+   * KOL Mail): this script is the new one, the worker is not, and it refuses what it does not know. For weeks
+   * that was the feed, silently: only the DMs the owner opened were read. An older worker that knows "reload"
+   * restarts the extension (this page then says to refresh); one from before cannot, and the panel says what
+   * to click.
+   */
+  async function checkBuild(again) {
+    const verdict = buildVerdict(await ask({ type: "build" }));
+    if (verdict === "unknown" && !again && !S.dead) setTimeout(() => checkBuild(true), 5000); // the worker was asleep
+    if (verdict !== "old") return;
+    const r = await ask({ type: "reload", build: BUILD });
+    if (S.dead || r.code === "dead" || r.code === "ext") return;
+    if (r.ok) return; // restarting: the next request finds the extension gone and the panel says to refresh
+    S.stale = true;
+    render();
   }
 
   function tick() {
@@ -1274,6 +1306,7 @@
       filled: S.filled ? S.filled.itemId : null,
       notice: S.notice,
       group: S.group,
+      stale: S.stale,
       feed: F.ready,
     };
     const key = JSON.stringify(view);
@@ -1293,6 +1326,7 @@
     if (S.collapsed) {
       const pill = h("div", { class: "pill", title: "展开" }, h("span", { class: dotClass }), "KOL Mail");
       if (S.items.length) pill.appendChild(h("span", { class: "badge", text: `${S.items.length} 条待发` }));
+      if (S.stale) pill.appendChild(h("span", { class: "badge", text: "扩展要重新加载" }));
       pill.addEventListener("mousedown", (e) => e.preventDefault());
       pill.addEventListener("click", toggleCollapsed);
       ui.wrap.appendChild(pill);
@@ -1308,6 +1342,11 @@
         text: F.ready ? "已连接 KOL Mail，所有私信的新消息都在同步" : "已连接 KOL Mail" }));
     }
     else body.appendChild(h("div", { class: "err-text", text: S.conn.error }));
+
+    if (S.stale) {
+      body.appendChild(h("div", { class: "notice warn", text: "扩展后台还是旧版，没点开的私信收不到。打开 chrome://extensions，" +
+        "在“KOL Mail Discord 私信助手”上点重新加载，再刷新这个页面。" }));
+    }
 
     if (S.group) {
       body.appendChild(h("div", { class: "notice", text: "这是群聊私信，扩展在这里不同步，也不填入" }));
@@ -1401,4 +1440,5 @@
   window.postMessage({ source: FEED_TAG, from: "ext", kind: "hello" }, location.origin);
   S.timers.tick = setInterval(tick, TICK_MS);
   tick();
+  checkBuild();
 })();
