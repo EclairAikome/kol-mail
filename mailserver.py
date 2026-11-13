@@ -154,7 +154,7 @@ def patch() -> bool:
 
 # ---------------------------------------------------------------- searching a server without text search
 
-# Alibaba Mail (imap.us.alibabacloud.com, where lootbar.com moved on 2026-11-04) answers every UID SEARCH with FROM,
+# Alibaba Mail (imap.us.alibabacloud.com) answers every UID SEARCH with FROM,
 # TO, SUBJECT, TEXT or BODY in it with "BAD invalid command or parameters", and HEADER <field> with an empty OK. Date
 # and flag searches work. So a search by sender, recipient or subject (list_emails_metadata from_address, to_address,
 # subject, text; KOL Mail's search box) failed there as "provider_failure". When the server says BAD to such a

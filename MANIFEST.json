@@ -4,9 +4,9 @@
   ".githooks/pre-commit": "f1ffffa1eb218d090d49f1573469366cb6e0fc57a45f1553fd28f39672f06506",
   ".github/workflows/test.yml": "146bbbdaecabe77f55f44db2e9e703b1d0efcefb28a2a529609b1f1ed214cb00",
   ".gitignore": "cafbacdb252557b2be5bb6e37a1039449a99d9ff73cfad9406a4289611a89301",
-  "CHANGELOG.md": "dd618f527f707cf2818ebe3a66ebd89e3c22b3e7dccc64af5699adf82b768acb",
+  "CHANGELOG.md": "e50742be0b0198b4ec9eff1b530e00c13c01a36e4d49e7aff3c23c6c782441ed",
   "README.md": "6f9dc042ef041c134ace1e6bb2ecacf6edcb29f9e8753ef2c1b5a424828cd221",
-  "VERSION": "59854984853104df5c353e2f681a15fc7924742f9a2e468c29af248dce45ce03",
+  "VERSION": "44e161e4495cac2cf7858043e9e6418e9579f0ddcfae826f9a372622968ce066",
   "accounts.py": "e8928fdd7cf212a74203691796ad8ccc83ec6c55ffd1de8c7c9344a812b31208",
   "app.py": "dffb54ee3e7afda837cb6975ee6ec95ab0ee3cdf84399dc2eacaaf340e59be18",
   "attachdir.py": "93d2296618efe41a3afe2454fce554803be6b5f98a7d911548da7153cc0b99b3",
@@ -42,7 +42,7 @@
   "llm.py": "e038a5e1c3bbe83a13c6e4c836ac3f42b5e6dcabd60a53f05a2a1d91c21e70d4",
   "mailfind.py": "1b0e78b8476fab8771bc98b2cbc33af88f717aedc484d583105bb283d2c75715",
   "mailmove.py": "c125827921fbdb5f2fbdc3091572c27a3ac3c80b27f2d588be2d8ed77a3f2aca",
-  "mailserver.py": "a04f19e57e6a7c9ba55de6acd90260c6e2d889371a4ce7121581706b87bbdabb",
+  "mailserver.py": "c45109970cb6d283076c3fc06dd981aeddd8ee5d8a0f82aa524e21dbd99ef0e7",
   "materials.py": "6dff7f7e606fdda535234a4afdfb1034436291a8a8e7872c73cd04c99fd43672",
   "mobile.py": "73d346354f8d28627ada5b2ec31b77d68dbbcb5594222d561c3f2ccb04b9e822",
   "onboarding.py": "a51e3bbb09b42f4100432522d490071bbeff02943a82b232b93a3b2c743bdfe3",
@@ -1191,5 +1191,5 @@
   "tools/publish.py": "7f52152229bcc21a82693a1207d94ba64aa408b4c7ade565a61e4eb4697a11bb",
   "updater.py": "e7c4237d7387e3a6161312d6bd3ecd4707e969bf3e4bebf7df74a7fb830f08f3"
  },
- "version": "1.0.0"
+ "version": "1.0.1"
 }
