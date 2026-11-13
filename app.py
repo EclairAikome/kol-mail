@@ -69,6 +69,7 @@ import onboarding  # noqa: E402
 import tgsetup  # noqa: E402
 import mailserver  # noqa: E402
 import mailmove  # noqa: E402
+import junkrescue  # noqa: E402
 import mailfind  # noqa: E402
 import signature  # noqa: E402
 import folders  # noqa: E402
@@ -1558,6 +1559,12 @@ async def scan_account():
     """New INBOX mail of the current mailbox: announce it, and for the primary mailbox queue the translations.
     Another mailbox's mail is translated only when it is opened (no AI cost or upload for mail never read here),
     and the off-hours replies and KOL总表 follow the primary mailbox only."""
+    try:  # first, so a KOL reply the server filed as spam is announced by this very scan
+        await rescue_junk()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001  never stops the INBOX scan; tried again at the next one
+        log("junk rescue failed", err_text(e))
     data = await bg.list_messages("INBOX", 1, 50)
     emails = data.get("emails", [])
     known = cache.get_many([e["message_id"] for e in emails if e.get("message_id")]) if is_primary() else {}
@@ -1579,6 +1586,95 @@ async def scan_account():
         log("notify failed", err_text(e))
     if is_primary():
         await offhours_email(emails)
+
+
+# ---------------------------------------------------------------- KOL replies filed as spam (junkrescue.py)
+JUNK_TIMEOUT = 30  # seconds for a junk list or header read: a stuck one must not hold up the INBOX scan for long
+JUNK_TRIES = 3     # moves back tried per mail; one the server keeps refusing is left in junk
+junk_memories: dict[str, junkrescue.Memory] = {}
+junk_left: dict[str, set[str]] = {}  # per mailbox: junk Message-IDs looked at this run and not ours, not read again
+junk_tries: dict[str, dict[str, int]] = {}  # per mailbox: Message-ID -> moves back tried this run
+
+
+def junk_memory() -> junkrescue.Memory:
+    name = current_account.get()
+    if name not in junk_memories:
+        junk_memories[name] = junkrescue.Memory(DATA / ("junk_rescued.json" if name == ACCOUNT
+                                                        else f"junk_rescued-{name}.json"))
+    return junk_memories[name]
+
+
+def remember_junk(message_ids: list[str], what: str):
+    """Never stops the scan or the owner's move: a memory not written means at most one more move back."""
+    try:
+        junk_memory().add(message_ids)
+    except OSError as e:
+        log("junk rescue: memory not saved", what, err_text(e))
+
+
+def folder_metas_known(box: str) -> list[dict]:
+    """A folder's mails as the indexes know them now (no IMAP call): the live index, else the copy on disk."""
+    return (folder_index.get(box) or (0, []))[1] or (saved_index(box) if is_primary() else [])
+
+
+async def junk_list(junk: str) -> list[dict]:
+    try:
+        data = await bg.call("list_emails_metadata", mailbox=junk, page=1, page_size=junkrescue.LOOK,
+                             timeout=JUNK_TIMEOUT)
+    except MailError as e:  # the unfiltered list can fail on Alibaba Mail; a filtered one is searched (list_messages)
+        if "provider_failure" not in str(e) and "projection is unavailable" not in str(e):
+            raise
+        data = await bg.call("list_emails_metadata", mailbox=junk, page=1, page_size=junkrescue.LOOK,
+                             since="1970-01-01T00:00:00Z", timeout=JUNK_TIMEOUT)
+    return data.get("emails") or []
+
+
+async def rescue_junk():
+    """The newest mails of the junk folder that answer a mail of ours go back to INBOX (junkrescue.py). The primary
+    mailbox only: the company's, whose Sent index is complete and whose own domain names our Message-IDs. A sender
+    alone is never enough: spam forging a KOL's address is what the filter is for."""
+    if not is_primary():
+        return
+    junk = folder_role("junk")
+    if not junk or (folder_info.get("names") is not None and junk not in folder_info["names"]):
+        return
+    memory, name = junk_memory(), current_account.get()
+    left, tries = junk_left.setdefault(name, set()), junk_tries.setdefault(name, {})
+    waiting = [m for m in await junk_list(junk) if m.get("message_id") and str(m.get("email_id", "")).isdigit()
+               and not is_skippable(m) and m["message_id"] not in memory and m["message_id"] not in left
+               and tries.get(m["message_id"], 0) < JUNK_TRIES][:junkrescue.CONTENT_MAX]
+    if not waiting:
+        return
+    sent = folder_metas_known(sent_box()) if sent_box() else []
+    sent_ids, domain = junkrescue.our_ids(sent), self_address().rpartition("@")[2]
+    data = await bg.call("get_emails_content", mailbox=junk, email_ids=[str(m["email_id"]) for m in waiting],
+                         mark_as_read=False, max_body_length=1, timeout=JUNK_TIMEOUT)
+    heads = {str(c.get("email_id")): c for c in data.get("emails") or []}
+    ours = []
+    for meta in waiting:
+        content = heads.get(str(meta["email_id"]))
+        if content is None:
+            continue  # gone meanwhile, or not read: the next scan
+        if junkrescue.answers_us(content, sent_ids, domain):
+            ours.append(meta)
+        elif sent_ids:  # with Sent not indexed yet (just started) only the domain could tell: asked again later
+            left.add(meta["message_id"])
+    if not ours:
+        return
+    for m in ours:
+        tries[m["message_id"]] = tries.get(m["message_id"], 0) + 1
+    ids = [str(m["email_id"]) for m in ours]
+    data = await bg.call("move_emails", email_ids=ids, source_mailbox=junk, destination_mailbox="INBOX")
+    result = str(data.get("result", data))
+    forget_moved(junk, ids)
+    for key in [k for k in lists if k[0] == "INBOX"]:
+        lists.pop(key, None)
+    spawn(prefetch_after_folder_change("INBOX"), "junk rescue refresh")
+    if not result.startswith("Successfully"):  # partly done: what is still in junk is tried again, JUNK_TRIES times
+        log("junk rescue: not all moved back", result[:200])
+        return
+    remember_junk([m["message_id"] for m in ours], "rescued")
+    log("junk rescue: moved back to INBOX", [(m["email_id"], sender_address(m.get("sender") or "")) for m in ours])
 
 
 # ---------------------------------------------------------------- desktop notifications
@@ -5873,6 +5969,26 @@ def conversation_ids(box: str, ids: list[str]) -> list[str]:
     return list(dict.fromkeys(ids + [i for i, meta in known.items() if thread_key(meta) in keys]))
 
 
+async def junked_by_hand(source: str, ids: list[str]) -> list[str]:
+    """The Message-IDs of mails the owner is moving into junk, so the junk rescue never takes them back out. A mail
+    no cache knows (moved from a search, say) has its headers read; one that cannot be read is left out."""
+    found, unknown = [], []
+    for uid in ids:
+        meta = known_meta(source, uid)
+        if meta and meta.get("message_id"):
+            found.append(meta["message_id"])
+        else:
+            unknown.append(uid)
+    if unknown:
+        try:
+            data = await mail.call("get_emails_content", mailbox=source, email_ids=unknown, mark_as_read=False,
+                                   max_body_length=1)
+            found += [c["message_id"] for c in data.get("emails") or [] if c.get("message_id")]
+        except MailError as e:
+            log("junk rescue: Message-IDs of a move to junk not read", source, err_text(e))
+    return found
+
+
 async def api_move(request: Request):
     """Mails of one folder into another. whole_thread: the rest of their conversations in that folder go too."""
     body = await request.json()
@@ -5889,6 +6005,7 @@ async def api_move(request: Request):
         ids = conversation_ids(source, ids)
     if len(ids) > MOVE_MAX:
         return bad(f"一次最多移动 {MOVE_MAX} 封")
+    hand_junked = await junked_by_hand(source, ids) if target == folder_role("junk") else []
     moved, problem = 0, ""
     for start in range(0, len(ids), FOLDER_MOVE_BATCH):
         batch = ids[start:start + FOLDER_MOVE_BATCH]
@@ -5899,6 +6016,8 @@ async def api_move(request: Request):
             problem = result[:200]
             break
         moved += len(batch)
+    if hand_junked:  # a part not moved stays where it was: remembering it costs nothing
+        remember_junk(hand_junked, "moved to junk by hand")
     for key in [k for k in lists if k[0] == target]:
         lists.pop(key, None)
     spawn(prefetch_after_folder_change(target), "move refresh")
