@@ -286,8 +286,11 @@ def patch_search(classic) -> None:
             answer = await header_search(classic, original, imap, *split)
             # Only a BAD that the same search without the header keys got past counts as "no text search here". A
             # BAD for another reason (a date) fails the fallback too, and a NO (busy, or a charset the server did not
-            # take) is answered this once but marks nothing.
-            if host and status == "BAD" and classic._imap_status(answer) == "OK":
+            # take) is answered this once but marks nothing. Nor does a BAD for a search with non-ASCII text: a
+            # server that only stumbles over the UTF-8 literal (a Chinese subject) still searches English text and
+            # bodies itself, and marking it would answer every later TEXT search from the headers alone.
+            if host and status == "BAD" and classic._imap_status(answer) == "OK" \
+                    and all(text.isascii() for _, text in split[1]):
                 text_search_refused.add(host)
             return answer if classic._imap_status(answer) == "OK" else response
         return response

@@ -156,7 +156,7 @@ def sending(monkeypatch):
     monkeypatch.setattr(app, "sheet_enabled", lambda: True)
     monkeypatch.setattr(app, "sheet_after_send", lambda *a: after.append(a))
     monkeypatch.setattr(app, "sent_changed", lambda: None)
-    monkeypatch.setattr(app, "close_cases_for", lambda channel, peer: None)
+    monkeypatch.setattr(app, "close_cases_for", lambda channel, peer, person="": None)
     monkeypatch.setattr(app, "SHEET_MODE", "legacy")
     for checked in (BODY, "Collab"):
         monkeypatch.setitem(app.checked_texts, app.text_hash(checked), 0)

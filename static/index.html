@@ -112,6 +112,8 @@
   #reader { padding: 16px 20px 40px; }
   .empty { color: var(--muted); margin-top: 40px; text-align: center; }
   .meta { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+  .personline input { width: 230px; padding: 1px 6px; font-size: 12px; }
+  .personline button.act { padding: 0 8px; font-size: 12px; }
   .meta b { color: var(--text); font-weight: 600; }
   h2 { font-size: 17px; margin: 0 0 6px; }
   .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
@@ -692,7 +694,7 @@ try {
     <summary><span class="who" data-f="who"></span><span class="preview" data-f="preview"></span><span class="when" data-f="when"></span></summary>
     <div class="inner">
       <div class="meta"><span class="replyacts"><button class="act" data-f="replyOne" type="button" title="回复这一封：收件人是它的发件人">回复</button><button class="act" data-f="replyAll" type="button" title="回复这一封：收件人是它的发件人，它的其他收件人进抄送">回复全部</button></span>
-        发件人 <b data-f="from"></b> · 收件人 <span data-f="to"></span></div>
+        发件人 <b data-f="from"></b> · 收件人 <span data-f="to"></span><span class="personline" data-f="person"></span></div>
       <div class="cols">
         <div class="pane"><h3>原文 <span data-f="lang"></span></h3><div class="body" data-f="body"></div></div>
         <div class="pane zhpane" data-f="zhpane"><h3>中文译文 <button class="act" data-f="retranslate">重新翻译</button></h3>
@@ -1912,10 +1914,61 @@ function fillCard(ctx, card) {
   const one = field(card, "replyOne"), all = field(card, "replyAll");
   if (m.own) { one.textContent = "跟进这封"; one.title = "接着我方这封写：收件人是它的收件人"; all.hidden = true; }
   else all.hidden = !replyRecipients(ctx, m, true).cc.length;  // nobody else on it: 回复 says it all
+  fillPerson(ctx, card);
   const body = field(card, "body");
   if (m.stub) { body.className = "note"; body.textContent = "点开后载入这封邮件…"; return; }
   body.className = "body"; body.textContent = m.body || "";
   if (renderTranslation(card, m.translation, m.own)) ctx.cards.set(m.message_id, card);
+}
+
+// Whom a mail is filed under (convperson.py): one manager may write about several creators from one address, and
+// each mail goes to the conversation of the creator it is about. Said when that is not simply its sender; changeable
+// on every mail, for what the rules could not tell.
+let personListSeq = 0;
+function fillPerson(ctx, card) {
+  const m = card.msg, box = field(card, "person");
+  box.textContent = "";
+  if (!m.message_id || !m.person) return;
+  const addr = s => ((/<([^>]+)>/.exec(s || "") || [null, s || ""])[1]).trim().toLowerCase();
+  const to = (m.recipients || []).map(addr).filter(a => a && a !== ctx.me);
+  // Said where it is news: a mail from someone else than the creator, our mail to anyone but them alone, a choice
+  // made by hand. Our plain answer to the creator, or their own mail, says nothing.
+  const plain = m.own ? to.length === 1 && to[0] === m.person : addr(m.sender) === m.person;
+  if (!plain || m.person_how === "hand") {
+    const who = document.createElement("b"); who.textContent = m.person;
+    box.append(" · 归在 ", who, " 名下" + (m.person_how === "hand" ? "（你改过）" : ""));
+  }
+  const btn = document.createElement("button");
+  btn.className = "act"; btn.type = "button"; btn.textContent = "改归属";
+  btn.title = "这封信说的是哪位达人。同一个经纪人替几位达人回信时，在这里把它归到对的那位名下，会话、草稿和总表都跟着走";
+  btn.onclick = safe(async ev => { ev.preventDefault(); await editPerson(ctx, card); });
+  box.append(" ", btn);
+}
+
+async function editPerson(ctx, card) {
+  const m = card.msg, box = field(card, "person");
+  const d = await api(`/api/conv/person?mailbox=${encodeURIComponent(m.mailbox)}&id=${m.email_id}`);
+  if (st.current !== ctx || !card.isConnected) return;
+  box.textContent = "";
+  const list = document.createElement("datalist"); list.id = "personList" + (++personListSeq);
+  for (const a of d.candidates || []) { const o = document.createElement("option"); o.value = a; list.append(o); }
+  const input = document.createElement("input");
+  input.type = "email"; input.value = d.person || ""; input.placeholder = "达人的邮箱"; input.setAttribute("list", list.id);
+  const button = (text, title) => { const b = document.createElement("button"); b.className = "act"; b.type = "button"; b.textContent = text; b.title = title || ""; return b; };
+  const save = button("保存"), auto = button("交回自动判断", "撤销你改过的归属，按信里的抄送、回复关系和引用自动判断"), cancel = button("取消");
+  const apply = async person => {
+    if (field(ctx.view, "rbody").value.trim() && !confirm("改归属后会话会重新打开，正在写的回信留在原来那位达人名下。继续吗？")) return;
+    await post("/api/conv/person", { mailbox: m.mailbox, email_id: m.email_id, person });
+    toast(person ? `已归到 ${person} 名下` : "已交回自动判断");
+    if (!st.search && st.page === 1) loadList(false, "cached", true).catch(() => {});
+    if (st.current === ctx) openMessage(ctx.opened.id, null, ctx.opened.mailbox);
+  };
+  save.onclick = safe(async ev => { ev.preventDefault(); const v = input.value.trim(); if (v) await apply(v); });
+  auto.onclick = safe(async ev => { ev.preventDefault(); await apply(""); });
+  cancel.onclick = ev => { ev.preventDefault(); fillPerson(ctx, card); };
+  box.append(" · 归到 ", input, list, " ", save, " ", auto, " ", cancel);
+  auto.hidden = d.how !== "hand";
+  input.focus();
 }
 
 async function loadStub(ctx, card) {

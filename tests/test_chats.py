@@ -344,7 +344,7 @@ def test_a_telegram_reply_is_sent_part_by_part(client, store, monkeypatch):
     monkeypatch.setattr(app, "DEV", False)
     monkeypatch.setattr(app, "CHAT_SEND_GAP", (0, 0))
     closed = []
-    monkeypatch.setattr(app, "close_cases_for", lambda channel, peer: closed.append((channel, peer)))
+    monkeypatch.setattr(app, "close_cases_for", lambda channel, peer, person="": closed.append((channel, peer)))
     text = "Привет!\n\nДве интеграции по 80$."
     monkeypatch.setitem(app.checked_texts, app.text_hash(text), 0.0)
     assert asyncio.run(app.tg_sync_chat(5550001234)) == 1  # what the listener or the sync loop did before

@@ -224,3 +224,68 @@ def test_a_garbled_memory_file_is_kept_aside_not_overwritten(tmp_path):
 def test_ids_compare_without_case():
     assert junkrescue.answers_us({"references": "<ABC@Example.com>"}, {"<abc@example.com>"}, "other.com")
     assert not junkrescue.answers_us({"references": "<abc@example.com.example.net>"}, set(), "example.com")
+
+
+def test_on_a_public_mailbox_the_domain_alone_proves_nothing(mailbox, monkeypatch):
+    """Review of 1.0.1: on 163.com or icloud.com everyone's Message-IDs end the same way, so a spam quoting any
+    such ID looked like an answer to us. Only our own Sent IDs count there."""
+    monkeypatch.setattr(app, "self_address", lambda: "li@163.com")
+    server = mailbox([junk_mail("3", "Spam <spam@spam.example.net>", "<s@spam.example.net>"),
+                      junk_mail("4", "Ana <ana@example.com>", "<a@mail.example.org>")],
+                     {"3": head("3", "<a@163.com>"), "4": head("4", "", "<SES-1@ses.example.net>")})
+    asyncio.run(app.rescue_junk())
+    assert server.moves == [(JUNK, "INBOX", ["4"])]
+
+
+def test_one_mail_with_huge_headers_does_not_hold_up_the_others(mailbox):
+    """Review of 1.0.1: the library refuses a whole batch when one mail's References are over its limit. The
+    batch is read again one by one, the oversized mail is left alone for this run, the real reply goes back."""
+    server = mailbox([junk_mail("3", "Ana <ana@example.com>", "<a@mail.example.org>"),
+                      junk_mail("4", "Big <big@spam.example.net>", "<big@spam.example.net>")],
+                     {"3": head("3", "", "<SES-1@ses.example.net>")})
+    real = server.call
+
+    async def call(tool, timeout=180, raw=False, **args):
+        if tool == "get_emails_content" and "4" in args["email_ids"]:
+            server.fetched += args["email_ids"]
+            raise app.MailError("limit_exceeded: an email thread header exceeds 65536 bytes")
+        return await real(tool, timeout=timeout, raw=raw, **args)
+    server.call = call
+    asyncio.run(app.rescue_junk())
+    assert server.moves == [(JUNK, "INBOX", ["3"])]
+    assert server.fetched == ["3", "4", "3", "4"]  # the batch, then one by one
+    server.fetched.clear()
+    asyncio.run(app.rescue_junk())  # the next scan does not ask for the oversized one again
+    assert server.fetched == [] and len(server.moves) == 1
+
+
+def test_a_lone_mail_with_huge_headers_is_left_without_failing_the_scan(mailbox):
+    server = mailbox([junk_mail("4", "Big <big@spam.example.net>", "<big@spam.example.net>")])
+
+    async def call(tool, timeout=180, raw=False, **args):
+        assert tool == "list_emails_metadata" or tool == "get_emails_content"
+        if tool == "get_emails_content":
+            server.fetched += args["email_ids"]
+            raise app.MailError("limit_exceeded: an email thread header exceeds 65536 bytes")
+        return {"emails": list(server.junk)}
+    server.call = call
+    asyncio.run(app.rescue_junk())  # no error
+    asyncio.run(app.rescue_junk())
+    assert server.fetched == ["4"] and server.moves == []
+
+
+def test_a_batch_that_fails_for_another_reason_is_tried_again_next_scan(mailbox):
+    server = mailbox([junk_mail("3", "Ana <ana@example.com>", "<a@mail.example.org>")],
+                     {"3": head("3", "", "<SES-1@ses.example.net>")})
+    real, failing = server.call, [True]
+
+    async def call(tool, timeout=180, raw=False, **args):
+        if tool == "get_emails_content" and failing:
+            raise app.MailError("provider_failure: timed out")
+        return await real(tool, timeout=timeout, raw=raw, **args)
+    server.call = call
+    with pytest.raises(app.MailError):
+        asyncio.run(app.rescue_junk())
+    failing.clear()
+    asyncio.run(app.rescue_junk())
+    assert server.moves == [(JUNK, "INBOX", ["3"])]

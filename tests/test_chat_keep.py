@@ -687,6 +687,65 @@ def test_old_copies_go_but_the_last_thirty_and_each_months_first_stay(store, rec
     assert (root / "2026-10-05" / "chats.sqlite3").exists()
 
 
+def test_a_ledger_that_cannot_be_read_stops_the_copy_but_not_the_clearing(store, record):
+    """Review of 1.0.1: the ledger was read after the copy, so a damaged one left a full copy at every look (48 a
+    day) and the old copies were never cleared. Now nothing is copied, and the clearing runs all the same."""
+    root = record.parent / "私信备份"
+    for day in range(1, 31):
+        (root / f"2026-09-{day:02d}").mkdir(parents=True)
+    (root / app.CHAT_LEDGER).write_bytes(b"\xff\xfe broken")
+    with pytest.raises(ValueError):
+        app.chat_backup(datetime(2026, 11, 1, 18, 0, tzinfo=TZ))
+    left = sorted(p.name for p in root.iterdir() if p.is_dir())
+    assert left == [f"2026-09-{d:02d}" for d in range(1, 31)]  # thirty: none too many, and no copy of today
+
+
+def test_a_copy_the_ledger_never_got_is_made_again_in_its_place(store, record, monkeypatch):
+    """The ledger could not be written after the copy (locked, disk full): the next look makes that copy again in
+    the same folder instead of adding one more, and only a copy the ledger lists makes the next one a new folder."""
+    root = record.parent / "私信备份"
+    real, fail = app.ledger_digest, [True]
+
+    def digest(before, lines):
+        if fail:
+            raise OSError("the ledger is locked")
+        return real(before, lines)
+    monkeypatch.setattr(app, "ledger_digest", digest)
+    evening = datetime(2026, 11, 12, 18, 0, tzinfo=TZ)
+    with pytest.raises(OSError):
+        app.chat_backup(evening)
+    assert sorted(p.name for p in root.iterdir() if p.is_dir()) == ["2026-11-12"]
+    fail.clear()
+    app.chat_backup(evening + timedelta(minutes=30))
+    assert sorted(p.name for p in root.iterdir() if p.is_dir()) == ["2026-11-12"]
+    assert [c[1] for c in ledger_lines(record)] == ["私信备份/2026-11-12/chats.sqlite3", "私信备份/2026-11-12/私信记录.zip", "="]
+    app.chat_backup(evening + timedelta(hours=1))  # listed now: a second copy the same day is a folder of its own
+    assert sorted(p.name for p in root.iterdir() if p.is_dir()) == ["2026-11-12", "2026-11-12-190000"]
+
+
+def test_a_failed_copy_is_said_where_the_owner_looks(store, record, monkeypatch):
+    def broken(now):
+        raise OSError("disk full")
+    monkeypatch.setattr(app, "chat_backup", broken)
+    monkeypatch.setattr(app, "chat_notes_ready", lambda: False)
+    monkeypatch.setitem(app.state, "sheet_error", None)
+
+    class Telegram:
+        ready = asyncio.Event()
+    Telegram.ready.set()
+    monkeypatch.setattr(app, "tg", Telegram)
+    sleeps = []
+
+    async def sleep(seconds):  # the wait after a start passes, the one after the first look ends the loop
+        sleeps.append(seconds)
+        if len(sleeps) > 1:
+            raise asyncio.CancelledError
+    monkeypatch.setattr(app.asyncio, "sleep", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(app.chat_upkeep_loop())
+    assert app.state["sheet_error"].startswith("私信备份没做成")
+
+
 def test_the_store_is_copied_whole_while_it_is_in_use(store, tmp_path):
     store.upsert_conv(KEY)
     store.add_messages(KEY, [msg(n, 5, text=f"m{n}") for n in range(50)])

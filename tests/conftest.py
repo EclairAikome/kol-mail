@@ -20,6 +20,21 @@ import pytest  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _no_filing_left_over(monkeypatch):
+    """Whom a mail is filed under (convperson.py) is kept per mailbox on disk: a test starts with nothing filed and
+    leaves nothing for the next one."""
+    import sys
+    app = sys.modules.get("app")
+    if app is not None:
+        monkeypatch.setattr(app, "person_stores", {})
+        monkeypatch.setattr(app, "invited_cache", {})
+        monkeypatch.setattr(app, "by_id_cache", {})
+    yield
+    for path in (_settings.parent / "data" / "index").glob("*/persons.json"):
+        path.unlink()
+
+
+@pytest.fixture(autouse=True)
 def _no_lookups_from_tests(monkeypatch):
     """Finding a mailbox's servers (mailfind.py) asks DNS, the web and the servers themselves. Never from a test:
     here nothing is found, and a test that needs an answer sets its own."""

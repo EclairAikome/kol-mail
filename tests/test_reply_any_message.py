@@ -173,7 +173,7 @@ def outbox(monkeypatch):
     monkeypatch.setattr(app, "mail", fake)
     monkeypatch.setattr(app, "DEV", False)
     monkeypatch.setattr(app, "sent_changed", lambda: None)
-    monkeypatch.setattr(app, "close_cases_for", lambda channel, peer: closed.append(peer))
+    monkeypatch.setattr(app, "close_cases_for", lambda channel, peer, person="": closed.append(peer))
     monkeypatch.setattr(app, "sheet_guard", lambda what, fn, *args: filed.append(args))
     monkeypatch.setitem(app.checked_texts, app.text_hash(TEXT), time.time())
     return fake, filed, closed

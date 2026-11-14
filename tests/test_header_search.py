@@ -152,6 +152,26 @@ def test_a_server_with_text_search_is_never_marked(monkeypatch):
     assert fake.searches[-1] == ["FROM", "creator"] and fake.fetches == []
 
 
+def test_a_refused_chinese_search_is_answered_but_marks_nothing(monkeypatch):
+    """Review of 1.0.1: a server that only stumbles over the UTF-8 literal still searches English text and bodies
+    itself. Marking it after that BAD would answer every later TEXT search from the headers alone."""
+    fake = FakeServer()
+
+    async def original(imap, criteria):
+        imap.searches.append(list(criteria))
+        if any(isinstance(c, classic._ImapSearchLiteral) for c in criteria):
+            return classic.aioimaplib.Response("BAD", [b"charset not supported"])
+        return classic.aioimaplib.Response("OK", [b"5 7", b"SEARCH completed"])
+
+    monkeypatch.setattr(classic, "_uid_search", original)
+    monkeypatch.setattr(mailserver, "text_search_refused", set())
+    mailserver.patch_search(classic)
+    assert uids(search(fake, "SUBJECT", classic._ImapSearchLiteral("合作".encode()))) == []  # 5 and 7 are English
+    assert mailserver.text_search_refused == set()
+    assert uids(search(fake, "TEXT", "invoice")) == ["5", "7"]  # the server's own answer, bodies included
+    assert fake.searches[-1] == ["TEXT", "invoice"]
+
+
 def test_searches_without_header_keys_are_untouched(server):
     assert uids(search(server, "UNSEEN")) == ["5", "7", "9"]
     assert server.fetches == []

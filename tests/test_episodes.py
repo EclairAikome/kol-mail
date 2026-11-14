@@ -86,7 +86,7 @@ def sending(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "mail", fake)
     monkeypatch.setattr(app, "DEV", False)
     monkeypatch.setattr(app, "sent_changed", lambda: None)
-    monkeypatch.setattr(app, "close_cases_for", lambda channel, peer: None)
+    monkeypatch.setattr(app, "close_cases_for", lambda channel, peer, person="": None)
     monkeypatch.setattr(app, "sheet_guard", lambda *a: None)
     monkeypatch.setitem(app.checked_texts, app.text_hash(TEXT), time.time())
     return fake

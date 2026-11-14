@@ -51,6 +51,7 @@ import accounts  # noqa: E402
 import attachdir  # noqa: E402
 import autoreply  # noqa: E402
 import chats  # noqa: E402
+import convperson  # noqa: E402
 import awake  # noqa: E402
 import petfeed  # noqa: E402
 import skin  # noqa: E402
@@ -1132,6 +1133,7 @@ async def load_body(bridge: MailBridge, mailbox: str, email_id: str) -> dict:
     async def run():
         msg = await bridge.get_message(mailbox, email_id)
         bodies[key] = msg
+        learn_person(msg)
         while len(bodies) > BODY_CACHE_MAX:
             bodies.popitem(last=False)
         return msg
@@ -1414,10 +1416,10 @@ async def prefetch_account():
     boxes = [b for b in index_boxes() if b in names and b not in custom] if is_primary() else ["INBOX"]
     pages = {box: lists[(box, 1)][1].get("emails", []) if (box, 1) in lists
              else folder_index.get(box, (0, []))[1][:30] for box in boxes}
-    people = {counterpart(e) for metas in pages.values() for e in metas if not is_bounce(e)} - {""}
+    people = {person_of(e) for metas in pages.values() for e in metas if not is_bounce(e)} - {""}
     wanted = {box: [str(e["email_id"]) for e in metas] for box, metas in pages.items()}
     older = {box: [str(e["email_id"]) for e in folder_index.get(box, (0, []))[1]
-                   if counterpart(e) in people and not is_bounce(e)] for box in boxes}
+                   if person_of(e) in people and not is_bounce(e)] for box in boxes}
     for group in (wanted, older) if is_primary() else (wanted,):
         for box, ids in group.items():
             try:
@@ -1629,6 +1631,43 @@ async def junk_list(junk: str) -> list[dict]:
     return data.get("emails") or []
 
 
+async def junk_heads(junk: str, waiting: list[dict], left: set[str]) -> dict[str, dict]:
+    """The headers of these junk mails by UID: one call for all of them, else one per mail. The library refuses a
+    whole batch when one mail's In-Reply-To / References (or the batch's headers together) are over its limit, and
+    then every scan would ask for the same mails again while a real reply behind them waited. A mail refused on its
+    own for its size is left alone for this run; any other failure is asked again on the next scan."""
+    async def read(ids: list[str]) -> list[dict]:
+        data = await bg.call("get_emails_content", mailbox=junk, email_ids=ids, mark_as_read=False,
+                             max_body_length=1, timeout=JUNK_TIMEOUT)
+        return data.get("emails") or []
+
+    ids = [str(m["email_id"]) for m in waiting]
+    try:
+        return {str(c.get("email_id")): c for c in await read(ids)}
+    except NotReady:
+        raise
+    except MailError as e:
+        if "limit_exceeded" not in str(e):
+            raise
+        if len(ids) == 1:
+            left.add(waiting[0]["message_id"])
+            log("junk rescue: headers too big to read, left in junk", ids[0])
+            return {}
+    heads = {}
+    for meta in waiting:
+        try:
+            heads.update({str(c.get("email_id")): c for c in await read([str(meta["email_id"])])})
+        except NotReady:
+            raise
+        except MailError as e:
+            if "limit_exceeded" in str(e):
+                left.add(meta["message_id"])
+                log("junk rescue: headers too big to read, left in junk", meta["email_id"])
+            else:
+                log("junk rescue: headers not read", meta["email_id"], err_text(e))
+    return heads
+
+
 async def rescue_junk():
     """The newest mails of the junk folder that answer a mail of ours go back to INBOX (junkrescue.py). The primary
     mailbox only: the company's, whose Sent index is complete and whose own domain names our Message-IDs. A sender
@@ -1646,10 +1685,10 @@ async def rescue_junk():
     if not waiting:
         return
     sent = folder_metas_known(sent_box()) if sent_box() else []
-    sent_ids, domain = junkrescue.our_ids(sent), self_address().rpartition("@")[2]
-    data = await bg.call("get_emails_content", mailbox=junk, email_ids=[str(m["email_id"]) for m in waiting],
-                         mark_as_read=False, max_body_length=1, timeout=JUNK_TIMEOUT)
-    heads = {str(c.get("email_id")): c for c in data.get("emails") or []}
+    sent_ids, domain = junkrescue.our_ids(sent), self_address().rpartition("@")[2].lower()
+    if domain in accounts.PUBLIC_DOMAINS:  # on icloud.com or 163.com every user's Message-IDs end the same way
+        domain = ""
+    heads = await junk_heads(junk, waiting, left)
     ours = []
     for meta in waiting:
         content = heads.get(str(meta["email_id"]))
@@ -2046,10 +2085,13 @@ def sheet_note_incoming(emails: list[dict]):
         sheet_seen[meta["message_id"]] = "posted"
         when = parse_date(meta.get("date"))
         subject = strip_hidden(re.sub(r"[\r\n]+", " ", meta.get("subject") or "")).strip()[:150]
-        sheet_post({"op": "event", "dir": "in", "email": sender_address(meta.get("sender") or ""),
-                    "subject": subject or "（无主题）", "time": when.isoformat() if when else None,
-                    "message_id": meta["message_id"],
-                    "name": strip_hidden(email.utils.parseaddr(meta.get("sender") or "")[0])[:80]})  # a new row's name
+        sender = sender_address(meta.get("sender") or "")
+        who = person_of(meta) or sender  # a manager's mail about a creator goes on the creator's row
+        op = {"op": "event", "dir": "in", "email": who, "subject": subject or "（无主题）",
+              "time": when.isoformat() if when else None, "message_id": meta["message_id"]}
+        if who == sender:  # a new row's name: the sender's, never the manager's on the creator's row
+            op["name"] = strip_hidden(email.utils.parseaddr(meta.get("sender") or "")[0])[:80]
+        sheet_post(op)
     if new:
         save_sheet_seen()
 
@@ -2058,8 +2100,11 @@ def sheet_note_translation(message_id: str, msg: dict, body_zh: str):
     """Once the Chinese translation exists, the log row of that mail gets its gist instead of the bare subject."""
     if sheet_seen and sheet_seen.get(message_id) == "posted" and (body_zh or "").strip():
         when = parse_date(msg.get("date"))
-        op = {"op": "event", "dir": "in", "email": sender_address(msg.get("sender") or ""),
-              "summary": "对方回信：" + gist(body_zh), "message_id": message_id,
+        sender = sender_address(msg.get("sender") or "")
+        who = person_of(msg) or sender
+        said = "对方回信：" if who == sender else f"{plain_name(display_name(msg)) or sender} 代为回信："
+        op = {"op": "event", "dir": "in", "email": who,
+              "summary": said + gist(body_zh), "message_id": message_id,
               "subject": msg.get("subject") or "", "time": when.isoformat() if when else None}
         links = channel_links([msg.get("body") or ""])
         if links:  # fills an empty 频道链接 cell of a colleague's sheet (usersheet.py; kol.py ignores it)
@@ -2524,6 +2569,9 @@ def open_email_case(meta: dict, address: str, period: datetime):
     case_id = cases.open_case("email", address, meta["message_id"], mailbox="INBOX", email_id=str(meta["email_id"]),
                               who=f"{plain_name(display_name(meta))} <{address}>", subject=subject)
     if case_id:
+        person = person_of(meta)
+        if person and person != address:
+            cases.set_kv(f"person:{case_id}", person)
         log("mobile case opened", case_id, address)
         case_queue.put_nowait(case_id)
 
@@ -2744,8 +2792,12 @@ async def _send_case(case: dict) -> tuple[str, str]:
     if msg.get("message_id") != case["ref"] or kol != case["peer"]:
         return "handled", "这封邮件已经变了（可能被移动），没有发送，请到电脑上处理"
     received = parse_date(msg.get("date")) or datetime.fromisoformat(case["created_at"])
-    if answered_by_hand(await _checked(bg.sent_to(kol, limit=3)), received, kol):
-        cache.drop_draft(ACCOUNT, kol)  # answered already: a half-written reply to it is not work left
+    person = main_address(msg) or kol  # one manager, two creators: only an answer about this mail's creator counts
+    ours = await _checked(bg.sent_to(kol, limit=10))
+    if person != kol:  # a mail of ours filed under another creator answered that one; one nobody could file counts
+        ours = [m for m in ours if person_of(m) in (person, kol, "")]
+    if answered_by_hand(ours[:3], received, kol):
+        cache.drop_draft(ACCOUNT, person)  # answered already: a half-written reply to it is not work left
         return "handled", "你已经在电脑上回过这封了，这版不再发送"
     subject = strip_hidden(re.sub(r"[\r\n]+", " ", reply_subject(msg.get("subject") or ""))).strip()
     refs = " ".join(x for x in [msg.get("references"), msg.get("message_id")] if x)
@@ -2759,9 +2811,10 @@ async def _send_case(case: dict) -> tuple[str, str]:
     delivered, warning, message_id = send_outcome(result, [kol])
     if not delivered:
         return "uncertain", f"发送结果不确定：{result[:150]}"
-    cache.drop_draft(ACCOUNT, kol)  # answered from the phone: a reply half-written on the PC is no longer needed
+    cache.drop_draft(ACCOUNT, person)  # answered from the phone: a reply half-written on the PC is no longer needed
+    file_sent_under(message_id, person, [kol])
     sent_changed()
-    sheet_guard("记录手机审批回信", sheet_after_send, kol, subject, "我方回信（手机审批）：" + gist(case["zh"] or case["body"]),
+    sheet_guard("记录手机审批回信", sheet_after_send, person, subject, "我方回信（手机审批）：" + gist(case["zh"] or case["body"]),
                 "", message_id)
     record_autoreply("邮件·手机审批", kol, case.get("language") or "-", "已发送", warning)
     record_case_episode(case, own_words(msg.get("body") or "")[:playbook_learn.KOL_TEXT_MAX])
@@ -3130,9 +3183,21 @@ async def requeue_later(case_id: int, seconds: int):
     case_queue.put_nowait(case_id)
 
 
-def close_cases_for(channel: str, peer: str):
-    """The owner answered this person from kol-mail: their open phone cases are done."""
+def case_person(case: dict) -> str:
+    """The creator an email case is about: what was learned of its mail since, else what was known when it opened,
+    else the address it came from."""
+    if case["channel"] != "email":
+        return case["peer"]
+    found = person_store().get(case.get("ref") or "")
+    return (found[0] if found else "") or cases.get_kv(f"person:{case['id']}") or case["peer"]
+
+
+def close_cases_for(channel: str, peer: str, person: str = ""):
+    """The owner answered this person from kol-mail: their open phone cases are done. With person (the creator the
+    answer is about), a case of the same address about another creator stays open: one manager, two creators."""
     for case in cases.open_for_peer(channel, peer):
+        if person and case_person(case) not in (person, case["peer"]):
+            continue
         if cases.move(case["id"], mobile.OPEN, "handled"):
             spawn(tell_owner(f"#{case['id']} 已经在电脑上回复了。", case_id=case["id"]), "mobile handled note")
 
@@ -6225,8 +6290,166 @@ def is_bounce(meta: dict) -> bool:
     return is_skippable(meta) and sender_address(meta.get("sender") or "") != self_address()
 
 
+# ---------------------------------------------------------------- the creator a mail is about (convperson.py)
+# One manager writing about two creators from one address under one templated subject made one conversation of
+# both. The list, the conversation, the draft's history, the saved draft, the KOL总表 row and the phone cases now go
+# by the creator a mail is about (person_of), which for most mails is the other side as before.
+
+person_stores: dict[str, convperson.Store] = {}
+invited_cache: dict[str, tuple] = {}  # account -> (what the Sent index was, {subject: invited}, everyone invited)
+by_id_cache: dict[str, tuple] = {}    # account -> (what the indexes were, {message id: (box, meta)})
+
+
+def person_store() -> convperson.Store:
+    name = current_account.get()
+    if name not in person_stores:
+        person_stores[name] = convperson.Store(index_dir(name) / "persons.json")
+    return person_stores[name]
+
+
+SUBJECT_TAGS = re.compile(r"^\s*(?:\[[^\]]{1,30}\]\s*)+")  # "[Paid Collab] ...": a tag, not a reply marker
+
+
+def first_mail(meta: dict) -> bool:
+    """A mail that starts a conversation: no Re:/Fwd: and the like (after any [tag] in front of the subject)."""
+    return not REPLY_PREFIX.match(SUBJECT_TAGS.sub("", meta.get("subject") or ""))
+
+
+def list_key(metas: list[dict]) -> tuple:
+    """What a cached answer about these index lists was worked out from: a refreshed index is a new list."""
+    return (id(metas), len(metas), str(metas[0].get("email_id")) if metas else "",
+            str(metas[-1].get("email_id")) if metas else "")
+
+
+def invited_people() -> tuple[dict[str, set[str]], set[str]]:
+    """({subject: the creators we wrote a first mail to, alone, under it}, all of them) from the Sent index."""
+    box = sent_box()
+    metas = folder_metas_known(box) if box else []
+    key = (box, list_key(metas))
+    name = current_account.get()
+    hit = invited_cache.get(name)
+    if hit and hit[0] == key:
+        return hit[1], hit[2]
+    me = self_address()
+    by_subject = convperson.invited(
+        metas, lambda m: [a for a in (sender_address(r) for r in m.get("recipients") or []) if a and a != me],
+        lambda m: norm_subject(m.get("subject")), first_mail)
+    everyone = set().union(*by_subject.values()) if by_subject else set()
+    invited_cache[name] = (key, by_subject, everyone)
+    return by_subject, everyone
+
+
+def mail_by_id() -> dict[str, tuple[str, dict]]:
+    """{Message-ID in lower case: (folder, meta)} over the indexed folders, as the indexes know them now."""
+    boxes = index_boxes()
+    lists_now = [folder_metas_known(box) for box in boxes]
+    key = tuple(boxes) + tuple(list_key(m) for m in lists_now)
+    name = current_account.get()
+    hit = by_id_cache.get(name)
+    if hit and hit[0] == key:
+        return hit[1]
+    found = {}
+    for box, metas in zip(boxes, lists_now):
+        for meta in metas:
+            if meta.get("message_id"):
+                found.setdefault(str(meta["message_id"]).lower(), (box, meta))
+    by_id_cache[name] = (key, found)
+    return found
+
+
+def person_by_rules(meta: dict) -> str:
+    """Rule 2 of convperson.py: the one invited creator on the mail, or ""."""
+    sender = sender_address(meta.get("sender") or "")
+    by_subject, _ = invited_people()
+    return convperson.by_people(sender, participants(meta), sender == self_address(),
+                                by_subject.get(norm_subject(meta.get("subject")), set()))
+
+
+def person_of(meta: dict) -> str:
+    """The creator this mail is filed under: the owner's choice, then the one invited creator on it, then what was
+    learned from its headers or text, then the other side (counterpart). "" for a bounce, and for our own mail to
+    several people that no rule could file (main_address then takes its first recipient)."""
+    if is_bounce(meta):
+        return ""
+    store, mid = person_store(), meta.get("message_id") or ""
+    return store.hand(mid) or person_by_rules(meta) or store.learned(mid) or counterpart(meta)
+
+
+def person_how(meta: dict) -> str:
+    """How person_of filed it: "hand", "people", "refs", "text", or "" for the other side as before."""
+    if is_bounce(meta):
+        return ""
+    found = person_store().get(meta.get("message_id") or "")
+    if found and found[1] == "hand":
+        return "hand"
+    if person_by_rules(meta):
+        return "people"
+    return found[1] if found else ""
+
+
+def person_of_id(message_id: str) -> str:
+    found = person_store().get(message_id)
+    if found:
+        return found[0]
+    hit = mail_by_id().get(message_id.lower())
+    return person_of(hit[1]) if hit else ""
+
+
+def file_sent_under(message_id: str | None, person: str, recipients: list[str]):
+    """Our answer about a creator, sent to their manager alone: filed under the creator at once (it answers a mail
+    of theirs, which rule 3 would find once the Sent copy is read)."""
+    if not message_id or not person or recipients == [person]:
+        return
+    try:
+        person_store().learn(message_id, person, "refs")
+    except OSError as e:
+        log("conversation person not kept", message_id, err_text(e))
+
+
+def learn_person(full: dict):
+    """Rules 3 and 4 for a mail just read whole, kept for the list and the conversation. Never in the way of reading
+    the mail: a file that cannot be written is logged."""
+    mid = full.get("message_id")
+    if not mid or "body" not in full or is_bounce(full):
+        return
+    try:
+        store = person_store()
+        if store.hand(mid) or person_by_rules(full):
+            return
+        me, sender = self_address(), sender_address(full.get("sender") or "")
+        by_subject, everyone = invited_people()
+        refs = convperson.ids_nearest_first(full.get("in_reply_to") or "", full.get("references") or "")
+        by_refs = convperson.by_refs([r for r in refs if r.lower() != mid.lower()], person_of_id, everyone)
+        by_text = convperson.by_text(full.get("body") or "", by_subject.get(norm_subject(full.get("subject")), set()),
+                                     sender, me) if sender != me else ""
+        if by_refs in everyone and by_text and by_text != by_refs:
+            return  # answers a mail about one creator, quotes another's address: nothing learned (convperson.py)
+        # the chain may lead back to nobody but the sender (the manager's own earlier mail): then the text tells
+        found, how = (by_refs, "refs") if by_refs and by_refs != counterpart(full) else (by_text, "text")
+        if found and found != counterpart(full) and found != me:
+            if store.learn(mid, found, how):
+                log("mail filed under", found, f"({how})", mid)
+    except Exception as e:  # noqa: BLE001  filing is bookkeeping: the mail is read and shown all the same
+        log("conversation person not learned", mid, err_text(e))
+
+
+def person_candidates(meta: dict) -> list[str]:
+    """Whom the owner may move a mail to: the people on it, the creators this sender's other mails are filed under,
+    and the invited creators its text names. The mail's own person first."""
+    me, sender = self_address(), sender_address(meta.get("sender") or "")
+    out = [person_of(meta)] + sorted(participants(meta))
+    for _, e in mail_by_id().values():
+        if sender_address(e.get("sender") or "") == sender or sender in participants(e):
+            out.append(person_of(e))
+    by_subject, _ = invited_people()
+    here = by_subject.get(norm_subject(meta.get("subject")), set())
+    out += sorted(a.lower().rstrip(".") for a in convperson.ADDRESS.findall(meta.get("body") or "")
+                  if a.lower().rstrip(".") in here)
+    return [a for a in dict.fromkeys(out) if a and a != me][:20]
+
+
 def thread_key(meta: dict) -> str:
-    who = counterpart(meta)
+    who = person_of(meta)
     if not who or is_bounce(meta):
         who = f"msg:{meta.get('message_id') or meta.get('email_id')}"  # bounces and group copies stay on their own
     return hashlib.sha256(f"{who}|{norm_subject(meta.get('subject'))}".encode("utf-8")).hexdigest()[:16]
@@ -6380,7 +6603,7 @@ async def thread_members(address: str, entries: list[tuple[str, dict]] | None = 
     five folders per click; only a missing or very old index is fetched live. entries: indexed_entries() already
     read for this click."""
     return [(box, e) for box, e in (entries if entries is not None else await indexed_entries())
-            if counterpart(e) == address]
+            if person_of(e) == address]
 
 
 def participants(meta: dict) -> set[str]:
@@ -6403,12 +6626,26 @@ async def conversation_members(anchor: str, subject: str,
     mails, our mails to them alone or with others, an agency's mails with them on Cc. A message without anchor on it
     joins only when the mail headers tie it to the conversation (it answers or quotes a member, or a member answers
     or quotes it), such as an agency answering our outreach to the KOL without copying them. Sharing an address is
-    not enough: an agency handling two creators under the same templated subject keeps two conversations."""
+    not enough: an agency handling two creators under the same templated subject keeps two conversations. A mail
+    filed under another creator we invited (person_of) never joins, and one filed under anchor always does: the
+    manager's mails about A stay A's and the ones about B stay B's, Cc or not."""
+    _, everyone = invited_people()
+
+    def elsewhere(e: dict) -> bool:
+        """Filed under another creator: by the owner, or by the rules. An agency we also invited directly, writing
+        with anchor (an invited creator too) on Cc, is filed under itself and stays in anchor's conversation."""
+        p = person_of(e)
+        if not p or p == anchor:
+            return False
+        if person_store().hand(e.get("message_id") or ""):
+            return True
+        return p in everyone and not (anchor in everyone and anchor in participants(e))
+
     same = [(box, e) for box, e in (entries if entries is not None else await indexed_entries())
-            if norm_subject(e.get("subject")) == subject and not is_bounce(e)]
-    members = [m for m in same if anchor in participants(m[1])]
+            if norm_subject(e.get("subject")) == subject and not is_bounce(e) and not elsewhere(e)]
+    members = [m for m in same if anchor in participants(m[1]) or person_of(m[1]) == anchor]
     people = {a for _, e in members for a in participants(e)}
-    rest = [m for m in same if anchor not in participants(m[1]) and participants(m[1]) & people]
+    rest = [m for m in same if all(m is not x for x in members) and participants(m[1]) & people]
     if not members or not rest:
         return members
     full = await thread_bodies(members + rest)  # the headers are in the bodies; most are cached already
@@ -6478,6 +6715,7 @@ async def load_bodies(bridge: MailBridge, box: str, ids: list[str]) -> dict[str,
             continue
         for m in data.get("emails") or []:
             bodies[(box, str(m["email_id"]))] = m
+            learn_person(m)
             out[str(m["email_id"])] = m
         while len(bodies) > BODY_CACHE_MAX:
             bodies.popitem(last=False)
@@ -6501,6 +6739,7 @@ async def load_body_slot(box: str, email_id: str) -> dict:
                 return bodies[key]
             msg = await finder.get_message(box, str(email_id))
         bodies[key] = msg
+        learn_person(msg)
         while len(bodies) > BODY_CACHE_MAX:
             bodies.popitem(last=False)
         return msg
@@ -6572,8 +6811,8 @@ def main_address(meta: dict) -> str:
     if is_bounce(meta):
         return ""
     me = self_address()
-    return counterpart(meta) or next((a for a in (sender_address(r) for r in meta.get("recipients") or [])
-                                      if a and a != me), "")
+    return person_of(meta) or next((a for a in (sender_address(r) for r in meta.get("recipients") or [])
+                                    if a and a != me), "")
 
 
 def warm_thread(mailbox: str, email_id: str, meta: dict):
@@ -6595,6 +6834,7 @@ def thread_entry(box: str, full: dict, opened: bool = False) -> dict:
     was when the conversation was opened (api_thread then marks it read): the page never folds such a mail away."""
     own = sender_address(full.get("sender")) == self_address()
     mid = full.get("message_id")
+    learn_person(full)  # a mail read before the one it answers was filed learns now (writes only what changed)
     row = cache.get(mid) if mid else None
     if row and row["status"] in ("done", "skipped") and row.get("body_hash") \
             and row["body_hash"] != body_hash(full.get("body", "")):
@@ -6609,7 +6849,8 @@ def thread_entry(box: str, full: dict, opened: bool = False) -> dict:
             "attachments": [a for a in full.get("attachments") or []
                             if not (own and mailserver.is_signature_picture(a))],  # our signature's pictures
             "translation": row, "opened": opened, "flagged": is_flagged(box, full["email_id"]),
-            "unread": not own and is_unread(box, full["email_id"])}
+            "unread": not own and is_unread(box, full["email_id"]),
+            "person": person_of(full), "person_how": person_how(full)}
 
 
 def thread_stub(box: str, meta: dict) -> dict:
@@ -6623,13 +6864,40 @@ def thread_stub(box: str, meta: dict) -> dict:
             "sender": meta.get("sender"), "recipients": meta.get("recipients"), "date": shown_date(meta),
             "subject": meta.get("subject"), "body": "", "preview": " ".join(preview.split())[:160],
             "attachments": [], "translation": None, "opened": False, "flagged": is_flagged(box, meta["email_id"]),
-            "unread": not own and is_unread(box, meta["email_id"])}
+            "unread": not own and is_unread(box, meta["email_id"]),
+            "person": person_of(meta), "person_how": person_how(meta)}
 
 
 def translated(meta: dict) -> bool:
     """A mail whose translation is there already (or that needs none): showing it whole costs no AI call."""
     row = cache.get(meta.get("message_id")) if meta.get("message_id") else None
     return bool(row) and row["status"] in ("done", "skipped")
+
+
+async def api_conv_person(request: Request):
+    """GET: whom a mail is filed under, how, and whom the owner may move it to. POST {person}: the owner files it
+    under that creator ("" gives it back to the rules); mails that answer it follow (convperson.py rule 3)."""
+    params = request.query_params if request.method == "GET" else await request.json()
+    if request.method != "GET" and not isinstance(params, dict):
+        return bad("请求格式不对")
+    mailbox, email_id = str(params.get("mailbox") or "INBOX"), str(params.get("id") or params.get("email_id") or "")
+    if not email_id.isdigit():
+        return bad("缺少邮件编号")
+    msg = await load_body(mail, mailbox, email_id)
+    if not msg.get("message_id"):
+        return bad("这封邮件没有 Message-ID，没法单独归到哪位达人名下")
+    if is_bounce(msg):
+        return bad("退信不归在任何达人名下")
+    if request.method == "POST":
+        person = draft_address(params.get("person"))
+        if person == COMPOSE_KEY or (params.get("person") and not person):
+            return bad("这不像邮箱地址")
+        if person == self_address():
+            return bad("不能归到你自己名下")
+        person_store().set_hand(msg["message_id"], person)
+        log("mail filed by hand under", person or "(the rules)", msg["message_id"])
+    return JSONResponse({"person": person_of(msg), "how": person_how(msg), "sender": sender_address(msg.get("sender")),
+                         "candidates": person_candidates(msg)})
 
 
 async def api_thread_message(request: Request):
@@ -7674,13 +7942,17 @@ async def gather_reply_context(mailbox: str, email_id: str) -> dict:
     kol = main_address(msg) if own else ("" if is_skippable(msg) else sender_address(msg.get("sender", "")))
     if not kol:
         raise ReplyRefused("这封邮件没有可回复的对方")
-    ours, earlier = await indexed_history(kol, msg.get("message_id"), subject=norm_subject(msg.get("subject")))
+    # The history is the creator's the mail is about: a manager writing for two creators from one address must
+    # never show the draft about A what was said about B. The reply still goes to whoever wrote (kol).
+    person = main_address(msg) or kol
+    ours, earlier = await indexed_history(person, msg.get("message_id"), subject=norm_subject(msg.get("subject")))
     if own:
         ours = [m for m in ours if m.get("message_id") != msg.get("message_id")]
     t = {} if own else cache.get(msg.get("message_id") or "") or {}
     zh = t.get("body_zh") if t.get("body_zh") and t.get("body_hash") == body_hash(msg.get("body", "")) else ""
     found = await email_materials(([] if own else [{**msg, "mailbox": mailbox}]) + earlier)
-    return {"mailbox": mailbox, "email_id": email_id, "kol": kol, "msg": msg, "zh": zh or "", "earlier": earlier,
+    return {"mailbox": mailbox, "email_id": email_id, "kol": kol, "person": person, "msg": msg, "zh": zh or "",
+            "earlier": earlier,
             "ours": ours, "subject": reply_subject(msg.get("subject") or ""), "materials": found,
             **({"own_target": True} if own else {})}
 
@@ -8662,13 +8934,17 @@ async def send_reply(body: dict, mailbox: str, email_id: str, who: Recipients, s
     # The saved draft and the KOL总表 row go by the person the conversation is filed under (the page's draft key);
     # a reply that leaves them out is filed under its first To.
     key = draft_address(body.get("draft_key"))
-    key = key if key and key != COMPOSE_KEY else main_address(msg) or who.to[0]
-    filed = key if key in who.all else who.to[0]
+    person = main_address(msg)
+    key = key if key and key != COMPOSE_KEY else person or who.to[0]
+    # A manager's mail about a creator is filed under the creator even when the reply leaves them off Cc: the
+    # server's own reading of the answered mail (person) counts, a draft key the page sent alone does not.
+    filed = key if key in who.all or key == person else who.to[0]
     # The people answered (To, and the conversation's own person wherever they are): a phone case still open for
-    # them is answered by this mail. Someone only copied keeps theirs. Done before sending, so a phone confirmation
+    # them is answered by this mail, as far as it is about this conversation's creator. Someone only copied keeps
+    # theirs, and so does the manager's case about another creator. Done before sending, so a phone confirmation
     # arriving now finds it closed.
     for address in dict.fromkeys(who.to + ([key] if key in who.all else [])):
-        close_cases_for("email", address)
+        close_cases_for("email", address, filed)
     account = current_account.get()
     refs = " ".join(x for x in [msg.get("references"), msg.get("message_id")] if x)
     try:
@@ -8692,6 +8968,8 @@ async def send_reply(body: dict, mailbox: str, email_id: str, who: Recipients, s
         f"(no Sent copy: {result[:200]})" if warning else "")
     try:  # the mail is out: bookkeeping problems below must never look like a failed send (and invite a resend)
         cache.drop_draft(account, key)  # sent: the saved draft must not come back as unsent work
+        if filed == person and filed not in who.all:
+            file_sent_under(message_id, filed, who.all)
         for item in sent_uploads(body):
             outbox.remove(item)
         sent_changed()  # reopening the conversation must show this reply, or it invites a second send
@@ -9400,11 +9678,32 @@ def ledger_read(path: Path) -> tuple[dict[str, tuple[int, str]], str]:
 
 
 def chat_backup(now: datetime) -> dict:
-    """Today's copy and the ledger lines for it. Runs in a worker thread."""
+    """Today's copy and the ledger lines for it, then the old copies cleared. Runs in a worker thread.
+
+    The ledger is read before anything is copied, and a copy of today that the ledger does not list (a run that
+    failed after copying: the ledger locked, the disk full) is made again in its own folder: so a ledger that
+    cannot be read or written stops the copies instead of adding a full one at every look. Old copies are cleared
+    whatever happened to this run."""
     root = chat_backup_dir()
-    folder = root / f"{now:%Y-%m-%d}"
-    if (folder / "chats.sqlite3").exists():  # a second copy the same day (one made up for in the morning, then the
-        folder = root / f"{now:%Y-%m-%d-%H%M%S}"  # evening's): the first stays as the ledger knows it
+    try:
+        return chat_backup_run(root, now)
+    finally:
+        chat_backup_prune(root)
+
+
+def chat_backup_run(root: Path, now: datetime) -> dict:
+    ledger = root / CHAT_LEDGER
+    known, before = ledger_read(ledger)
+    listed = {name.split("/")[1] for name in known if name.startswith("私信备份/")}
+    today = sorted(d for d in root.iterdir() if d.is_dir() and d.name.startswith(f"{now:%Y-%m-%d}")
+                   and re.fullmatch(r"\d{4}-\d{2}-\d{2}(-\d{6})?", d.name)) if root.is_dir() else []
+    unlisted = [d for d in today if d.name not in listed]
+    if unlisted:  # what an earlier run left without a ledger line: nobody's proof, made again in its place
+        folder = unlisted[0]
+    elif today:  # a second copy the same day (one made up for in the morning, then the evening's): the first stays
+        folder = root / f"{now:%Y-%m-%d-%H%M%S}"  # as the ledger knows it
+    else:
+        folder = root / f"{now:%Y-%m-%d}"
     folder.mkdir(parents=True, exist_ok=True)
     CHATS.backup(folder / "chats.sqlite3")
     # each file read once: its size, its sum and its copy in the zip are of the same bytes, whatever is appended meanwhile
@@ -9414,8 +9713,6 @@ def chat_backup(now: datetime) -> dict:
         for name, data in records:
             z.writestr(name, data)
     os.replace(part, folder / "私信记录.zip")
-    ledger = root / CHAT_LEDGER
-    known, before = ledger_read(ledger)
     stamp = now.isoformat(timespec="seconds")
     lines = []
     for name, data in records:
@@ -9435,7 +9732,14 @@ def chat_backup(now: datetime) -> dict:
         f.write(CHAT_LEDGER_HEAD if new else "\n" if torn else "")
         f.write("\n".join(lines) + f"\n{stamp}\t=\t{len(lines)}\t{digest}\t汇总值\n")
     changed = [ln.split("\t")[1] for ln in lines if ln.endswith("已记过的内容有变化")]
-    try:  # old copies go last, and never in the way of the copy just made
+    return {"folder": str(folder), "digest": digest, "lines": len(lines), "changed": changed}
+
+
+def chat_backup_prune(root: Path):
+    """Old copies go last, and never in the way of the copy just made (the newest name)."""
+    try:
+        if not root.is_dir():
+            return
         days = sorted(d for d in root.iterdir() if d.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}(-\d{6})?", d.name))
         keep = set(days[-CHAT_BACKUP_KEEP:])
         for d in days:  # the first copy of each month stays for good
@@ -9446,7 +9750,6 @@ def chat_backup(now: datetime) -> dict:
                 shutil.rmtree(d, ignore_errors=True)
     except OSError as e:
         log("chat backup: old copies not cleared", err_text(e))
-    return {"folder": str(folder), "digest": digest, "lines": len(lines), "changed": changed}
 
 
 # The digest leaves this computer by mail where the owner switched that on (settings.json chats.hash_mail): from the
@@ -9594,7 +9897,12 @@ async def chat_upkeep_loop():
                 await chat_backfill()
             now = datetime.now(autoreply.TZ)
             if chat_backup_due(now, chats.parse_time(CHATS.get_kv(CHAT_BACKUP_AT) or "")):
-                done = await asyncio.to_thread(chat_backup, now)
+                try:
+                    done = await asyncio.to_thread(chat_backup, now)
+                except (OSError, ValueError, sqlite3.Error) as e:  # said where the owner looks: a proof that stopped
+                    if not state.get("sheet_error"):              # being made silently is none
+                        state["sheet_error"] = f"私信备份没做成，半小时后再试：{err_text(e)}"
+                    raise
                 CHATS.set_kv(CHAT_BACKUP_AT, now.isoformat(timespec="seconds"))
                 log("chat backup", done["folder"], f"{done['lines']} ledger line(s), digest {done['digest'][:16]}")
                 if done["changed"]:  # a transcript file's earlier part is not what the ledger knew: said where it is seen
@@ -10506,6 +10814,7 @@ routes = [
     Route("/api/message", api_message),
     Route("/api/thread", api_thread),
     Route("/api/thread/message", api_thread_message),
+    Route("/api/conv/person", api_conv_person, methods=["GET", "POST"]),
     Route("/api/search", api_search),
     Route("/api/channels", api_channels, methods=["POST"]),
     Route("/api/attachment", api_attachment),
