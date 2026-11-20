@@ -71,6 +71,7 @@
   #searchForm { display: flex; gap: 6px; flex: 0 1 420px; min-width: 150px; }
   #searchForm input { flex: 1; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; }
   .badge.box { background: var(--line); color: var(--muted); }
+  .badge.valve { color: var(--warn); background: transparent; border: 1px solid var(--warn); }
   .channels { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 12px; font-size: 13px; }
   .channels .label { color: var(--muted); font-size: 12px; }
   .channels a { border: 1px solid var(--line); border-radius: 14px; padding: 2px 10px; color: var(--accent); background: var(--panel); text-decoration: none; }
@@ -711,6 +712,8 @@ try {
     <button class="act" data-f="backBtn" type="button" title="回到邮件列表">← 列表</button>
     <button class="act" data-f="flagBtn" type="button" title="标记这封邮件，回头再处理；Outlook 和网页邮箱里也看得到">⚑ 标记</button>
     <select data-f="moveSel" title="把这个会话在当前文件夹里的邮件移到别的文件夹"><option value="">移动到…</option></select>
+    <button class="act" data-f="junkBtn" type="button" hidden>这是垃圾邮件</button>
+    <button class="act primary" data-f="notJunkBtn" type="button" hidden>不是垃圾邮件，放回收件箱</button>
   </div>
   <div class="meta" data-f="threadmeta"></div>
   <div class="channels" data-f="channels"></div>
@@ -848,6 +851,7 @@ async function loadStatus() {
     const s = await api("/api/status");
     if (s.login_needed) { showLogin(s.login || {}); return; }
     if (asked !== st.account) return;
+    st.valveOn = !!s.valve_on; st.valveUnseen = s.valve_unseen || 0;
     showUnreadCounts(s.unread_counts || {});
     showFlagCount(s.flagged_count);
     st.signature = s.signature || "";
@@ -922,7 +926,9 @@ function badge(b, c, title) {
 function showUnreadCounts(counts) {
   st.unreadCounts = counts;  // the folder tree is rebuilt now and then: it puts them back at once
   document.querySelectorAll("#folders button.box").forEach(b => {
-    if (b.dataset.box !== FLAGGED) badge(b, counts[b.dataset.box] || 0, c => `${c} 封未读`);
+    // the junk folder counts no unread mail: its number is what KOL Mail put there since it was last opened
+    if (b.dataset.box === st.boxes.junk) badge(b, st.valveUnseen || 0, c => `有 ${c} 封信被 KOL Mail 判为推销信放在这里，点开看看；判错的可以放回收件箱`);
+    else if (b.dataset.box !== FLAGGED) badge(b, counts[b.dataset.box] || 0, c => `${c} 封未读`);
   });
 }
 
@@ -1002,7 +1008,8 @@ function folderItem(f, depth) {
   if (f === FLAGGED) return wrap;
   b.oncontextmenu = e => { e.preventDefault(); openFolderMenu(f, e.clientX, e.clientY); };
   // conversations dragged from the list onto a folder are moved there
-  const ours = e => st.dragging && [...e.dataTransfer.types].includes(DRAG_ROWS) && st.dragging.mailbox !== f && fileable(f);
+  const ours = e => st.dragging && [...e.dataTransfer.types].includes(DRAG_ROWS) && st.dragging.mailbox !== f
+    && (fileable(f) || f === st.boxes.junk);  // onto junk too: that sender's next mail goes there by itself
   b.addEventListener("dragover", e => { if (ours(e)) { e.preventDefault(); b.classList.add("drop"); } });
   b.addEventListener("dragleave", () => b.classList.remove("drop"));
   b.addEventListener("drop", e => {
@@ -1111,7 +1118,10 @@ async function moveMails(mailbox, ids, target) {
   if (!ids.length) return;
   // whole_thread: the server adds the conversation's mails in this folder that the list never loaded
   const r = await post("/api/move", { mailbox, email_ids: ids, to: target, whole_thread: true });
-  toast(`${r.moved > 1 ? r.moved + " 封邮件" : "邮件"}已移到“${folderLabel(target)}”`);
+  // what the move teaches the valve (app.py valve_learn), said where the owner looks
+  const taught = !st.valveOn || !st.boxes.junk ? "" : target === st.boxes.junk ? "，这个发件人以后的陌生来信直接进垃圾邮件"
+    : mailbox === st.boxes.junk && target !== st.boxes.trash ? "，这个发件人以后不再拦截" : "";
+  toast(`${r.moved > 1 ? r.moved + " 封邮件" : "邮件"}已移到“${folderLabel(target)}”${taught}`);
   const c = st.current;
   if (c && !c.compose && c.opened.mailbox === mailbox && (r.ids || ids).includes(c.opened.id)) {
     clearInterval(c.poll); st.current = null;
@@ -1198,7 +1208,7 @@ async function switchAccount(name, mailbox = "INBOX") {
   if (st.current) { clearInterval(st.current.poll); st.current.urls.forEach(u => URL.revokeObjectURL(u)); st.current = null; }
   $("#reader").innerHTML = '<div class="empty">选择一封邮件</div>';
   st.search = null; $("#q").value = ""; st.mailbox = mailbox;
-  st.unreadCounts = {}; st.flagCount = 0;  // the other mailbox's numbers must not show on this one's folders
+  st.unreadCounts = {}; st.flagCount = 0; st.valveUnseen = 0; st.valveOn = false;  // the other mailbox's numbers must not show on this one's folders
   renderAccounts(st.accounts || []);
   await loadFolders(); await showFolder(mailbox); await loadStatus();
 }
@@ -1374,6 +1384,10 @@ async function showFolder(f) {
   st.mailbox = f; st.page = 1;
   $("#moreNote").textContent = ""; $("#more").disabled = false; $("#more").textContent = "加载更多";
   document.querySelectorAll("#folders button.box").forEach(b => b.classList.toggle("on", b.dataset.box === f));
+  if (f === st.boxes.junk && st.valveUnseen) {  // looked at: the folder's number starts counting anew
+    st.valveUnseen = 0; showUnreadCounts(st.unreadCounts || {});
+    post("/api/valve/seen", {}).catch(() => {});
+  }
   if (await loadList(false, "cached")) return st.mailbox === f && loadList(false, "revalidate");
   if (st.mailbox !== f || st.search) return;  // another folder or a search took over meanwhile
   const box = $("#rows"); box.textContent = "";
@@ -1458,6 +1472,18 @@ function renderRows(emails, append, search) {
     if (search) { const b = document.createElement("span"); b.className = "badge box"; b.textContent = folderLabel(mailbox); right.append(b); }
     if (e.language && e.status === "done") { const b = document.createElement("span"); b.className = "badge"; b.textContent = e.language; right.append(b); }
     if (STATUS[e.status]) { const b = document.createElement("span"); b.className = "badge " + e.status; b.textContent = STATUS[e.status]; right.append(b); }
+    if (e.valve) {  // what KOL Mail did with this mail by itself (app.py valve_tag)
+      const [text, why, undo] = {
+        junk: ["自动拦截", "KOL Mail 判断这是推销信，放进了垃圾邮件", true],
+        leave: ["未放回", "这封信回复过我们的邮件，但 KOL Mail 判断它是推销信，没有放回收件箱", true],
+        rescue: ["已救回", "邮箱把它当成了垃圾邮件，KOL Mail 放回了收件箱", false],
+      }[e.valve.action] || [];
+      if (text) {
+        const b = document.createElement("span"); b.className = "badge valve"; b.textContent = text;
+        b.title = why + (e.valve.reason ? `：${e.valve.reason}` : "") + (undo ? "。判错了就点开它，再点“不是垃圾邮件，放回收件箱”" : "");
+        right.append(b);
+      }
+    }
     if (st.folders.flaggable.has(mailbox)) {  // where the flag is checked against the server (not Junk, Drafts...)
       const flag = document.createElement("span"); flag.className = "flag"; flag.textContent = "⚑"; flag.setAttribute("role", "button");
       flag.title = "标记，回头再处理（再点一下取消）";
@@ -1579,6 +1605,15 @@ function fillMoveSelect(ctx) {
     const to = sel.value; sel.value = "";
     if (to) await moveMails(box, ctx.moveIds, to);
   });
+  // Into junk and back out of it: one click each, and the sender is remembered (see moveMails).
+  const junk = st.boxes.junk, into = field(ctx.view, "junkBtn"), out = field(ctx.view, "notJunkBtn");
+  into.hidden = !junk || !st.folders.names.includes(junk) || !ctx.moveIds.length || !fileable(box);
+  out.hidden = !junk || box !== junk || !ctx.moveIds.length;
+  // what the buttons promise beyond the move holds only where the valve works (the primary mailbox)
+  into.title = "把这个会话放进垃圾邮件" + (st.valveOn ? "。以后这个发件人的陌生来信会直接进垃圾邮件，不通知、不记总表、不自动回复" : "");
+  out.title = "放回收件箱" + (st.valveOn ? "。以后这个发件人的信不会再被拦截" : "");
+  into.onclick = safe(() => moveMails(box, ctx.moveIds, junk));
+  out.onclick = safe(() => moveMails(box, ctx.moveIds, "INBOX"));
 }
 
 // Two passes: the local caches answer at once, then the server searches every message in the KOL folders,

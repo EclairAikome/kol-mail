@@ -35,6 +35,19 @@ def _no_filing_left_over(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _every_scan_is_the_first(monkeypatch):
+    """A scan remembers what it found (a look that finds the same mails ends there) and when the junk rescue last
+    ran beside it: a test's scan starts from nothing, whatever the tests before it scanned."""
+    import sys
+    app = sys.modules.get("app")
+    if app is not None and hasattr(app, "scan_marks"):
+        for name in ("scan_marks", "scan_looked", "scan_errors", "junk_looked", "valve_pending"):
+            monkeypatch.setattr(app, name, {})
+        monkeypatch.setattr(app, "junk_busy", set())
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_lookups_from_tests(monkeypatch):
     """Finding a mailbox's servers (mailfind.py) asks DNS, the web and the servers themselves. Never from a test:
     here nothing is found, and a test that needs an answer sets its own."""

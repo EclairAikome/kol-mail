@@ -12,6 +12,10 @@ filter should keep. A KOL's first mail that answers nothing of ours therefore st
 
 Each Message-ID is moved back at most once, and a mail the owner moved into junk in KOL Mail is never moved back:
 both are kept in a small file, so putting a mail into junk again sticks.
+
+Since the valve (spamvalve.py) a judge reads the junk mails too: a KOL's first mail now comes back when it reads like
+one, and a pitch stays in junk even though it answers a mail of ours, unless it comes from someone we wrote to. With
+KOL_VALVE=0 the rescue does what is described above and nothing else.
 """
 
 from __future__ import annotations

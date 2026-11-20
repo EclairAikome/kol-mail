@@ -71,6 +71,7 @@ import tgsetup  # noqa: E402
 import mailserver  # noqa: E402
 import mailmove  # noqa: E402
 import junkrescue  # noqa: E402
+import spamvalve  # noqa: E402
 import mailfind  # noqa: E402
 import signature  # noqa: E402
 import folders  # noqa: E402
@@ -1526,7 +1527,39 @@ async def translator_loop():
             await asyncio.sleep(5)
 
 
-scan_now = asyncio.Event()  # set when the computer has just woken: what came meanwhile is looked at right away
+# set when the computer has just woken, or mails came back out of junk: what is new is looked at right away
+scan_now = asyncio.Event()
+
+# How long a new mail waits to be noticed was mostly the wait for the next scan (measured 2026-11-20: 90 s on
+# average, against 4.4 s for the INBOX list itself). The company mailbox is now looked at every INBOX_INTERVAL. A
+# look that finds the same newest mails as the last one ends there: everything a scan does with them (translations
+# tried again, notices, KOL总表, the off-hours replies, the junk rescue) keeps its old pace of SCAN_INTERVAL. Other
+# mailboxes keep that pace for the look too, and so does a primary mailbox on a public provider (163, QQ, Gmail):
+# some of those refuse a login a minute.
+INBOX_INTERVAL = int(os.environ.get("KOL_INBOX_INTERVAL", min(60, SCAN_INTERVAL)))
+SCAN_SLACK = 5  # seconds: "a SCAN_INTERVAL ago" for a loop that wakes a moment early
+scan_looked: dict[str, float] = {}   # mailbox -> when its INBOX was last listed by the scan (time.time())
+scan_marks: dict[str, tuple] = {}    # mailbox -> (the newest INBOX mails then, when they were last taken in)
+scan_errors: dict[str, str] = {}     # mailbox -> why its last scan failed
+
+
+def elapsed(since: float | None) -> float:
+    """Seconds since a time.time() noted earlier; for ever when there is none, or when the clock was set back. By the
+    wall clock on purpose: on a Mac time.monotonic stands still while the computer sleeps, and what was last done
+    before a night's sleep would count as done a moment ago."""
+    gone = -1 if since is None else time.time() - since
+    return gone if gone >= 0 else float("inf")
+
+
+def looked_often() -> bool:
+    """Whether the current mailbox is the one looked at every INBOX_INTERVAL: the primary one on a domain of its
+    own. Every other mailbox is scanned exactly as before, every SCAN_INTERVAL and in full each time."""
+    return is_primary() and bool(own_id_domain())
+
+
+def scan_due() -> bool:
+    """Whether the current mailbox is looked at in this round of the loop."""
+    return looked_often() or elapsed(scan_looked.get(current_account.get())) >= SCAN_INTERVAL - SCAN_SLACK
 
 
 async def scan_loop():
@@ -1534,41 +1567,98 @@ async def scan_loop():
         if restart_pending:  # the primary mailbox changed: nothing may be logged or announced for the old one
             await asyncio.sleep(5)
             continue
+        woken = scan_now.is_set()  # every mailbox is looked at now, whatever its pace
         scan_now.clear()  # before the scan: a wake-up during it scans again right after
-        errors = []
+        looked = False
         for account in list(ACCOUNTS):
             if account not in ACCOUNTS:  # logged out meanwhile
                 continue
             with on_account(account.name):
+                if not woken and not scan_due():
+                    continue
+                looked, scan_looked[account.name] = True, time.time()
                 try:
                     await scan_account()
+                    scan_errors.pop(account.name, None)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    errors.append(err_text(e) if account.primary else f"{account.short}：{err_text(e)}")
+                    scan_errors[account.name] = err_text(e) if account.primary else f"{account.short}：{err_text(e)}"
                     log("scan failed", account.name, err_text(e))
                     # maybe the password: tested (at most every PASSWORD_CHECK_GAP), also while taken for refused
                     if isinstance(e, MailError) and (not isinstance(e, NotReady) or account.name in password_rejected):
                         spawn(check_password(account.name), "password check")
-        state["last_scan"] = time.strftime("%H:%M:%S")
-        state["scan_error"] = "；".join(errors) or None
+        for name in [n for n in scan_errors if n not in {a.name for a in ACCOUNTS}]:  # logged out: no error to show
+            del scan_errors[name]
+        if looked:
+            state["last_scan"] = time.strftime("%H:%M:%S")
+        state["scan_error"] = "；".join(scan_errors.values()) or None
         # On a Mac the wait does not count the time asleep: without scan_now it would go on for minutes after waking
         with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(scan_now.wait(), SCAN_INTERVAL)
+            await asyncio.wait_for(scan_now.wait(), INBOX_INTERVAL)
 
 
 async def scan_account():
     """New INBOX mail of the current mailbox: announce it, and for the primary mailbox queue the translations.
     Another mailbox's mail is translated only when it is opened (no AI cost or upload for mail never read here),
-    and the off-hours replies and KOL总表 follow the primary mailbox only."""
-    try:  # first, so a KOL reply the server filed as spam is announced by this very scan
-        await rescue_junk()
+    and the off-hours replies and KOL总表 follow the primary mailbox only.
+
+    Nothing but the INBOX list stands between a new mail and its notice. The junk rescue and the judge's reading of
+    strangers' mails (spamvalve.py) each cost seconds per mail on the mail server, so they run beside the scan:
+    what comes back out of junk starts another scan at once, and a stranger's mail the judge lets through is taken
+    in the moment it is judged."""
+    try:
+        await scan_inbox()
     except asyncio.CancelledError:
         raise
-    except Exception as e:  # noqa: BLE001  never stops the INBOX scan; tried again at the next one
-        log("junk rescue failed", err_text(e))
+    except Exception:
+        rescue_beside()  # the rescue never depended on INBOX: also when that could not be listed or taken in
+        raise
+    rescue_beside()  # after the mails are on their way: its calls queue behind the translator's on the mail server
+
+
+async def scan_inbox():
     data = await bg.list_messages("INBOX", 1, 50)
     emails = data.get("emails", [])
+    name, now = current_account.get(), time.time()
+    mark = tuple((str(e.get("email_id")), e.get("message_id")) for e in emails)
+    last = scan_marks.get(name)
+    if looked_often() and last and last[0] == mark and elapsed(last[1]) < SCAN_INTERVAL - SCAN_SLACK:
+        return  # the same mails as at the last look, taken in less than a SCAN_INTERVAL ago
+    try:  # a stranger's new mail waits for the judge, beside the scan (spamvalve.py)
+        emails = inbox_valve(emails)
+    except Exception as e:  # noqa: BLE001  never stops the scan: every mail goes on as before
+        log("inbox valve failed", err_text(e))
+    await take_in(emails)
+    scan_marks[name] = (mark, now)  # only now: a scan that failed half way is done again at the next look
+
+
+def rescue_beside():
+    """Starts the junk rescue of the current mailbox beside the scan, every SCAN_INTERVAL and one at a time. A mail
+    it brings back sets scan_now: the scan that follows at once announces it."""
+    name = current_account.get()
+    since = elapsed(junk_looked.get(name))
+    if since < SCAN_INTERVAL - SCAN_SLACK or (name in junk_busy and since < JUNK_STUCK):
+        return  # one that never ended (cancelled before it began, say) does not stop the rescue for good
+    junk_busy.add(name)
+    junk_looked[name] = time.time()
+
+    async def run():
+        try:
+            if await rescue_junk():
+                scan_now.set()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001  tried again a SCAN_INTERVAL later
+            log("junk rescue failed", err_text(e))
+        finally:
+            junk_busy.discard(name)
+    spawn(run(), "junk rescue")
+
+
+async def take_in(emails: list[dict]):
+    """What a scan makes of INBOX mails (newest first): the translations, KOL总表, the notices, the off-hours
+    replies. Also called for the strangers' mails the judge let through, when it has judged them."""
     known = cache.get_many([e["message_id"] for e in emails if e.get("message_id")]) if is_primary() else {}
     for meta in reversed(emails) if is_primary() else ():  # oldest first
         mid = meta.get("message_id")
@@ -1596,6 +1686,10 @@ JUNK_TRIES = 3     # moves back tried per mail; one the server keeps refusing is
 junk_memories: dict[str, junkrescue.Memory] = {}
 junk_left: dict[str, set[str]] = {}  # per mailbox: junk Message-IDs looked at this run and not ours, not read again
 junk_tries: dict[str, dict[str, int]] = {}  # per mailbox: Message-ID -> moves back tried this run
+junk_asks: dict[str, dict[str, int]] = {}   # per mailbox: Message-ID -> times the judge gave no answer this run
+junk_looked: dict[str, float] = {}  # mailbox -> when its junk rescue last started (time.time()), see rescue_beside
+junk_busy: set[str] = set()         # mailboxes whose junk rescue is running
+JUNK_STUCK = 900                    # seconds after which a rescue still "running" is taken for lost
 
 
 def junk_memory() -> junkrescue.Memory:
@@ -1631,14 +1725,15 @@ async def junk_list(junk: str) -> list[dict]:
     return data.get("emails") or []
 
 
-async def junk_heads(junk: str, waiting: list[dict], left: set[str]) -> dict[str, dict]:
-    """The headers of these junk mails by UID: one call for all of them, else one per mail. The library refuses a
-    whole batch when one mail's In-Reply-To / References (or the batch's headers together) are over its limit, and
-    then every scan would ask for the same mails again while a real reply behind them waited. A mail refused on its
-    own for its size is left alone for this run; any other failure is asked again on the next scan."""
+async def mail_heads(box: str, waiting: list[dict], left: set[str], body: int = 1) -> dict[str, dict]:
+    """The headers of these mails of one folder by UID (and the first `body` characters of their text, for the
+    judge): one call for all of them, else one per mail. The library refuses a whole batch when one mail's
+    In-Reply-To / References (or the batch's headers together) are over its limit, and then every scan would ask
+    for the same mails again while a real reply behind them waited. A mail refused on its own for its size is named
+    in left and left alone for this run; any other failure is asked again on the next scan."""
     async def read(ids: list[str]) -> list[dict]:
-        data = await bg.call("get_emails_content", mailbox=junk, email_ids=ids, mark_as_read=False,
-                             max_body_length=1, timeout=JUNK_TIMEOUT)
+        data = await bg.call("get_emails_content", mailbox=box, email_ids=ids, mark_as_read=False,
+                             max_body_length=body, timeout=JUNK_TIMEOUT)
         return data.get("emails") or []
 
     ids = [str(m["email_id"]) for m in waiting]
@@ -1651,7 +1746,7 @@ async def junk_heads(junk: str, waiting: list[dict], left: set[str]) -> dict[str
             raise
         if len(ids) == 1:
             left.add(waiting[0]["message_id"])
-            log("junk rescue: headers too big to read, left in junk", ids[0])
+            log("headers too big to read, mail left where it is", box, ids[0])
             return {}
     heads = {}
     for meta in waiting:
@@ -1662,47 +1757,46 @@ async def junk_heads(junk: str, waiting: list[dict], left: set[str]) -> dict[str
         except MailError as e:
             if "limit_exceeded" in str(e):
                 left.add(meta["message_id"])
-                log("junk rescue: headers too big to read, left in junk", meta["email_id"])
+                log("headers too big to read, mail left where it is", box, meta["email_id"])
             else:
-                log("junk rescue: headers not read", meta["email_id"], err_text(e))
+                log("headers not read", box, meta["email_id"], err_text(e))
     return heads
 
 
 async def rescue_junk():
-    """The newest mails of the junk folder that answer a mail of ours go back to INBOX (junkrescue.py). The primary
-    mailbox only: the company's, whose Sent index is complete and whose own domain names our Message-IDs. A sender
-    alone is never enough: spam forging a KOL's address is what the filter is for."""
+    """The newest mails of the junk folder that are a KOL's go back to INBOX (junkrescue.py, spamvalve.py): one that
+    answers a mail of ours, unless the judge reads it as a pitch, and any other the judge reads as a KOL's. The
+    primary mailbox only: the company's, whose Sent index is complete and whose own domain names our Message-IDs.
+    A sender alone is never enough: spam forging a KOL's address is what the filter is for. True when mails were
+    moved (or may have been): rescue_beside then has INBOX looked at again at once."""
     if not is_primary():
         return
     junk = folder_role("junk")
     if not junk or (folder_info.get("names") is not None and junk not in folder_info["names"]):
         return
     memory, name = junk_memory(), current_account.get()
-    left, tries = junk_left.setdefault(name, set()), junk_tries.setdefault(name, {})
+    left, tries, asked = junk_left.setdefault(name, set()), junk_tries.setdefault(name, {}), junk_asks.setdefault(name, {})
+    store = None
+    if VALVE_ENABLED:
+        try:
+            store = valve_store()
+            store.blocked()  # read now: a valve file that cannot be read costs this scan the judge, not the rescue
+        except OSError as e:
+            log("valve: file not readable, this junk rescue goes without the judge", err_text(e))
+            store = None
     waiting = [m for m in await junk_list(junk) if m.get("message_id") and str(m.get("email_id", "")).isdigit()
                and not is_skippable(m) and m["message_id"] not in memory and m["message_id"] not in left
-               and tries.get(m["message_id"], 0) < JUNK_TRIES][:junkrescue.CONTENT_MAX]
+               and not (store and store.judged(m["message_id"]))
+               and tries.get(m["message_id"], 0) < JUNK_TRIES
+               and asked.get(m["message_id"], 0) < JUNK_TRIES][:junkrescue.CONTENT_MAX]
     if not waiting:
         return
-    sent = folder_metas_known(sent_box()) if sent_box() else []
-    sent_ids, domain = junkrescue.our_ids(sent), self_address().rpartition("@")[2].lower()
-    if domain in accounts.PUBLIC_DOMAINS:  # on icloud.com or 163.com every user's Message-IDs end the same way
-        domain = ""
-    heads = await junk_heads(junk, waiting, left)
-    ours = []
-    for meta in waiting:
-        content = heads.get(str(meta["email_id"]))
-        if content is None:
-            continue  # gone meanwhile, or not read: the next scan
-        if junkrescue.answers_us(content, sent_ids, domain):
-            ours.append(meta)
-        elif sent_ids:  # with Sent not indexed yet (just started) only the domain could tell: asked again later
-            left.add(meta["message_id"])
+    ours = await (junk_kol_mails(junk, waiting, left, store) if store else junk_answers(junk, waiting, left))
     if not ours:
         return
-    for m in ours:
+    for m, _ in ours:
         tries[m["message_id"]] = tries.get(m["message_id"], 0) + 1
-    ids = [str(m["email_id"]) for m in ours]
+    ids = [str(m["email_id"]) for m, _ in ours]
     data = await bg.call("move_emails", email_ids=ids, source_mailbox=junk, destination_mailbox="INBOX")
     result = str(data.get("result", data))
     forget_moved(junk, ids)
@@ -1711,9 +1805,452 @@ async def rescue_junk():
     spawn(prefetch_after_folder_change("INBOX"), "junk rescue refresh")
     if not result.startswith("Successfully"):  # partly done: what is still in junk is tried again, JUNK_TRIES times
         log("junk rescue: not all moved back", result[:200])
+        return True
+    remember_junk([m["message_id"] for m, _ in ours], "rescued")
+    if store:
+        for m, reason in ours:
+            valve_verdicts.get(name, {}).pop(m["message_id"], None)
+            valve_note(m["message_id"], spamvalve.RESCUE, valve_entry(m, reason))
+    log("junk rescue: moved back to INBOX", [(m["email_id"], sender_address(m.get("sender") or "")) for m, _ in ours])
+    return True
+
+
+async def junk_answers(junk: str, waiting: list[dict], left: set[str]) -> list[tuple[dict, str]]:
+    """The junk mails that answer a mail of ours, as the rescue picked them before there was a judge. With
+    KOL_VALVE=0 this is all the rescue does, exactly as it did."""
+    sent = folder_metas_known(sent_box()) if sent_box() else []
+    sent_ids, domain = junkrescue.our_ids(sent), own_id_domain()
+    heads = await mail_heads(junk, waiting, left)
+    ours = []
+    for meta in waiting:
+        content = heads.get(str(meta["email_id"]))
+        if content is None:
+            continue  # gone meanwhile, or not read: the next scan
+        if junkrescue.answers_us(content, sent_ids, domain):
+            ours.append((meta, ""))
+        elif sent_ids:  # with Sent not indexed yet (just started) only the domain could tell: asked again later
+            left.add(meta["message_id"])
+    return ours
+
+
+async def junk_kol_mails(junk: str, waiting: list[dict], left: set[str], store: spamvalve.Store) -> list[tuple[dict, str]]:
+    """The junk mails that go back to INBOX with the judge at work, each with why (spamvalve.py): someone we wrote
+    to answering that mail (unread by the judge, as always); any other mail that answers one of ours unless the
+    judge reads a pitch; and what the judge reads as a KOL's."""
+    name = current_account.get()
+    asked, verdicts = junk_asks.setdefault(name, {}), valve_verdicts.setdefault(name, {})
+    wrote, auto, people = our_mail()
+    known, blocked, domain = people | store.trusted(), store.blocked(), own_id_domain()
+    heads = {}
+    for i in range(0, len(waiting), spamvalve.READ_AT_ONCE):  # a few per call: a scan's INBOX list gets in between
+        heads.update(await mail_heads(junk, waiting[i:i + spamvalve.READ_AT_ONCE], left, spamvalve.BODY))
+    asks, judged, ours = [], [], []  # (mail, relation, claim, content); (mail, relation, claim, answer); (mail, why)
+    for meta in waiting:
+        mid, content = meta["message_id"], heads.get(str(meta["email_id"]))
+        if content is None:
+            continue  # gone meanwhile, or not read: the next scan
+        sender = sender_address(meta.get("sender") or "")
+        claim = spamvalve.answers(content, wrote, auto, domain)
+        if not wrote and not claim:
+            continue  # with Sent not indexed yet (just started) only the domain could tell: asked again later
+        rel = spamvalve.relation(sender, claim == spamvalve.SURE, known)
+        decided = spamvalve.junk_decided(rel, sender in blocked, sender in known)
+        if decided == spamvalve.RESCUE:
+            ours.append((meta, ""))
+        elif decided == spamvalve.LEAVE or (not claim and autoreply.email_skip_reason(meta.get("sender"), "")):
+            left.add(mid)  # the owner put this stranger's mail into junk; a machine's or a colleague's mail
+        elif mid in verdicts:  # judged at an earlier scan, the move back failed then
+            judged.append((meta, rel, claim, verdicts[mid]))
+        else:
+            asks.append((meta, rel, claim, content))
+    answers, down = await judge_many([(rel, content) for _, rel, _, content in asks])
+    for (meta, rel, claim, _), answer in zip(asks, answers):
+        if answer:
+            verdicts[meta["message_id"]] = answer
+        judged.append((meta, rel, claim, answer))
+    for meta, rel, claim, answer in judged:
+        mid, (verdict, reason) = meta["message_id"], answer or (None, "")
+        action = spamvalve.junk_judged(rel, claim == spamvalve.MAYBE, verdict)
+        if action == spamvalve.RESCUE:
+            ours.append((meta, reason))
+        elif action == spamvalve.LEAVE:  # noted: not read or judged again, also after a restart
+            verdicts.pop(mid, None)
+            # a pitch that answers a mail of ours used to come back: the page says that it was kept, and why
+            valve_note(mid, spamvalve.LEAVE, valve_entry(meta, reason) if rel == spamvalve.ANSWERS or claim else None)
+        elif not down:  # the judge gave no answer for this mail: asked again at the next scans, JUNK_TRIES in all
+            asked[mid] = asked.get(mid, 0) + 1
+    return ours
+
+
+# ---------------------------------------------------------------- selling mail out of INBOX (spamvalve.py)
+# Mail that sells something ("do you need promotion resources?") is hand-written and comes from ordinary mailboxes:
+# the server's filter lets it through, and the scan took each one for a KOL's. A stranger's new INBOX mail is now
+# read by the judge first, and a pitch goes to junk before it is translated, announced, logged or answered. The
+# rescue above asks the same judge, so the two never undo each other. KOL_VALVE=0 turns the judge off: nothing
+# leaves INBOX, and only answers to our mails come out of junk, as before.
+#
+# Reading a mail costs about 3 s on the mail server and a judgement a few more (measured 2026-11-20: 17 s to read
+# six), so none of it is on the scan's path. The scan sets a stranger's new mail aside (inbox_valve, no waiting)
+# and goes on with everyone else's; valve_work reads and judges beside it and hands what stays to take_in itself.
+# Mail from someone we know is never a moment later for the valve, and a stranger's by one read and one judgement.
+
+VALVE_ENABLED = os.environ.get("KOL_VALVE", "1") != "0"
+JUDGE_TIMEOUT = 45   # seconds for one judgement
+JUDGE_AT_ONCE = 3    # judgements running side by side
+VALVE_PATIENCE = 120  # seconds a stranger's mail may wait for the judge; then it is taken in unjudged
+VALVE_MOVE_TIMEOUT = 60  # seconds for a move to junk; the next lot's mails wait behind it
+valve_pending: dict[str, dict[str, dict]] = {}  # per mailbox: Message-ID -> a mail the judge has right now
+judge_slots: dict = {}  # the semaphore all judgements share (judge_many)
+# Our off-hours reply as offhours_email_reply names it. Never "Re: Automatic reply": that is the owner writing by
+# hand in a conversation that began with one, and whoever gets such a mail is someone we wrote to.
+OUR_AUTO_SUBJECT = re.compile(r"\s*Automatic reply\b", re.IGNORECASE)
+valve_stores: dict[str, spamvalve.Store] = {}
+valve_tries: dict[str, dict[str, int]] = {}  # per mailbox: Message-ID -> times the judge or the move failed for it
+valve_verdicts: dict[str, dict[str, tuple[str, str]]] = {}  # per mailbox: judgements whose move is still owed
+ours_cache: dict[str, tuple] = {}  # account -> (what the indexes were, our_mail() worked out from them)
+
+
+def valve_store() -> spamvalve.Store:
+    name = current_account.get()
+    if name not in valve_stores:
+        valve_stores[name] = spamvalve.Store(DATA / ("valve.json" if name == ACCOUNT else f"valve-{name}.json"))
+    return valve_stores[name]
+
+
+def valve_note(message_id: str, action: str, entry: dict | None = None):
+    """Never stops a scan or the owner's move: a note not written means at most one more judgement."""
+    try:
+        valve_store().note(message_id, action, entry)
+    except OSError as e:
+        log("valve: not saved", action, err_text(e))
+
+
+def valve_entry(meta: dict, reason: str) -> dict:
+    """A move as the page shows it."""
+    return {"sender": strip_hidden(meta.get("sender") or "")[:200], "reason": reason, "at": time.time(),
+            "subject": strip_hidden(re.sub(r"[\r\n]+", " ", meta.get("subject") or "")).strip()[:150]}
+
+
+def own_id_domain() -> str:
+    """The domain our own Message-IDs end with, or "" on a mailbox anyone can open (icloud.com, 163.com), where
+    every user's Message-IDs end the same way."""
+    domain = self_address().rpartition("@")[2].lower()
+    return "" if domain in accounts.PUBLIC_DOMAINS else domain
+
+
+def our_mail() -> tuple[set[str], set[str], set[str]]:
+    """(Message-IDs of the mails we wrote, those of our automatic replies, everyone we wrote to or filed in a deal
+    folder), from the indexes as they are now. Only the deal folders: one the owner made may be where the selling
+    mail was filed by hand."""
+    box = sent_box()
+    sent = folder_metas_known(box) if box else []
+    deals = [folder_metas_known(b) for b in deal_boxes()]
+    key = (box, list_key(sent)) + tuple(list_key(m) for m in deals)
+    name = current_account.get()
+    hit = ours_cache.get(name)
+    if hit and hit[0] == key:
+        return hit[1]
+    wrote, auto, people = spamvalve.ours(sent, sender_address, lambda s: bool(OUR_AUTO_SUBJECT.match(s)))
+    for meta in (m for metas in deals for m in metas):
+        people.update(a for a in (sender_address(str(r or "")) for r in [meta.get("sender"), *(meta.get("recipients") or [])])
+                      if a)
+    people.discard(self_address())
+    ours_cache[name] = (key, (wrote, auto, people))
+    return wrote, auto, people
+
+
+async def judge_mail(relation: str, content: dict) -> tuple[str, str] | None:
+    """(kol / pitch / other, why in Chinese) for one mail, or None when the model gave no answer that counts.
+    ClaudeUnavailable (no AI at all right now) is raised: judge_many tells that apart from one mail gone wrong."""
+    seen = {k: strip_hidden(str(content.get(k) or "")) for k in ("sender", "subject", "body")}
+    call_kind("judge")
+    try:
+        result = await run_claude(spamvalve.JUDGE_SYSTEM.format(company=COMPANY),
+                                  spamvalve.judge_text(secrets.token_hex(8), relation, seen), spamvalve.JUDGE_SCHEMA,
+                                  TRANSLATE_MODEL, timeout=JUDGE_TIMEOUT)
+    except ClaudeUnavailable as e:
+        state["claude_error"] = err_text(e)
+        raise
+    except ClaudeError as e:
+        log("judge failed", content.get("email_id"), err_text(e))
+        return None
+    return spamvalve.clean_verdict(result)
+
+
+async def judge_many(asks: list[tuple[str, dict]]) -> tuple[list[tuple[str, str] | None], bool]:
+    """(judge_mail's answer for each (relation, content), in the same order; whether the AI was unavailable for
+    any of them). JUDGE_AT_ONCE run side by side, counting every caller: the rescue and the valve work at once."""
+    loop = asyncio.get_running_loop()
+    if judge_slots.get("loop") is not loop:  # a semaphore belongs to the loop it first waited in
+        judge_slots.update(loop=loop, slots=asyncio.Semaphore(JUDGE_AT_ONCE))
+    slots, down = judge_slots["slots"], []
+
+    async def one(relation: str, content: dict):
+        async with slots:
+            try:
+                return await judge_mail(relation, content)
+            except ClaudeUnavailable as e:
+                if not down:
+                    log("judge: AI unavailable", err_text(e))
+                down.append(True)
+                return None
+    return list(await asyncio.gather(*(one(relation, content) for relation, content in asks))), bool(down)
+
+
+def valve_new(meta: dict, store: spamvalve.Store, since: float) -> bool:
+    """A mail the valve has yet to look at: it came after the valve was switched on, and is no bounce, colleague's
+    or machine's mail. Its subject excuses nothing: "Re: Automatic reply" is what a seller answering our off-hours
+    reply sends, and a real automatic reply comes from someone we wrote to, who is never judged."""
+    mid = meta.get("message_id")
+    if not mid or not str(meta.get("email_id", "")).isdigit() or store.judged(mid):
+        return False
+    if is_skippable(meta) or autoreply.email_skip_reason(meta.get("sender"), "") or quiet_old(meta):
+        return False
+    when = parse_date(meta.get("date"))
+    return bool(when) and when.timestamp() >= since
+
+
+def inbox_valve(emails: list[dict]) -> list[dict]:
+    """The newest INBOX mails the scan goes on with now: all but the strangers' new mails, which the judge gets
+    first (valve_work, beside the scan). Nothing here waits for the mail server or the model. The primary mailbox
+    only, like the translations."""
+    if not VALVE_ENABLED or not is_primary():
+        return emails
+    junk = folder_role("junk")
+    if not junk or (folder_info.get("names") is not None and junk not in folder_info["names"]):
+        return emails
+    store = valve_store()
+    since = store.started(time.time())
+    wrote, _, people = our_mail()
+    if not wrote:  # Sent not indexed yet (the very first minutes): everyone would look like a stranger
+        return emails
+    known = people | store.trusted()
+    pending = valve_pending.setdefault(current_account.get(), {})
+    new = [m for m in reversed(emails)  # oldest first
+           if m.get("message_id") not in pending and valve_new(m, store, since)
+           and sender_address(m.get("sender") or "") not in known]
+    if new:
+        pending.update({m["message_id"]: m for m in new})
+        spawn(valve_work(new, junk), "valve")
+    return [m for m in emails if m.get("message_id") not in pending]
+
+
+async def valve_work(batch: list[dict], junk: str):
+    """Beside the scan: reads and judges the strangers' mails a scan set aside (oldest first, a lot at a time), takes
+    in those that stay as soon as their lot is judged, then moves the pitches to junk. Whatever goes wrong, a mail
+    that did not go to junk is taken in: a judge or a server that fails must never cost a KOL's mail its notice.
+    And none waits longer than VALVE_PATIENCE for the judge: what it has not got to by then is taken in as it is and
+    judged with a later scan's lot (it may still go to junk then, after its notice).
+
+    Taking a lot in runs on its own (off hours it answers each mail, a quarter of a minute apiece): the next lot's
+    judging never waits for it."""
+    pending = valve_pending.setdefault(current_account.get(), {})
+    started = time.monotonic()
+
+    def release(metas: list[dict]):
+        for meta in metas:
+            pending.pop(meta["message_id"], None)
+        if metas:
+            spawn(take_in(metas[::-1]), "valve take-in")  # newest first, like a scan's list
+
+    try:
+        for i in range(0, len(batch), spamvalve.LOT):
+            lot, to_junk, junked = batch[i:i + spamvalve.LOT], [], set()
+            left = VALVE_PATIENCE - (time.monotonic() - started)
+            try:
+                to_junk = await asyncio.wait_for(valve_judge(lot), left) if left > 0 else []
+            except Exception as e:  # noqa: BLE001  TimeoutError too
+                log("valve: mails taken in unjudged", [m["email_id"] for m in lot], err_text(e) or "the judge took too long")
+                for meta in lot:
+                    if not valve_store().judged(meta["message_id"]):
+                        valve_failed(meta)
+            going = {m["message_id"] for m, _ in to_junk}
+            release([m for m in lot if m["message_id"] not in going])  # these do not wait for the move
+            if to_junk:
+                try:
+                    await valve_move(to_junk, junk, junked)
+                except Exception as e:  # noqa: BLE001
+                    log("valve: move to junk failed", err_text(e))
+                    for meta, _ in to_junk:
+                        if not valve_store().judged(meta["message_id"]):
+                            valve_failed(meta)
+                release([m for m, _ in to_junk if m["message_id"] not in junked])  # still in INBOX
+    finally:  # cancelled at shutdown, say: nothing stays set aside
+        for meta in batch:
+            pending.pop(meta["message_id"], None)
+
+
+def valve_settle(meta: dict, action: str, reason: str = ""):
+    """This INBOX mail is done with: it stays, or it has gone to junk. Never judged again."""
+    name, mid = current_account.get(), meta["message_id"]
+    valve_tries.get(name, {}).pop(mid, None)
+    valve_verdicts.get(name, {}).pop(mid, None)
+    valve_note(mid, action, valve_entry(meta, reason) if action == spamvalve.JUNK else None)
+
+
+def valve_failed(meta: dict):
+    """Reading, judging or moving this INBOX mail failed: it is looked at again with the next scan's lot,
+    spamvalve.ASKS times in all, then it stays unjudged."""
+    tries, mid = valve_tries.setdefault(current_account.get(), {}), meta["message_id"]
+    tries[mid] = tries.get(mid, 0) + 1
+    if tries[mid] >= spamvalve.ASKS:
+        log("valve: gave up on", meta["email_id"], "it stays in INBOX unjudged")
+        valve_settle(meta, spamvalve.KEEP)
+
+
+async def valve_judge(lot: list[dict]) -> list[tuple[dict, str]]:
+    """Reads and judges these INBOX mails: (mail, why) for those that go to junk. The others are settled when they
+    are known to stay; one that could not be read or judged is left for the next lot (valve_failed)."""
+    store = valve_store()
+    verdicts = valve_verdicts.setdefault(current_account.get(), {})
+    wrote, auto, people = our_mail()
+    known, blocked, domain = people | store.trusted(), store.blocked(), own_id_domain()
+    asks, judged, to_junk = [], [], []  # (mail, relation, content); (mail, verdict, reason); (mail, reason)
+    for meta in lot:
+        mid = meta["message_id"]
+        try:  # the whole mail, once: the translation that follows finds it in the cache
+            content = await load_body(bg, "INBOX", str(meta["email_id"]))
+        except MessageGone:  # moved or deleted since the scan listed it
+            valve_settle(meta, spamvalve.KEEP)
+            continue
+        except NotReady:  # the mail server is being reconnected: no fault of the mail's, read with the next lot
+            continue
+        except MailError as e:
+            if "limit_exceeded" in str(e):  # headers too big to read: never read again
+                valve_settle(meta, spamvalve.KEEP)
+            else:
+                log("valve: mail not read", meta["email_id"], err_text(e))
+                valve_failed(meta)
+            continue
+        if content.get("message_id") != mid:  # the UID is another mail's now
+            valve_settle(meta, spamvalve.KEEP)
+            continue
+        sender = sender_address(meta.get("sender") or "")
+        # only a mail of ours that is in Sent counts here; one that merely names our domain is judged like the rest
+        rel = spamvalve.relation(sender, spamvalve.answers(content, wrote, auto, domain) == spamvalve.SURE, known)
+        decided = spamvalve.inbox_decided(rel, sender in blocked)
+        if decided == spamvalve.KEEP:
+            valve_settle(meta, spamvalve.KEEP)
+        elif decided == spamvalve.JUNK:
+            to_junk.append((meta, spamvalve.BLOCKED_REASON))
+        elif mid in verdicts:  # judged before, the move failed then
+            judged.append((meta, *verdicts[mid]))
+        else:
+            asks.append((meta, rel, content))
+    answers, _ = await judge_many([(rel, content) for _, rel, content in asks])
+    for (meta, _, _), answer in zip(asks, answers):
+        if answer:
+            verdicts[meta["message_id"]] = answer
+        judged.append((meta, *(answer or (None, ""))))
+    for meta, verdict, reason in judged:
+        action = spamvalve.inbox_judged(verdict)
+        if action == spamvalve.JUNK:
+            to_junk.append((meta, reason))
+        elif action == spamvalve.RETRY:  # the judge gave no answer
+            valve_failed(meta)
+        else:
+            valve_settle(meta, spamvalve.KEEP)
+    return to_junk
+
+
+async def valve_move(to_junk: list[tuple[dict, str]], junk: str, junked: set[str]):
+    """Moves these INBOX mails to junk; junked gets the Message-IDs of those that went."""
+    def gone(meta: dict, reason: str):
+        valve_settle(meta, spamvalve.JUNK, reason)
+        junked.add(meta["message_id"])
+
+    ids = [str(m["email_id"]) for m, _ in to_junk]
+    try:
+        data = await bg.call("move_emails", timeout=VALVE_MOVE_TIMEOUT, email_ids=ids, source_mailbox="INBOX",
+                             destination_mailbox=junk)
+        result = str(data.get("result", data))
+    except NotReady:  # nothing was sent: the mails are in INBOX, moved with a later lot (no fault of theirs)
         return
-    remember_junk([m["message_id"] for m in ours], "rescued")
-    log("junk rescue: moved back to INBOX", [(m["email_id"], sender_address(m.get("sender") or "")) for m in ours])
+    except MailError as e:  # the server may have moved them before the answer was lost: looked up below
+        result = err_text(e)
+    forget_moved("INBOX", ids)
+    for key in [k for k in lists if k[0] == junk]:
+        lists.pop(key, None)
+    if result.startswith("Successfully"):
+        for meta, reason in to_junk:
+            gone(meta, reason)
+        log("valve: moved to junk", [(m["email_id"], sender_address(m.get("sender") or ""), reason)
+                                    for m, reason in to_junk])
+        return
+    # partly done at best: what left INBOX is in junk, what is still there is tried again with the next lot
+    log("valve: not all moved to junk", result[:200])
+    try:
+        still = {str(m.get("email_id")) for m in (await bg.list_messages("INBOX", 1, 100)).get("emails", [])}
+    except MailError:
+        still = None  # cannot tell: every one of them is looked at again
+    for meta, reason in to_junk:
+        if still is not None and str(meta["email_id"]) not in still:
+            gone(meta, reason)
+        else:
+            valve_failed(meta)
+
+
+def valve_on() -> bool:
+    """Whether the valve works for the mailbox shown: the page only promises what it does then."""
+    return VALVE_ENABLED and is_primary() and bool(folder_role("junk"))
+
+
+def valve_unseen() -> int:
+    """Mails the valve put or kept in junk as pitches since the owner last looked at the junk folder (its badge)."""
+    if not valve_on():
+        return 0
+    try:
+        return valve_store().unseen()
+    except OSError:
+        return 0
+
+
+def valve_tag(mailbox: str, message_id) -> dict | None:
+    """What a list row says about a mail the valve moved or kept, while the mail is where the valve left it."""
+    if not message_id or not is_primary():
+        return None
+    try:
+        move = valve_store().moves().get(str(message_id).lower())
+    except OSError:
+        return None
+    if not move or (move.get("action") in (spamvalve.JUNK, spamvalve.LEAVE)) != (mailbox == folder_role("junk")):
+        return None
+    return {"action": move.get("action"), "reason": str(move.get("reason") or "")}
+
+
+async def api_valve_seen(request: Request):
+    """The owner opened the junk folder: its badge starts counting anew."""
+    try:
+        if valve_on():
+            valve_store().looked(time.time())
+    except OSError as e:
+        log("valve: not saved that the junk folder was looked at", err_text(e))
+    return JSONResponse({"ok": True})
+
+
+def valve_learn(metas: list[dict], source: str, target: str, moved: set[str]):
+    """What a move by hand teaches. Into junk: these mails are never taken back out (as before), and the next mail
+    of their senders goes there unread. Out of junk (not into Deleted Items): their senders are trusted from then
+    on, and these mails are not judged again. Only the senders of mails that did move (their UIDs in moved) are
+    learned, and only with the valve at work; colleagues, machines and we ourselves are never blocked or trusted."""
+    junk = folder_role("junk")
+    if target == junk:
+        remember_junk([str(m["message_id"]) for m in metas if m.get("message_id")], "moved to junk by hand")
+    if not valve_on():
+        return
+    metas = [m for m in metas if str(m.get("email_id")) in moved]
+    mids = [str(m["message_id"]) for m in metas if m.get("message_id")]
+    senders = [a for a in (sender_address(m.get("sender") or "") for m in metas)
+               if a and not autoreply.email_skip_reason(a, "")]
+    try:
+        if target == junk:
+            valve_store().block(senders)
+        elif source == junk and target != folder_role("trash"):
+            valve_store().trust(senders)
+            for mid in mids:
+                valve_store().note(mid, spamvalve.KEEP)
+    except OSError as e:
+        log("valve: a move by hand not remembered", err_text(e))
 
 
 # ---------------------------------------------------------------- desktop notifications
@@ -1726,6 +2263,7 @@ NOTIFY_ENABLED = os.environ.get("KOL_NOTIFY", "1") != "0"
 NOTIFY_SEEN = DATA / "notify_seen.json"   # INBOX Message-IDs already announced (or there before the first run)
 NOTIFY_SEEN_MAX = 3000
 NOTIFY_WAIT = 75          # seconds to wait for the translation before showing the original instead
+NOTIFY_POLL = 1           # seconds between two looks for it (one local read); it was 5, half of that lost per notice
 NOTIFY_BURST = 4          # more new mails than this at once (e.g. after the PC slept) get one summary notice
 notify_seen: dict[str, list[str]] = {}  # per mailbox, loaded on its first scan
 notify_pending: set[str] = set()  # being announced right now; only a delivered notice marks a mail as seen
@@ -1823,7 +2361,7 @@ async def announce(meta: dict):
         deadline = time.monotonic() + (NOTIFY_WAIT if is_primary() else 0)
         row = cache.get(mid)
         while (not row or row["status"] == "pending" or mid in queued) and time.monotonic() < deadline:
-            await asyncio.sleep(5)
+            await asyncio.sleep(NOTIFY_POLL)
             row = cache.get(mid)
         subject = meta.get("subject") or "（无主题）"
         line1, line2 = subject, ""
@@ -5049,6 +5587,7 @@ async def api_status(request: Request):
                          "telegram_error": tg_error,
                          "mail_error": mail.error or bg.error, "autoreply": autoreply_info,
                          "unread_counts": unread_counts(), "flagged_count": flagged_count(),
+                         "valve_on": valve_on(), "valve_unseen": valve_unseen(),
                          "account": current_account.get(), "accounts": accounts_summary(),
                          "password_needed": password_needed()})
 
@@ -5263,6 +5802,8 @@ def forget_account(name: str):
                 index_resynced, flagged, flag_tried, flag_marks, box_gen):
         per.forget(name)
     notify_seen.pop(name, None)
+    for kept in (scan_looked, scan_marks, scan_errors, junk_looked, valve_tries, valve_verdicts, valve_pending):
+        kept.pop(name, None)  # signed in again, its first scan is a full one
     password_rejected.pop(name, None)
     password_checked.pop(name, None)
     with contextlib.suppress(OSError):
@@ -6034,23 +6575,23 @@ def conversation_ids(box: str, ids: list[str]) -> list[str]:
     return list(dict.fromkeys(ids + [i for i, meta in known.items() if thread_key(meta) in keys]))
 
 
-async def junked_by_hand(source: str, ids: list[str]) -> list[str]:
-    """The Message-IDs of mails the owner is moving into junk, so the junk rescue never takes them back out. A mail
-    no cache knows (moved from a search, say) has its headers read; one that cannot be read is left out."""
+async def moved_by_hand(source: str, ids: list[str]) -> list[dict]:
+    """Message-ID and sender of the mails the owner is moving into or out of junk, for valve_learn. A mail no cache
+    knows (moved from a search, say) has its headers read; one that cannot be read is left out."""
     found, unknown = [], []
     for uid in ids:
         meta = known_meta(source, uid)
         if meta and meta.get("message_id"):
-            found.append(meta["message_id"])
+            found.append(meta)
         else:
             unknown.append(uid)
     if unknown:
         try:
             data = await mail.call("get_emails_content", mailbox=source, email_ids=unknown, mark_as_read=False,
                                    max_body_length=1)
-            found += [c["message_id"] for c in data.get("emails") or [] if c.get("message_id")]
+            found += [c for c in data.get("emails") or [] if c.get("message_id")]
         except MailError as e:
-            log("junk rescue: Message-IDs of a move to junk not read", source, err_text(e))
+            log("valve: mails of a move by hand not read", source, err_text(e))
     return found
 
 
@@ -6070,7 +6611,8 @@ async def api_move(request: Request):
         ids = conversation_ids(source, ids)
     if len(ids) > MOVE_MAX:
         return bad(f"一次最多移动 {MOVE_MAX} 封")
-    hand_junked = await junked_by_hand(source, ids) if target == folder_role("junk") else []
+    junk = folder_role("junk")
+    by_hand = await moved_by_hand(source, ids) if junk and junk in (source, target) else []
     moved, problem = 0, ""
     for start in range(0, len(ids), FOLDER_MOVE_BATCH):
         batch = ids[start:start + FOLDER_MOVE_BATCH]
@@ -6081,8 +6623,8 @@ async def api_move(request: Request):
             problem = result[:200]
             break
         moved += len(batch)
-    if hand_junked:  # a part not moved stays where it was: remembering it costs nothing
-        remember_junk(hand_junked, "moved to junk by hand")
+    if by_hand:
+        valve_learn(by_hand, source, target, set(ids[:moved]))
     for key in [k for k in lists if k[0] == target]:
         lists.pop(key, None)
     spawn(prefetch_after_folder_change(target), "move refresh")
@@ -6190,6 +6732,7 @@ def list_row(mailbox: str, e: dict, rows: dict[str, dict]) -> dict:
         "date": shown_date(e), "skippable": is_skippable(e), "status": t.get("status"),
         "language": t.get("language"), "subject_zh": t.get("subject_zh"), "thread_key": thread_key(e),
         "unread": is_unread(mailbox, e["email_id"]), "flagged": is_flagged(mailbox, e["email_id"]),
+        "valve": valve_tag(mailbox, e.get("message_id")),
     }
 
 
@@ -10808,6 +11351,7 @@ routes = [
     Route("/api/folders/move", api_folder_move, methods=["POST"]),
     Route("/api/folders/delete", api_folder_delete, methods=["POST"]),
     Route("/api/move", api_move, methods=["POST"]),
+    Route("/api/valve/seen", api_valve_seen, methods=["POST"]),
     Route("/api/flag", api_flag, methods=["POST"]),
     Route("/api/flagged", api_flagged),
     Route("/api/messages", api_messages),

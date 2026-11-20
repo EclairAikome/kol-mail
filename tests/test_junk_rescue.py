@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import app  # noqa: E402
 import junkrescue  # noqa: E402
+import spamvalve  # noqa: E402
 
 JUNK = "垃圾邮件"
 SENT = [{"email_id": "50", "sender": "me@example.com", "recipients": ["Ana <ana@example.com>"],
@@ -50,12 +51,21 @@ class Server(app.MailBridge):
         raise AssertionError(tool)
 
 
-@pytest.fixture
-def mailbox(tmp_path, monkeypatch):
+@pytest.fixture(params=[True, False], ids=["with the judge", "KOL_VALVE=0"])
+def mailbox(tmp_path, monkeypatch, request):
+    """Every test here runs twice: what the rescue did before there was a judge it still does with one that sees
+    nothing of a KOL in a mail, and exactly so with the judge switched off."""
     monkeypatch.setattr(app, "DATA", tmp_path)
     monkeypatch.setattr(app, "junk_memories", {})
     monkeypatch.setattr(app, "junk_left", {})
     monkeypatch.setattr(app, "junk_tries", {})
+    for name in ("valve_stores", "valve_tries", "valve_verdicts", "ours_cache", "junk_asks"):
+        monkeypatch.setattr(app, name, {})
+    monkeypatch.setattr(app, "VALVE_ENABLED", request.param)
+
+    async def judge(relation, content):  # the model sees nothing of a KOL in these mails (tests/test_spam_valve.py)
+        return spamvalve.OTHER, ""
+    monkeypatch.setattr(app, "judge_mail", judge)
     monkeypatch.setattr(app, "folder_role", lambda role: {"junk": JUNK, "sent": "已发送"}.get(role, ""))
     monkeypatch.setattr(app, "sent_box", lambda: "已发送")
     sent = {"metas": SENT}
